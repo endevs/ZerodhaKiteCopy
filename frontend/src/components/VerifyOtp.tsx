@@ -7,11 +7,33 @@ const VerifyOtp: React.FC = () => {
   const [message, setMessage] = useState<{ type: string; text: string } | null>(null);
   const navigate = useNavigate();
   const location = useLocation();
-  const email = location.state?.email || '';
+  const queryEmail = React.useMemo(() => {
+    try {
+      const params = new URLSearchParams(location.search);
+      return params.get('email') || '';
+    } catch {
+      return '';
+    }
+  }, [location.search]);
+  const stateEmail = location.state?.email || '';
+  const initialEmail = stateEmail || queryEmail;
+  const [email, setEmail] = useState<string>(initialEmail);
+  const isEmailReadOnly = Boolean(stateEmail || queryEmail);
+
+  React.useEffect(() => {
+    if (initialEmail) {
+      setEmail(initialEmail);
+    }
+  }, [initialEmail]);
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
     setMessage(null);
+
+    if (!email.trim()) {
+      setMessage({ type: 'danger', text: 'Email is required to verify OTP.' });
+      return;
+    }
 
     try {
       const response = await fetch('http://localhost:8000/api/verify_otp', {
@@ -103,7 +125,9 @@ const VerifyOtp: React.FC = () => {
                     id="email"
                     name="email"
                     value={email}
-                    readOnly
+                    onChange={(e) => setEmail(e.target.value)}
+                    required
+                    readOnly={isEmailReadOnly}
                   />
                 </div>
                 <div className="form-group mb-3">

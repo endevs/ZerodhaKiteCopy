@@ -43,9 +43,11 @@ def create_tables():
             expiry_type TEXT NOT NULL,
             ema_period INTEGER,
             status TEXT NOT NULL DEFAULT 'saved',
+            visibility TEXT NOT NULL DEFAULT 'private',
             indicators TEXT,
             entry_rules TEXT,
             exit_rules TEXT,
+            blueprint TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users (id)

@@ -1940,7 +1940,7 @@ def api_signup():
         return jsonify({
             'status': 'success',
             'message': 'Signup successful! OTP sent to your email. Please verify.',
-            'redirect': '/login'
+            'redirect': f'/verify-otp?email={email}'
         })
     except Exception as e:
         logging.error(f"Error in api_signup: {e}")
@@ -2312,6 +2312,8 @@ def save_strategy():
         strike_price = data.get('strike-price') or data.get('strike_price')
         expiry_type = data.get('expiry-type') or data.get('expiry_type')
         ema_period = data.get('ema-period') or data.get('ema_period')
+        visibility = data.get('visibility')
+        blueprint = data.get('blueprint')
         # Enhanced strategy data (stored as JSON strings)
         indicators = data.get('indicators', [])
         entry_rules = data.get('entry_rules', [])
@@ -2338,6 +2340,8 @@ def save_strategy():
         strike_price = request.form.get('strike-price')
         expiry_type = request.form.get('expiry-type')
         ema_period = request.form.get('ema-period')
+        visibility = request.form.get('visibility')
+        blueprint = request.form.get('blueprint')
 
     conn = get_db_connection()
     try:
@@ -2355,6 +2359,26 @@ def save_strategy():
             indicators_json = json.dumps(indicators) if indicators else None
             entry_rules_json = json.dumps(entry_rules) if entry_rules else None
             exit_rules_json = json.dumps(exit_rules) if exit_rules else None
+        else:
+            indicators_raw = request.form.get('indicators')
+            entry_rules_raw = request.form.get('entry_rules')
+            exit_rules_raw = request.form.get('exit_rules')
+            if indicators_raw:
+                indicators_json = indicators_raw
+            if entry_rules_raw:
+                entry_rules_json = entry_rules_raw
+            if exit_rules_raw:
+                exit_rules_json = exit_rules_raw
+
+        visibility_value = (visibility or 'private').strip().lower()
+        if visibility_value not in ('private', 'public'):
+            visibility_value = 'private'
+
+        blueprint_text = None
+        if blueprint is not None:
+            blueprint_text = blueprint.strip() if isinstance(blueprint, str) else str(blueprint)
+            if blueprint_text == '':
+                blueprint_text = None
         
         if strategy_id:
             # Update existing strategy
@@ -2362,11 +2386,13 @@ def save_strategy():
                 '''UPDATE strategies SET strategy_name = ?, strategy_type = ?, instrument = ?, candle_time = ?, 
                    start_time = ?, end_time = ?, stop_loss = ?, target_profit = ?, total_lot = ?, 
                    trailing_stop_loss = ?, segment = ?, trade_type = ?, strike_price = ?, expiry_type = ?, 
-                   ema_period = ?, indicators = ?, entry_rules = ?, exit_rules = ?, updated_at = CURRENT_TIMESTAMP 
+                   ema_period = ?, visibility = ?, indicators = ?, entry_rules = ?, exit_rules = ?, blueprint = ?, 
+                   updated_at = CURRENT_TIMESTAMP 
                    WHERE id = ? AND user_id = ?''',
                 (strategy_name_input, strategy_type, instrument, candle_time, execution_start, execution_end, 
                  stop_loss, target_profit, total_lot, trailing_stop_loss, segment, trade_type, strike_price, 
-                 expiry_type, ema_period, indicators_json, entry_rules_json, exit_rules_json, strategy_id, user_id)
+                 expiry_type, ema_period, visibility_value, indicators_json, entry_rules_json, exit_rules_json, 
+                 blueprint_text, strategy_id, user_id)
             )
             message = 'Strategy updated successfully!'
         else:
@@ -2374,11 +2400,12 @@ def save_strategy():
             conn.execute(
                 '''INSERT INTO strategies (user_id, strategy_name, strategy_type, instrument, candle_time, start_time, 
                    end_time, stop_loss, target_profit, total_lot, trailing_stop_loss, segment, trade_type, 
-                   strike_price, expiry_type, ema_period, indicators, entry_rules, exit_rules) 
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                   strike_price, expiry_type, ema_period, visibility, indicators, entry_rules, exit_rules, blueprint) 
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                 (user_id, strategy_name_input, strategy_type, instrument, candle_time, execution_start, 
                  execution_end, stop_loss, target_profit, total_lot, trailing_stop_loss, segment, trade_type, 
-                 strike_price, expiry_type, ema_period, indicators_json, entry_rules_json, exit_rules_json)
+                 strike_price, expiry_type, ema_period, visibility_value, indicators_json, entry_rules_json, 
+                 exit_rules_json, blueprint_text)
             )
             message = 'Strategy saved successfully!'
         conn.commit()
@@ -2649,11 +2676,27 @@ def api_get_strategies():
         return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
 
     conn = get_db_connection()
-    strategies = conn.execute('SELECT * FROM strategies WHERE user_id = ?', (session['user_id'],)).fetchall()
+    user_id = session['user_id']
+    strategies = conn.execute(
+        '''
+        SELECT 
+            s.*,
+            CASE WHEN s.user_id = ? THEN 1 ELSE 0 END AS can_edit
+        FROM strategies s
+        WHERE s.user_id = ? OR s.visibility = 'public'
+        ORDER BY can_edit DESC, datetime(s.updated_at) DESC
+        ''',
+        (user_id, user_id)
+    ).fetchall()
     conn.close()
 
     # Convert Row objects to dictionaries for JSON serialization
-    strategies_list = [dict(s) for s in strategies]
+    strategies_list = []
+    for row in strategies:
+        strategy_dict = dict(row)
+        strategy_dict['can_edit'] = bool(strategy_dict.get('can_edit', 0))
+        strategies_list.append(strategy_dict)
+
     return jsonify({'status': 'success', 'strategies': strategies_list})
 
 

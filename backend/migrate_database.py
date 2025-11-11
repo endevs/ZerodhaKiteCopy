@@ -31,6 +31,17 @@ def migrate_strategies_table():
             logging.info("Adding 'exit_rules' column to strategies table")
             cursor.execute("ALTER TABLE strategies ADD COLUMN exit_rules TEXT")
         
+        # Add visibility column if it doesn't exist
+        if 'visibility' not in columns:
+            logging.info("Adding 'visibility' column to strategies table")
+            cursor.execute("ALTER TABLE strategies ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'")
+            cursor.execute("UPDATE strategies SET visibility = 'private' WHERE visibility IS NULL")
+        
+        # Add blueprint column if it doesn't exist
+        if 'blueprint' not in columns:
+            logging.info("Adding 'blueprint' column to strategies table")
+            cursor.execute("ALTER TABLE strategies ADD COLUMN blueprint TEXT")
+        
         # Add created_at column if it doesn't exist
         if 'created_at' not in columns:
             logging.info("Adding 'created_at' column to strategies table")
@@ -48,7 +59,7 @@ def migrate_strategies_table():
         conn.commit()
         logging.info("Database migration completed successfully")
         print("SUCCESS: Database migration completed successfully!")
-        print("   Added columns: indicators, entry_rules, exit_rules, created_at, updated_at")
+        print("   Added columns: indicators, entry_rules, exit_rules, visibility, blueprint, created_at, updated_at")
         
     except Exception as e:
         conn.rollback()

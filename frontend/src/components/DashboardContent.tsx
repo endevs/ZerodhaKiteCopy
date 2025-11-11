@@ -7,6 +7,55 @@ import React, {
 } from 'react';
 import EnhancedAdvancedStrategyBuilder from './EnhancedAdvancedStrategyBuilder';
 
+type VisibilityOption = 'private' | 'public';
+
+const normalizeVisibility = (value?: string | null): VisibilityOption =>
+  value && value.toLowerCase() === 'public' ? 'public' : 'private';
+
+const toDate = (raw?: string | null): Date | null => {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const hasT = trimmed.includes('T');
+  const base = hasT ? trimmed : trimmed.replace(' ', 'T');
+  const hasTimezone = /([zZ]|[+\-]\d{2}:\d{2})$/.test(base);
+  const iso = hasTimezone ? base : `${base}Z`;
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+
+const formatDateTime = (raw?: string | null): string => {
+  const date = toDate(raw);
+  if (!date) return 'N/A';
+  return date.toLocaleString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+};
+
+const parseJsonField = <T,>(raw: unknown): T | null => {
+  if (raw == null) return null;
+  if (typeof raw === 'string') {
+    if (!raw.trim()) return null;
+    try {
+      return JSON.parse(raw) as T;
+    } catch (error) {
+      console.warn('Failed to parse JSON field:', error);
+      return null;
+    }
+  }
+  if (typeof raw === 'object') {
+    return raw as T;
+  }
+  return null;
+};
+
+const visibilityBadgeClass = (visibility: VisibilityOption): string =>
+  visibility === 'public' ? 'bg-info text-dark' : 'bg-dark';
+
 interface Strategy {
   id: string;
   strategy_name: string;
@@ -27,6 +76,12 @@ interface Strategy {
   indicators?: string;
   entry_rules?: string;
   exit_rules?: string;
+  visibility?: string;
+  blueprint?: string;
+  created_at?: string;
+  updated_at?: string;
+  can_edit?: boolean;
+  user_id?: number;
 }
 
 interface StrategyConfigurationProps {
@@ -34,6 +89,8 @@ interface StrategyConfigurationProps {
   editingStrategy: Strategy | null;
   isOpen: boolean;
   onToggle: (open: boolean) => void;
+  incomingBlueprint: string | null;
+  onBlueprintAccepted: () => void;
 }
 
 interface SavedStrategiesProps {
@@ -69,38 +126,48 @@ const StrategyConfiguration: React.FC<StrategyConfigurationProps> = ({
   editingStrategy,
   isOpen,
   onToggle,
+  incomingBlueprint,
+  onBlueprintAccepted,
 }) => (
-  <div className="accordion-item">
-    <h2 className="accordion-header" id="dashboard-builder-heading">
-      <button
-        className={`accordion-button ${isOpen ? '' : 'collapsed'}`}
-        type="button"
-        onClick={() => onToggle(!isOpen)}
-        aria-expanded={isOpen}
-        aria-controls="dashboard-builder"
-      >
-        Strategy Builder
-      </button>
-    </h2>
-    <div
-      id="dashboard-builder"
-      className={`accordion-collapse collapse ${isOpen ? 'show' : ''}`}
-      aria-labelledby="dashboard-builder-heading"
-      data-bs-parent="#dashboardAccordion"
-    >
-      <div className="accordion-body">
-        <EnhancedAdvancedStrategyBuilder
-          onStrategySaved={onStrategySaved}
-          editingStrategy={editingStrategy}
-          isOpen={isOpen}
-          onToggle={onToggle}
-        />
-      </div>
-    </div>
+  <div className="mb-4" id="dashboard-builder">
+    <EnhancedAdvancedStrategyBuilder
+      onStrategySaved={onStrategySaved}
+      editingStrategy={editingStrategy}
+      isOpen={isOpen}
+      onToggle={onToggle}
+      incomingBlueprint={incomingBlueprint}
+      onBlueprintAccepted={onBlueprintAccepted}
+    />
   </div>
 );
 
-const StrategyInfoContent: React.FC<{ strategy: Strategy }> = ({ strategy }) => {
+const REQUIRED_BLUEPRINT_SECTIONS = ['STRATEGY', 'DESCRIPTION', 'EVALUATION', 'RULE', 'ENTRY', 'EXIT'];
+
+interface StrategyInfoContentProps {
+  strategy: Strategy;
+  onStrategyUpdated: (updatedStrategy: Strategy) => void;
+}
+
+const validateBlueprintFormat = (strategyText: string) => {
+  const upperText = strategyText.toUpperCase();
+  const missingSections = REQUIRED_BLUEPRINT_SECTIONS.filter((section) => !upperText.includes(section));
+  const warnings: string[] = [];
+  if (!upperText.includes('WHEN') && !upperText.includes('TRIGGER')) {
+    warnings.push('No conditions found (WHEN/TRIGGER).');
+  }
+  return {
+    isValid: missingSections.length === 0,
+    missingSections,
+    warnings,
+  };
+};
+
+const extractStrategyName = (strategyText: string): string | null => {
+  const match = strategyText.match(/STRATEGY\s+"([^"]+)"/i);
+  return match ? match[1].trim() : null;
+};
+
+const StrategyInfoContent: React.FC<StrategyInfoContentProps> = ({ strategy, onStrategyUpdated }) => {
   const parseJson = (raw?: string) => {
     if (!raw) return [];
     try {
@@ -128,6 +195,131 @@ const StrategyInfoContent: React.FC<{ strategy: Strategy }> = ({ strategy }) => 
     }
   }, [strategy.strategy_type]);
 
+  const visibility = useMemo(
+    () => normalizeVisibility(strategy.visibility),
+    [strategy.visibility],
+  );
+  const lastEdited = useMemo(
+    () => formatDateTime(strategy.updated_at),
+    [strategy.updated_at],
+  );
+  const createdAt = useMemo(
+    () => formatDateTime(strategy.created_at),
+    [strategy.created_at],
+  );
+  const canEdit = strategy.can_edit !== false;
+
+  const [isEditingBlueprint, setIsEditingBlueprint] = useState(false);
+  const [blueprintDraft, setBlueprintDraft] = useState(strategy.blueprint || '');
+  const [validationErrors, setValidationErrors] = useState<string[]>([]);
+  const [validationWarnings, setValidationWarnings] = useState<string[]>([]);
+  const [savingBlueprint, setSavingBlueprint] = useState(false);
+  const [saveFeedback, setSaveFeedback] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setBlueprintDraft(strategy.blueprint || '');
+    setIsEditingBlueprint(false);
+    setValidationErrors([]);
+    setValidationWarnings([]);
+    setSavingBlueprint(false);
+    setSaveFeedback(null);
+    setSaveError(null);
+  }, [strategy]);
+
+  const handleStartEditing = () => {
+    setIsEditingBlueprint(true);
+    setSaveFeedback(null);
+    setSaveError(null);
+  };
+
+  const handleCancelEditing = () => {
+    setBlueprintDraft(strategy.blueprint || '');
+    setIsEditingBlueprint(false);
+    setValidationErrors([]);
+    setValidationWarnings([]);
+    setSaveFeedback(null);
+    setSaveError(null);
+  };
+
+  const handleSaveBlueprint = async () => {
+    const trimmedBlueprint = blueprintDraft.trim();
+    if (!trimmedBlueprint) {
+      setValidationErrors(['Blueprint cannot be empty.']);
+      setValidationWarnings([]);
+      return;
+    }
+
+    const validation = validateBlueprintFormat(trimmedBlueprint);
+    setValidationErrors(validation.missingSections);
+    setValidationWarnings(validation.warnings);
+    if (!validation.isValid) {
+      return;
+    }
+
+    const updatedStrategyName = extractStrategyName(trimmedBlueprint) || strategy.strategy_name;
+
+    const indicatorsPayload = parseJsonField<Record<string, any>[]>(strategy.indicators) || [];
+    const entryRulesPayload = parseJsonField<Record<string, any>[]>(strategy.entry_rules) || [];
+    const exitRulesPayload = parseJsonField<Record<string, any>[]>(strategy.exit_rules) || [];
+
+    const payload = {
+      strategy_id: strategy.id,
+      strategy: strategy.strategy_type || 'custom',
+      'strategy-name': updatedStrategyName || strategy.strategy_name,
+      instrument: strategy.instrument || 'NIFTY',
+      segment: strategy.segment || 'Option',
+      visibility,
+      'candle-time': strategy.candle_time || '5',
+      'execution-start': strategy.start_time || '09:15',
+      'execution-end': strategy.end_time || '15:00',
+      'stop-loss': strategy.stop_loss ?? 0,
+      'target-profit': strategy.target_profit ?? 0,
+      'trailing-stop-loss': strategy.trailing_stop_loss ?? 0,
+      'total-lot': strategy.total_lot ?? 1,
+      'trade-type': strategy.trade_type || 'Buy',
+      'strike-price': strategy.strike_price || 'ATM',
+      'expiry-type': strategy.expiry_type || 'Weekly',
+      indicators: indicatorsPayload,
+      entry_rules: entryRulesPayload,
+      exit_rules: exitRulesPayload,
+      blueprint: trimmedBlueprint,
+    };
+
+    setSavingBlueprint(true);
+    setSaveFeedback(null);
+    setSaveError(null);
+    try {
+      const response = await fetch('http://localhost:8000/api/strategy/save', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        credentials: 'include',
+        body: JSON.stringify(payload),
+      });
+
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(typeof data === 'string' ? data : data.message || 'Failed to save blueprint');
+      }
+
+      const updatedStrategy: Strategy = {
+        ...strategy,
+        blueprint: trimmedBlueprint,
+        strategy_name: updatedStrategyName || strategy.strategy_name,
+        updated_at: new Date().toISOString(),
+      };
+      onStrategyUpdated(updatedStrategy);
+      setSaveFeedback(data.message || 'Blueprint updated successfully.');
+      setIsEditingBlueprint(false);
+    } catch (error: any) {
+      setSaveError(error.message || 'Failed to update blueprint. Please try again.');
+    } finally {
+      setSavingBlueprint(false);
+    }
+  };
+
   return (
     <div>
       <div className="row g-3 mb-3">
@@ -151,6 +343,18 @@ const StrategyInfoContent: React.FC<{ strategy: Strategy }> = ({ strategy }) => 
           <span className={`badge ${strategy.status === 'running' ? 'bg-success' : 'bg-secondary'}`}>
             {strategy.status || 'saved'}
           </span>
+        </div>
+        <div className="col-md-4">
+          <strong>Visibility:</strong>{' '}
+          <span className={`badge ${visibilityBadgeClass(visibility)} ms-2`}>
+            {visibility === 'public' ? 'Public' : 'Private'}
+          </span>
+        </div>
+        <div className="col-md-4">
+          <strong>Last Edited:</strong> {lastEdited}
+        </div>
+        <div className="col-md-4">
+          <strong>Created:</strong> {createdAt}
         </div>
       </div>
 
@@ -262,6 +466,86 @@ const StrategyInfoContent: React.FC<{ strategy: Strategy }> = ({ strategy }) => 
           ))}
         </div>
       )}
+
+      <div className="mt-4">
+        <div className="d-flex justify-content-between align-items-center mb-2">
+          <h6 className="text-primary mb-0">
+            <i className="bi bi-code-square me-2" />
+            Strategy Blueprint
+          </h6>
+          {canEdit && (
+            <div className="btn-group btn-group-sm">
+              {isEditingBlueprint ? (
+                <button className="btn btn-outline-secondary" onClick={handleCancelEditing} disabled={savingBlueprint}>
+                  Cancel
+                </button>
+              ) : (
+                <button className="btn btn-outline-primary" onClick={handleStartEditing}>
+                  {strategy.blueprint ? 'Edit Blueprint' : 'Add Blueprint'}
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+
+        {saveFeedback && (
+          <div className="alert alert-success py-2">{saveFeedback}</div>
+        )}
+        {saveError && (
+          <div className="alert alert-danger py-2">{saveError}</div>
+        )}
+        {validationErrors.length > 0 && (
+          <div className="alert alert-warning py-2">
+            <strong>Missing Sections:</strong> {validationErrors.join(', ')}
+          </div>
+        )}
+        {validationWarnings.length > 0 && (
+          <div className="alert alert-info py-2">
+            <strong>Warnings:</strong>
+            <ul className="mb-0 ps-3">
+              {validationWarnings.map((warning, idx) => (
+                <li key={idx}>{warning}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {isEditingBlueprint && canEdit ? (
+          <div>
+            <textarea
+              className="form-control bg-light"
+              style={{ fontFamily: 'monospace', fontSize: '0.85rem' }}
+              rows={12}
+              value={blueprintDraft}
+              onChange={(event) => setBlueprintDraft(event.target.value)}
+              placeholder='STRATEGY "Name" VERSION 1.0 ...'
+            />
+            <div className="d-flex justify-content-end mt-2">
+              <button
+                className="btn btn-primary"
+                onClick={handleSaveBlueprint}
+                disabled={savingBlueprint}
+              >
+                {savingBlueprint && (
+                  <span className="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true" />
+                )}
+                Save Blueprint
+              </button>
+            </div>
+          </div>
+        ) : strategy.blueprint ? (
+          <pre
+            className="bg-light border rounded p-3"
+            style={{ whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: '0.85rem' }}
+          >
+            {strategy.blueprint}
+          </pre>
+        ) : (
+          <div className="alert alert-secondary py-2">
+            No blueprint saved yet. {canEdit ? 'Click "Add Blueprint" to paste a formatted strategy blueprint.' : ''}
+          </div>
+        )}
+      </div>
     </div>
   );
 };
@@ -275,6 +559,10 @@ const SavedStrategies: React.FC<SavedStrategiesProps> = ({
 }) => {
   const [strategies, setStrategies] = useState<Strategy[]>([]);
   const [selectedStrategy, setSelectedStrategy] = useState<Strategy | null>(null);
+  const formatTimestamp = useCallback(
+    (value?: string | null) => formatDateTime(value),
+    [],
+  );
 
   const fetchStrategies = useCallback(async () => {
     try {
@@ -363,121 +651,143 @@ const SavedStrategies: React.FC<SavedStrategiesProps> = ({
                   <th>Lots</th>
                   <th>SL / TP</th>
                   <th>Status</th>
+                  <th>Visibility</th>
                   <th className="text-end">Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {strategies.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="text-center text-muted py-4">
+                    <td colSpan={8} className="text-center text-muted py-4">
                       <i className="bi bi-inbox fs-1 d-block mb-2" />
                       No strategies saved yet. Build one using the Strategy Builder.
                     </td>
                   </tr>
                 ) : (
-                  strategies.map((strategy) => (
-                    <tr key={strategy.id}>
-                      <td>
-                        <strong>{strategy.strategy_name || 'Unnamed Strategy'}</strong>
-                        <button
-                          type="button"
-                          className="btn btn-link btn-sm ms-2 p-0"
-                          title="View details"
-                          onClick={() => setSelectedStrategy(strategy)}
-                        >
-                          <i className="bi bi-info-circle" />
-                        </button>
-                      </td>
-                      <td>
-                        <span className="badge bg-secondary">
-                          {strategy.strategy_type || 'custom'}
-                        </span>
-                      </td>
-                      <td>{strategy.instrument || 'N/A'}</td>
-                      <td>{strategy.total_lot || 1}</td>
-                      <td>
-                        <small>
-                          SL {strategy.stop_loss ?? 0}% / TP {strategy.target_profit ?? 0}%
-                        </small>
-                      </td>
-                      <td>
-                        <span
-                          className={`badge ${
-                            strategy.status === 'running'
-                              ? 'bg-success'
-                              : strategy.status === 'paused'
-                              ? 'bg-warning'
-                              : strategy.status === 'error'
-                              ? 'bg-danger'
-                              : strategy.status === 'sq_off'
-                              ? 'bg-info'
-                              : 'bg-secondary'
-                          }`}
-                        >
-                          {strategy.status || 'saved'}
-                        </span>
-                      </td>
-                      <td className="text-end">
-                        <div className="btn-group btn-group-sm" role="group">
+                  strategies.map((strategy) => {
+                    const canEdit = strategy.can_edit !== false;
+                    const visibility = normalizeVisibility(strategy.visibility);
+                    const lastEditedLabel = formatTimestamp(strategy.updated_at);
+
+                    return (
+                      <tr key={strategy.id}>
+                        <td>
+                          <strong>{strategy.strategy_name || 'Unnamed Strategy'}</strong>
                           <button
-                            className="btn btn-outline-primary"
-                            title="Live monitor"
-                            onClick={() => onViewLive(strategy.id)}
+                            type="button"
+                            className="btn btn-link btn-sm ms-2 p-0"
+                            title="View details"
+                            onClick={() => setSelectedStrategy(strategy)}
                           >
-                            <i className="bi bi-activity" />
+                            <i className="bi bi-info-circle" />
                           </button>
-                          <button
-                            className="btn btn-outline-info"
-                            title="Edit"
-                            onClick={() => onEditStrategy(strategy)}
+                          <div className="small text-muted">
+                            Last edited: {lastEditedLabel}
+                          </div>
+                        </td>
+                        <td>
+                          <span className="badge bg-secondary">
+                            {strategy.strategy_type || 'custom'}
+                          </span>
+                        </td>
+                        <td>{strategy.instrument || 'N/A'}</td>
+                        <td>{strategy.total_lot || 1}</td>
+                        <td>
+                          <small>
+                            SL {strategy.stop_loss ?? 0}% / TP {strategy.target_profit ?? 0}%
+                          </small>
+                        </td>
+                        <td>
+                          <span
+                            className={`badge ${
+                              strategy.status === 'running'
+                                ? 'bg-success'
+                                : strategy.status === 'paused'
+                                ? 'bg-warning'
+                                : strategy.status === 'error'
+                                ? 'bg-danger'
+                                : strategy.status === 'sq_off'
+                                ? 'bg-info'
+                                : 'bg-secondary'
+                            }`}
                           >
-                            <i className="bi bi-pencil" />
-                          </button>
-                          {(strategy.status === 'saved' ||
-                            strategy.status === 'paused' ||
-                            strategy.status === 'error' ||
-                            strategy.status === 'sq_off') && (
-                            <button
-                              className="btn btn-outline-success"
-                              title="Deploy"
-                              onClick={() =>
-                                handleAction(
-                                  `http://localhost:8000/api/strategy/deploy/${strategy.id}`,
-                                )
-                              }
-                            >
-                              <i className="bi bi-play-fill" />
-                            </button>
+                            {strategy.status || 'saved'}
+                          </span>
+                        </td>
+                        <td>
+                          <span className={`badge ${visibilityBadgeClass(visibility)}`}>
+                            {visibility === 'public' ? 'Public' : 'Private'}
+                          </span>
+                          {!canEdit && (
+                            <div className="small text-muted mt-1">Shared by another user</div>
                           )}
-                          {strategy.status === 'running' && (
-                            <button
-                              className="btn btn-outline-warning"
-                              title="Pause"
-                              onClick={() =>
-                                handleAction(
-                                  `http://localhost:8000/api/strategy/pause/${strategy.id}`,
-                                )
-                              }
-                            >
-                              <i className="bi bi-pause-fill" />
-                            </button>
+                        </td>
+                        <td className="text-end">
+                          {canEdit ? (
+                            <div className="btn-group btn-group-sm" role="group">
+                              <button
+                                className="btn btn-outline-primary"
+                                title="Live monitor"
+                                onClick={() => onViewLive(strategy.id)}
+                              >
+                                <i className="bi bi-activity" />
+                              </button>
+                              <button
+                                className="btn btn-outline-info"
+                                title="Edit"
+                                onClick={() => onEditStrategy(strategy)}
+                              >
+                                <i className="bi bi-pencil" />
+                              </button>
+                              {(strategy.status === 'saved' ||
+                                strategy.status === 'paused' ||
+                                strategy.status === 'error' ||
+                                strategy.status === 'sq_off') && (
+                                <button
+                                  className="btn btn-outline-success"
+                                  title="Deploy"
+                                  onClick={() =>
+                                    handleAction(
+                                      `http://localhost:8000/api/strategy/deploy/${strategy.id}`,
+                                    )
+                                  }
+                                >
+                                  <i className="bi bi-play-fill" />
+                                </button>
+                              )}
+                              {strategy.status === 'running' && (
+                                <button
+                                  className="btn btn-outline-warning"
+                                  title="Pause"
+                                  onClick={() =>
+                                    handleAction(
+                                      `http://localhost:8000/api/strategy/pause/${strategy.id}`,
+                                    )
+                                  }
+                                >
+                                  <i className="bi bi-pause-fill" />
+                                </button>
+                              )}
+                              <button
+                                className="btn btn-outline-danger"
+                                title="Delete"
+                                onClick={() =>
+                                  handleAction(
+                                    `http://localhost:8000/api/strategy/delete/${strategy.id}`,
+                                    'Delete this strategy permanently?',
+                                  )
+                                }
+                              >
+                                <i className="bi bi-trash" />
+                              </button>
+                            </div>
+                          ) : (
+                            <span className="badge bg-light text-muted">View only</span>
                           )}
-                          <button
-                            className="btn btn-outline-danger"
-                            title="Delete"
-                            onClick={() =>
-                              handleAction(
-                                `http://localhost:8000/api/strategy/delete/${strategy.id}`,
-                                'Delete this strategy permanently?',
-                              )
-                            }
-                          >
-                            <i className="bi bi-trash" />
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))
+                        </td>
+                      </tr>
+                    );
+                  })
                 )}
               </tbody>
             </table>
@@ -504,7 +814,13 @@ const SavedStrategies: React.FC<SavedStrategiesProps> = ({
                 />
               </div>
               <div className="modal-body">
-                <StrategyInfoContent strategy={selectedStrategy} />
+                <StrategyInfoContent
+                  strategy={selectedStrategy}
+                  onStrategyUpdated={(updated) => {
+                    setSelectedStrategy(updated);
+                    fetchStrategies();
+                  }}
+                />
               </div>
               <div className="modal-footer">
                 <button
@@ -675,7 +991,11 @@ const buildFlowNodes = (strategyText: string): FlowNode[] => {
   return nodes;
 };
 
-const AIEnabledStrategyChat: React.FC = () => {
+interface AIEnabledStrategyChatProps {
+  onSendToBuilder?: (blueprint: string) => void;
+}
+
+const AIEnabledStrategyChat: React.FC<AIEnabledStrategyChatProps> = ({ onSendToBuilder }) => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputValue, setInputValue] = useState('');
   const [loading, setLoading] = useState(false);
@@ -816,6 +1136,23 @@ const AIEnabledStrategyChat: React.FC = () => {
       setError('Failed to copy strategy to clipboard');
     }
   };
+
+  const handleSendToBuilder = useCallback(() => {
+    if (!latestStrategy || !onSendToBuilder) {
+      return;
+    }
+    onSendToBuilder(latestStrategy);
+    setLastSavedPath('Loaded in Strategy Builder');
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: `assistant-transfer-${Date.now()}`,
+        role: 'assistant',
+        content: 'Blueprint moved to the Strategy Builder. Review and save when ready.',
+        timestamp: new Date().toISOString(),
+      },
+    ]);
+  }, [latestStrategy, onSendToBuilder]);
 
   const handleKeyDown: React.KeyboardEventHandler<HTMLTextAreaElement> = (event) => {
     if (event.key === 'Enter' && !event.shiftKey) {
@@ -1001,6 +1338,15 @@ const AIEnabledStrategyChat: React.FC = () => {
                     <i className="bi bi-save me-2" />
                     Save
                   </button>
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={handleSendToBuilder}
+                    disabled={!latestStrategy || !onSendToBuilder}
+                  >
+                    <i className="bi bi-box-arrow-in-right me-2" />
+                    Send to Builder
+                  </button>
                 </div>
               </div>
               <div
@@ -1042,11 +1388,13 @@ const DashboardContent: React.FC<DashboardContentProps> = ({ onViewLiveStrategy 
   const [editingStrategy, setEditingStrategy] = useState<Strategy | null>(null);
   const [builderOpen, setBuilderOpen] = useState(true);
   const [savedOpen, setSavedOpen] = useState(true);
+  const [incomingBlueprint, setIncomingBlueprint] = useState<string | null>(null);
 
   const handleStrategySaved = () => {
     setRefreshStrategies((prev) => prev + 1);
     setEditingStrategy(null);
     setSavedOpen(true);
+    setIncomingBlueprint(null);
   };
 
   const handleEditStrategy = (strategy: Strategy) => {
@@ -1054,15 +1402,35 @@ const DashboardContent: React.FC<DashboardContentProps> = ({ onViewLiveStrategy 
     setBuilderOpen(true);
   };
 
+  const handleBlueprintFromAI = useCallback(
+    (blueprint: string) => {
+      const trimmed = blueprint?.trim();
+      if (!trimmed) {
+        return;
+      }
+      setEditingStrategy(null);
+      setBuilderOpen(true);
+      setIncomingBlueprint(trimmed);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    },
+    [],
+  );
+
+  const handleBlueprintAccepted = useCallback(() => {
+    setIncomingBlueprint(null);
+  }, []);
+
   return (
     <div className="pb-4" id="dashboard-content">
-      <AIEnabledStrategyChat />
+      <AIEnabledStrategyChat onSendToBuilder={handleBlueprintFromAI} />
       <div className="accordion mt-4" id="dashboardAccordion">
         <StrategyConfiguration
           onStrategySaved={handleStrategySaved}
           editingStrategy={editingStrategy}
           isOpen={builderOpen}
           onToggle={setBuilderOpen}
+          incomingBlueprint={incomingBlueprint}
+          onBlueprintAccepted={handleBlueprintAccepted}
         />
         <SavedStrategies
           onViewLive={onViewLiveStrategy}

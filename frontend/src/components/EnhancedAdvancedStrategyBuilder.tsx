@@ -1,4 +1,166 @@
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
+
+type VisibilityOption = 'private' | 'public';
+
+const normalizeVisibility = (value?: string | null): VisibilityOption =>
+  value && value.toLowerCase() === 'public' ? 'public' : 'private';
+
+const toDate = (raw?: string | null): Date | null => {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const hasT = trimmed.includes('T');
+  const base = hasT ? trimmed : trimmed.replace(' ', 'T');
+  const hasTimezone = /([zZ]|[+\-]\d{2}:\d{2})$/.test(base);
+  const iso = hasTimezone ? base : `${base}Z`;
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+
+const formatDateTime = (raw?: string | null): string => {
+  const date = toDate(raw);
+  if (!date) return 'N/A';
+  return date.toLocaleString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+};
+
+const parseJsonField = <T,>(raw: unknown): T | null => {
+  if (raw == null) return null;
+  if (typeof raw === 'string') {
+    if (!raw.trim()) return null;
+    try {
+      return JSON.parse(raw) as T;
+    } catch (error) {
+      console.warn('Failed to parse strategy builder field:', error);
+      return null;
+    }
+  }
+  if (typeof raw === 'object') {
+    return raw as T;
+  }
+  return null;
+};
+
+const visibilityBadgeClass = (visibility: VisibilityOption): string =>
+  visibility === 'public' ? 'bg-info text-dark' : 'bg-dark';
+
+interface ParsedBlueprintRule {
+  name: string;
+  lines: string[];
+}
+
+interface ParsedBlueprintData {
+  strategyName?: string;
+  entryRules: ParsedBlueprintRule[];
+  exitRules: ParsedBlueprintRule[];
+}
+
+const stripBullet = (line: string): string =>
+  line.replace(/^[•\-\*\d\.\)\(]+\s*/g, '').trim();
+
+const parseBlueprintSection = (blueprint: string, sectionLabel: string, nextSectionLabels: string[]): string => {
+  const upperText = blueprint.toUpperCase();
+  const sectionIndex = upperText.indexOf(sectionLabel);
+  if (sectionIndex === -1) {
+    return '';
+  }
+
+  const nextIndices = nextSectionLabels
+    .map((label) => upperText.indexOf(label, sectionIndex + sectionLabel.length))
+    .filter((idx) => idx !== -1);
+  const endIndex = nextIndices.length > 0 ? Math.min(...nextIndices) : blueprint.length;
+  return blueprint.slice(sectionIndex + sectionLabel.length, endIndex);
+};
+
+const parseBlueprintRules = (sectionText: string): ParsedBlueprintRule[] => {
+  if (!sectionText.trim()) {
+    return [];
+  }
+  const rules: ParsedBlueprintRule[] = [];
+  const ruleRegex = /RULE\s+"([^"]+)"([\s\S]*?)(?=\n\s*RULE\s+"|$)/gi;
+  let match: RegExpExecArray | null;
+
+  while ((match = ruleRegex.exec(sectionText)) !== null) {
+    const ruleName = match[1].trim();
+    const body = match[2] || '';
+    const lines = body
+      .split('\n')
+      .map((line) => stripBullet(line).trim())
+      .filter((line) => line.length > 0);
+    rules.push({
+      name: ruleName || 'Rule',
+      lines,
+    });
+  }
+
+  // If no explicit RULE blocks, treat entire section as a single rule
+  if (rules.length === 0) {
+    const fallbackLines = sectionText
+      .split('\n')
+      .map((line) => stripBullet(line).trim())
+      .filter((line) => line.length > 0);
+    if (fallbackLines.length > 0) {
+      rules.push({
+        name: 'Blueprint Rule',
+        lines: fallbackLines,
+      });
+    }
+  }
+
+  return rules;
+};
+
+const parseStrategyBlueprint = (blueprint: string): ParsedBlueprintData => {
+  if (!blueprint?.trim()) {
+    return {
+      strategyName: undefined,
+      entryRules: [],
+      exitRules: [],
+    };
+  }
+
+  const strategyNameMatch = blueprint.match(/STRATEGY\s+"([^"]+)"/i);
+  const strategyName = strategyNameMatch ? strategyNameMatch[1].trim() : undefined;
+
+  const entrySection = parseBlueprintSection(
+    blueprint,
+    'ENTRY SECTION',
+    ['EXIT SECTION', 'RULES SECTION', 'MANAGEMENT SECTION', 'NOTES SECTION'],
+  );
+  const exitSection = parseBlueprintSection(
+    blueprint,
+    'EXIT SECTION',
+    ['RULES SECTION', 'MANAGEMENT SECTION', 'NOTES SECTION'],
+  );
+
+  return {
+    strategyName,
+    entryRules: parseBlueprintRules(entrySection),
+    exitRules: parseBlueprintRules(exitSection),
+  };
+};
+
+const randomId = (prefix: string): string =>
+  `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+const convertParsedRules = (parsedRules: ParsedBlueprintRule[], type: 'entry' | 'exit'): EntryExitRule[] =>
+  parsedRules.map((rule) => ({
+    id: randomId(`${type}_rule`),
+    name: rule.name || `${type === 'entry' ? 'Entry' : 'Exit'} Rule`,
+    conditions: rule.lines.map((line, index) => ({
+      id: randomId(`${type}_condition`),
+      indicator: line,
+      operator: '>',
+      value: 0,
+      logic: index === 0 ? '' : 'AND',
+      conditionType: type,
+    })),
+  }));
 
 interface Indicator {
   id: string;
@@ -27,19 +189,24 @@ interface EnhancedAdvancedStrategyBuilderProps {
   editingStrategy?: any;
   isOpen?: boolean;
   onToggle?: (open: boolean) => void;
+  incomingBlueprint?: string | null;
+  onBlueprintAccepted?: () => void;
 }
 
 const EnhancedAdvancedStrategyBuilder: React.FC<EnhancedAdvancedStrategyBuilderProps> = ({ 
   onStrategySaved, 
   editingStrategy,
   isOpen = false,
-  onToggle
+  onToggle,
+  incomingBlueprint,
+  onBlueprintAccepted,
 }) => {
   // Basic Strategy Info
   const [strategyName, setStrategyName] = useState<string>(editingStrategy?.strategy_name || '');
   const [strategyType, setStrategyType] = useState<string>(editingStrategy?.strategy_type || 'custom');
   const [instrument, setInstrument] = useState<string>(editingStrategy?.instrument || 'NIFTY');
   const [segment, setSegment] = useState<string>(editingStrategy?.segment || 'Option');
+  const [visibility, setVisibility] = useState<VisibilityOption>(normalizeVisibility(editingStrategy?.visibility));
   
   // Timeframe & Execution
   const [candleTime, setCandleTime] = useState<string>(editingStrategy?.candle_time || '5');
@@ -58,6 +225,7 @@ const EnhancedAdvancedStrategyBuilder: React.FC<EnhancedAdvancedStrategyBuilderP
   const [expiryType, setExpiryType] = useState<string>(editingStrategy?.expiry_type || 'Weekly');
   
   // Advanced Features
+  const [blueprintText, setBlueprintText] = useState<string>(editingStrategy?.blueprint || '');
   const [paperTrade, setPaperTrade] = useState<boolean>(editingStrategy?.paper_trade || false);
   const [selectedIndicators, setSelectedIndicators] = useState<Indicator[]>([]);
   const [entryRules, setEntryRules] = useState<EntryExitRule[]>([]);
@@ -66,6 +234,7 @@ const EnhancedAdvancedStrategyBuilder: React.FC<EnhancedAdvancedStrategyBuilderP
   const [message, setMessage] = useState<{ type: string; text: string } | null>(null);
   const [showPreview, setShowPreview] = useState<boolean>(false);
   const [showStrategyInfo, setShowStrategyInfo] = useState<boolean>(false);
+  const lastEditedLabel = editingStrategy?.updated_at ? formatDateTime(editingStrategy.updated_at) : null;
 
   // Strategy type descriptions
   const strategyTypeInfo: { [key: string]: { name: string; description: string; howItWorks: string; bestFor: string; parameters: string } } = {
@@ -112,6 +281,7 @@ const EnhancedAdvancedStrategyBuilder: React.FC<EnhancedAdvancedStrategyBuilderP
       setStrategyType(editingStrategy.strategy_type || 'custom');
       setInstrument(editingStrategy.instrument || 'NIFTY');
       setSegment(editingStrategy.segment || 'Option');
+      setVisibility(normalizeVisibility(editingStrategy.visibility));
       setCandleTime(editingStrategy.candle_time || '5');
       setExecutionStart(editingStrategy.start_time || '09:15');
       setExecutionEnd(editingStrategy.end_time || '15:00');
@@ -122,7 +292,36 @@ const EnhancedAdvancedStrategyBuilder: React.FC<EnhancedAdvancedStrategyBuilderP
       setTradeType(editingStrategy.trade_type || 'Buy');
       setStrikePrice(editingStrategy.strike_price || 'ATM');
       setExpiryType(editingStrategy.expiry_type || 'Weekly');
-      setPaperTrade(editingStrategy.paper_trade || false);
+      setPaperTrade(Boolean(editingStrategy.paper_trade));
+      setBlueprintText(editingStrategy.blueprint || '');
+
+      const parsedIndicators = parseJsonField<Indicator[]>(editingStrategy.indicators);
+      setSelectedIndicators(parsedIndicators || []);
+      const parsedEntryRules = parseJsonField<EntryExitRule[]>(editingStrategy.entry_rules);
+      setEntryRules(parsedEntryRules || []);
+      const parsedExitRules = parseJsonField<EntryExitRule[]>(editingStrategy.exit_rules);
+      setExitRules(parsedExitRules || []);
+    } else {
+      setStrategyName('');
+      setStrategyType('custom');
+      setInstrument('NIFTY');
+      setSegment('Option');
+      setVisibility('private');
+      setCandleTime('5');
+      setExecutionStart('09:15');
+      setExecutionEnd('15:00');
+      setStopLoss(1);
+      setTargetProfit(2);
+      setTrailingStopLoss(0.5);
+      setTotalLot(1);
+      setTradeType('Buy');
+      setStrikePrice('ATM');
+      setExpiryType('Weekly');
+      setPaperTrade(false);
+      setSelectedIndicators([]);
+      setEntryRules([]);
+      setExitRules([]);
+      setBlueprintText('');
     }
   }, [editingStrategy]);
 
@@ -209,7 +408,9 @@ const EnhancedAdvancedStrategyBuilder: React.FC<EnhancedAdvancedStrategyBuilderP
       return;
     }
 
-    if (strategyType === 'custom' && entryRules.length === 0) {
+    const hasBlueprint = blueprintText.trim().length > 0;
+
+    if (strategyType === 'custom' && entryRules.length === 0 && !hasBlueprint) {
       setMessage({ type: 'warning', text: 'Please add at least one entry rule for custom strategies' });
       return;
     }
@@ -222,6 +423,7 @@ const EnhancedAdvancedStrategyBuilder: React.FC<EnhancedAdvancedStrategyBuilderP
       'strategy-name': strategyName,
       instrument,
       segment,
+      visibility,
       'candle-time': candleTime,
       'execution-start': executionStart,
       'execution-end': executionEnd,
@@ -232,6 +434,7 @@ const EnhancedAdvancedStrategyBuilder: React.FC<EnhancedAdvancedStrategyBuilderP
       'trade-type': tradeType,
       'strike-price': strikePrice,
       'expiry-type': expiryType,
+      blueprint: blueprintText,
       paper_trade: paperTrade,
       indicators: selectedIndicators,
       entry_rules: entryRules,
@@ -260,6 +463,8 @@ const EnhancedAdvancedStrategyBuilder: React.FC<EnhancedAdvancedStrategyBuilderP
             setSelectedIndicators([]);
             setEntryRules([]);
             setExitRules([]);
+            setVisibility('private');
+            setBlueprintText('');
             setActiveTab('basic');
           }
           // Scroll to Saved Strategies section
@@ -286,27 +491,62 @@ const EnhancedAdvancedStrategyBuilder: React.FC<EnhancedAdvancedStrategyBuilderP
     }
   }, [editingStrategy, onToggle]);
 
+  useEffect(() => {
+    const trimmedBlueprint = incomingBlueprint?.trim();
+    if (trimmedBlueprint) {
+      setBlueprintText(trimmedBlueprint);
+
+      const parsed = parseStrategyBlueprint(trimmedBlueprint);
+      if (parsed.strategyName) {
+        setStrategyName(parsed.strategyName);
+      }
+      setActiveTab('preview');
+      setShowPreview(true);
+      setMessage({
+        type: 'info',
+        text: 'Blueprint loaded from AI Strategy Assistant. Review and adjust before saving.',
+      });
+      onBlueprintAccepted?.();
+    }
+  }, [incomingBlueprint, onBlueprintAccepted]);
+
   return (
-    <div className="accordion-item">
-      <h2 className="accordion-header" id="headingOne">
-        <button
-          className={`accordion-button ${isOpen ? '' : 'collapsed'}`}
-          type="button"
-          onClick={() => onToggle && onToggle(!isOpen)}
-          aria-expanded={isOpen}
-          aria-controls="collapseOne"
-        >
-          <i className="bi bi-sliders me-2"></i>
-          <strong>{editingStrategy ? `Edit: ${editingStrategy.strategy_name}` : 'Advanced Strategy Builder'}</strong>
-        </button>
-      </h2>
-      <div 
-        id="collapseOne" 
-        className={`accordion-collapse collapse ${isOpen ? 'show' : ''}`} 
-        aria-labelledby="headingOne" 
-        data-bs-parent="#dashboardAccordion"
+    <div className="card border-0 shadow-sm mb-0">
+      <div className="card-header bg-white border-bottom">
+        <div className="d-flex justify-content-between align-items-center">
+          <h5 className="mb-0 d-flex align-items-center">
+            <i className="bi bi-sliders me-2"></i>
+            <strong>{editingStrategy ? `Edit Strategy — ${editingStrategy.strategy_name}` : 'Advanced Strategy Builder'}</strong>
+          </h5>
+          {onToggle && (
+            <button
+              className="btn btn-sm btn-outline-secondary d-md-none"
+              type="button"
+              onClick={() => onToggle(!isOpen)}
+              aria-expanded={isOpen}
+              aria-controls="advanced-strategy-card"
+            >
+              {isOpen ? 'Hide' : 'Show'}
+            </button>
+          )}
+        </div>
+      </div>
+      <div
+        id="advanced-strategy-card"
+        className={`collapse ${isOpen ? 'show' : ''}`}
       >
-        <div className="accordion-body" style={{ maxHeight: '80vh', overflowY: 'auto' }}>
+        <div className="card-body" style={{ maxHeight: '80vh', overflowY: 'auto' }}>
+          {editingStrategy && lastEditedLabel && (
+            <div className="alert alert-light border d-flex align-items-center justify-content-between">
+              <span className="text-muted mb-0">
+                <i className="bi bi-clock-history me-2"></i>
+                Last edited {lastEditedLabel}
+              </span>
+              <span className={`badge ${visibilityBadgeClass(visibility)}`}>
+                {visibility === 'public' ? 'Public' : 'Private'}
+              </span>
+            </div>
+          )}
           {message && (
             <div className={`alert alert-${message.type} alert-dismissible fade show`} role="alert">
               <i className={`bi ${message.type === 'success' ? 'bi-check-circle' : message.type === 'warning' ? 'bi-exclamation-triangle' : 'bi-x-circle'} me-2`}></i>
@@ -447,6 +687,20 @@ const EnhancedAdvancedStrategyBuilder: React.FC<EnhancedAdvancedStrategyBuilderP
                     <option value="Future">Futures</option>
                     <option value="Equity">Equity</option>
                   </select>
+                </div>
+                <div className="col-md-4">
+                  <label className="form-label fw-bold">
+                    <i className="bi bi-eye-fill me-2 text-secondary"></i>Visibility
+                  </label>
+                  <select
+                    className="form-select"
+                    value={visibility}
+                    onChange={(e) => setVisibility(normalizeVisibility(e.target.value))}
+                  >
+                    <option value="private">Private — only visible to me</option>
+                    <option value="public">Public — share with all users</option>
+                  </select>
+                  <small className="text-muted">Public strategies become read-only templates for everyone.</small>
                 </div>
                 <div className="col-md-4">
                   <label className="form-label fw-bold">
@@ -1175,6 +1429,23 @@ const EnhancedAdvancedStrategyBuilder: React.FC<EnhancedAdvancedStrategyBuilderP
                       </div>
                     </>
                   )}
+
+              <hr />
+              <h6 className="fw-bold d-flex align-items-center">
+                <i className="bi bi-code-square me-2 text-primary"></i>
+                Strategy Blueprint
+              </h6>
+              <textarea
+                className="form-control bg-light"
+                style={{ fontFamily: 'monospace' }}
+                rows={12}
+                value={blueprintText}
+                onChange={(e) => setBlueprintText(e.target.value)}
+                placeholder="Paste or generate the standardized strategy blueprint here..."
+              />
+              <small className="text-muted">
+                This blueprint is stored with the strategy and reused for automation, paper trading, and live deployments.
+              </small>
                 </div>
               </div>
             )}
