@@ -9,6 +9,11 @@ import Welcome from './components/Welcome';
 import Dashboard from './components/Dashboard';
 import VerifyOtp from './components/VerifyOtp';
 import ProtectedRoute from './components/ProtectedRoute';
+import ContactPage from './components/legal/ContactPage';
+import PrivacyPolicyPage from './components/legal/PrivacyPolicyPage';
+import CancellationPolicyPage from './components/legal/CancellationPolicyPage';
+import ShippingPolicyPage from './components/legal/ShippingPolicyPage';
+import TermsPage from './components/legal/TermsPage';
 import reportWebVitals from './reportWebVitals';
 
 const root = ReactDOM.createRoot(
@@ -38,7 +43,11 @@ root.render(
             </ProtectedRoute>
           } 
         />
-        {/* Add other protected routes here as needed */}
+        <Route path="/legal/contact" element={<ContactPage />} />
+        <Route path="/legal/privacy-policy" element={<PrivacyPolicyPage />} />
+        <Route path="/legal/cancellation-policy" element={<CancellationPolicyPage />} />
+        <Route path="/legal/shipping-policy" element={<ShippingPolicyPage />} />
+        <Route path="/legal/terms" element={<TermsPage />} />
       </Routes>
     </BrowserRouter>
   </React.StrictMode>

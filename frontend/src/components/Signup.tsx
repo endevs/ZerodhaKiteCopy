@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import LoaderOverlay from './LoaderOverlay';
 import SupportChat from './SupportChat';
+import PolicyLinks from './PolicyLinks';
 
 const Signup: React.FC = () => {
   const [mobile, setMobile] = useState<string>('');
@@ -164,6 +165,7 @@ const Signup: React.FC = () => {
         · © {new Date().getFullYear()} DRP Infotech Pvt Ltd
       </div>
       <SupportChat />
+      <PolicyLinks />
     </div>
   );
 };

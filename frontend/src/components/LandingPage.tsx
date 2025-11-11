@@ -2,6 +2,7 @@ import React from 'react';
 import { Link } from 'react-router-dom';
 import '../App.css';
 import SupportChat from './SupportChat';
+import PolicyLinks from './PolicyLinks';
 
 const LandingPage: React.FC = () => {
   return (
@@ -310,6 +311,7 @@ const LandingPage: React.FC = () => {
         </div>
       </footer>
       <SupportChat />
+      <PolicyLinks />
     </div>
   );
 };

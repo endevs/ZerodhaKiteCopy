@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import LoaderOverlay from './LoaderOverlay';
 import SupportChat from './SupportChat';
+import PolicyLinks from './PolicyLinks';
 
 const Login: React.FC = () => {
   const [email, setEmail] = useState<string>('');
@@ -168,6 +169,7 @@ const Login: React.FC = () => {
         © {new Date().getFullYear()} DRP Infotech Pvt Ltd · Intelligent Algo Trading &amp; AI Automation
       </div>
       <SupportChat />
+      <PolicyLinks />
     </div>
   );
 };

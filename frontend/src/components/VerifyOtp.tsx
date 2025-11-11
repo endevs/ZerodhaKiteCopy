@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useNavigate, useLocation, Link } from 'react-router-dom';
 import LoaderOverlay from './LoaderOverlay';
 import SupportChat from './SupportChat';
+import PolicyLinks from './PolicyLinks';
 
 const VerifyOtp: React.FC = () => {
   const [otp, setOtp] = useState<string>('');
@@ -203,6 +204,7 @@ const VerifyOtp: React.FC = () => {
         © {new Date().getFullYear()} DRP Infotech Pvt Ltd · Intelligent Algo Trading &amp; AI Automation
       </div>
       <SupportChat />
+      <PolicyLinks />
     </div>
   );
 };
