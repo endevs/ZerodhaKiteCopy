@@ -1,0 +1,11 @@
+Flask
+kiteconnect
+Flask-SocketIO
+APScheduler
+flask-cors
+pandas
+python-dotenv
+numpy
+scikit-learn
+torch
+groq
