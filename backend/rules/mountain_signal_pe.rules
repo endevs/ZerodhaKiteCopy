@@ -1,0 +1,96 @@
+STRATEGY "Mountain Signal" VERSION 1.0
+  DESCRIPTION "PE-side rules for Mountain Signal strategy"
+
+EVALUATION
+  SCHEDULE every 5m candle
+  TIMING evaluate 20 seconds before candle close
+
+RULE "Identify PE Signal"
+  WHEN
+    candle.low is above ema(5)
+    AND rsi(14) is greater than 70
+  THEN
+    set signal.type to PE
+    set signal.low to candle.low
+    set signal.high to candle.high
+    set signal.time to candle.start_time
+    log "PE signal candle identified at {signal.time} (H:{signal.high} L:{signal.low})"
+
+RULE "Reset PE Signal"
+  WHEN
+    existing signal.type is PE
+    AND candle.start_time is after signal.time
+    AND candle.low is above ema(5)
+    AND rsi(14) is greater than 70
+  THEN
+    replace signal.low with candle.low
+    replace signal.high with candle.high
+    replace signal.time with candle.start_time
+    log "PE signal reset to newer candle {signal.time}"
+
+RULE "Clear PE Signal"
+  WHEN
+    signal.type is PE
+    AND candle.low falls below ema(5)
+    AND rsi(14) is 70 or below
+  THEN
+    clear signal
+    log "PE signal cleared because criteria no longer met"
+
+ENTRY "PE Breakout Entry"
+  FOR signal.type == PE
+  TRIGGER when candle.close falls below signal.low
+  REQUIREMENTS
+    first_entry: none
+    re_entry:
+      - highest candle.high since last exit is above signal.low
+      - permitted while the current signal remains active
+      - permitted again if a new signal candle replaces the prior one
+  ACTIONS
+    select option_contract
+      instrument: index
+      strike_rounding: BANKNIFTY -> 100, NIFTY -> 50
+      expiry_policy: BANKNIFTY -> monthly, NIFTY -> weekly
+    trade_execution
+      stop_loss: -17% of option_premium
+      target: +45% of option_premium
+      lot_size: BANKNIFTY -> 35, NIFTY -> 75
+    log "PE option trade opened @ {entry_price} (symbol {option_symbol})"
+
+EXIT_PRIORITY
+  - option_stop_loss
+  - option_target
+  - market_close 15:15
+
+EXIT "PE Option Stop Loss"
+  WHEN option_premium falls below entry_premium * 0.83
+  THEN
+    exit reason OPTION_STOP_LOSS
+    log "PE option stop loss hit @ {option_exit_price}"
+
+EXIT "PE Option Target"
+  WHEN option_premium rises above entry_premium * 1.45
+  THEN
+    exit reason OPTION_TARGET
+    log "PE option target hit @ {option_exit_price}"
+
+EXIT "PE Index Stop"
+  WHEN candle.close rises above signal.high
+  THEN
+    exit reason INDEX_STOP
+    log "PE index stop triggered @ {exit_price}"
+
+EXIT "PE Index Target"
+  WHEN
+    first candle.high drops below ema(5)
+    AND next 2 candle.close are above ema(5)
+  THEN
+    exit reason INDEX_TARGET
+    log "PE index target achieved @ {exit_price}"
+
+EXIT "Market Close"
+  WHEN clock.time is at or after 15:15
+  THEN
+    exit reason MARKET_CLOSE
+    log "PE position auto-closed at market close"
+
