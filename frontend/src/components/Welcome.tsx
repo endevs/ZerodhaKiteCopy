@@ -1,13 +1,8 @@
 import React, { useEffect, useState } from 'react';
-import Layout from './Layout';
-
 const Welcome: React.FC = () => {
   const [message, setMessage] = useState<{ type: string; text: string } | null>(null);
 
-  // In a real application, you would fetch messages from a context or API
   useEffect(() => {
-    // Placeholder for fetching flashed messages
-    // For now, let's simulate a success message after login
     const params = new URLSearchParams(window.location.search);
     const loginSuccess = params.get('loginSuccess');
     if (loginSuccess === 'true') {
@@ -20,11 +15,9 @@ const Welcome: React.FC = () => {
       const response = await fetch('http://localhost:8000/api/logout', { method: 'POST', credentials: 'include' });
       const data = await response.json();
       if (response.ok) {
-        // Redirect to login page after successful logout
         window.location.href = '/login';
       } else {
         setMessage({ type: 'danger', text: data.message || 'Logout failed.' });
-        // Still redirect to login on failure
         setTimeout(() => {
           window.location.href = '/login';
         }, 2000);
@@ -32,7 +25,6 @@ const Welcome: React.FC = () => {
     } catch (error) {
       console.error('Error during logout:', error);
       setMessage({ type: 'danger', text: 'An error occurred during logout.' });
-      // Redirect to login even on error
       setTimeout(() => {
         window.location.href = '/login';
       }, 2000);
@@ -40,30 +32,99 @@ const Welcome: React.FC = () => {
   };
 
   return (
-    <Layout>
-      <div className="row justify-content-center">
-        <div className="col-md-6">
-          <div className="card mt-5">
-            <div className="card-body">
-              <h3 className="card-title text-center">Welcome!</h3>
+    <div className="auth-page">
+      <div className="auth-overlay" />
+      <nav className="auth-nav container">
+        <div className="d-flex align-items-center">
+          <img
+            src="/drp-infotech-logo.png"
+            alt="DRP Infotech Pvt Ltd"
+            className="auth-logo"
+          />
+          <span className="auth-brand">DRP Infotech Pvt Ltd</span>
+        </div>
+        <div className="d-flex align-items-center gap-2">
+          <a href="/dashboard" className="btn btn-outline-light btn-sm px-3">
+            Go to Dashboard
+          </a>
+          <button onClick={handleLogout} className="btn btn-light btn-sm px-3 text-primary">
+            Sign out
+          </button>
+        </div>
+      </nav>
+
+      <div className="container auth-container">
+        <div className="row align-items-center g-5">
+          <div className="col-lg-6">
+            <span className="badge bg-primary-subtle text-primary-emphasis mb-3">
+              Welcome to your AI Trading Command Center
+            </span>
+            <h1 className="display-5 fw-bold text-white">
+              Connect Zerodha Kite and orchestrate your strategies in one powerful console.
+            </h1>
+            <p className="lead text-white-50 mt-3">
+              You&apos;re moments away from streaming live market data, deploying AI-built strategies,
+              and supervising execution in real time. Secure your Zerodha token to activate trade flows.
+            </p>
+            <div className="auth-metrics">
+              <div>
+                <strong>Real-time</strong>
+                <small>Market feeds via Zerodha Kite Connect.</small>
+              </div>
+              <div>
+                <strong>Single</strong>
+                <small>Token unlocks trading, backtests, and monitoring.</small>
+              </div>
+              <div>
+                <strong>Unified</strong>
+                <small>AI strategy management, analytics, and automation.</small>
+              </div>
+            </div>
+            <div className="auth-side-note mt-4">
+              <strong>Why connect Zerodha?</strong> This secure OAuth handshake links your DRP Infotech account with
+              live market access. Once authenticated, you can execute live or paper trades across equities,
+              derivatives, and indices using your AI-generated playbooks.
+            </div>
+          </div>
+          <div className="col-lg-5 offset-lg-1 col-xl-4">
+            <div className="auth-card shadow-lg">
+              <h3 className="fw-semibold mb-4">Authorize Zerodha access</h3>
+              <p className="text-white-50 mb-4">
+                Clicking the button below redirects you to Zerodha to grant API access. After authorising,
+                you&apos;ll return here automatically.
+              </p>
+
               {message && (
-                <div className={`alert alert-${message.type}`}>
+                <div className={`alert alert-${message.type} mb-4`} role="alert">
                   {message.text}
                 </div>
               )}
-              <p className="text-center">You have successfully logged in.</p>
-              <div className="text-center mt-4">
-                <a href="/api/zerodha_login" className="btn btn-primary">Login with Zerodha</a>
+
+              <div className="d-grid gap-3">
+                <a href="/api/zerodha_login" className="btn btn-primary">
+                  Authenticate with Zerodha
+                </a>
+                <button onClick={handleLogout} className="btn btn-outline-light">
+                  Sign out
+                </button>
               </div>
-              <div className="text-center mt-3">
-                <button onClick={handleLogout} className="btn btn-secondary">Logout</button>
+              <div className="text-center text-white-50 mt-4 small">
+                Need help? Check your Zerodha app key/secret or contact{' '}
+                <a href="mailto:contact@drpinfotech.com" className="text-white text-decoration-none">
+                  contact@drpinfotech.com
+                </a>
+                .
               </div>
             </div>
           </div>
         </div>
       </div>
-    </Layout>
+      <div className="container text-center auth-footer-text">
+        © {new Date().getFullYear()} DRP Infotech Pvt Ltd · Intelligent Algo Trading &amp; AI Automation
+      </div>
+    </div>
   );
 };
 
 export default Welcome;
+
