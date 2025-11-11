@@ -75,7 +75,6 @@ interface RuleConfig {
   };
   exitPriority: string[];
   evaluationSecondsBeforeClose: number;
-  rsiThreshold: number;
 }
 
 interface MountainSignalChartProps {
@@ -112,7 +111,6 @@ interface OptimizerSummary {
     lotSize: number;
     strikeStep: number;
     initialInvestment: number;
-    rsiThreshold: number;
   };
   dateRange?: {
     from: string;
@@ -317,7 +315,6 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
   const [optimizerToDate, setOptimizerToDate] = useState<string>('');
   const [optimizerStopLossPercent, setOptimizerStopLossPercent] = useState<number>(17);
   const [optimizerTargetPercent, setOptimizerTargetPercent] = useState<number>(45);
-  const [optimizerRsiThreshold, setOptimizerRsiThreshold] = useState<number>(70);
   const [optimizerInitialInvestment, setOptimizerInitialInvestment] = useState<number>(100000);
   const [optimizerLoading, setOptimizerLoading] = useState<boolean>(false);
   const [optimizerError, setOptimizerError] = useState<string | null>(null);
@@ -379,7 +376,6 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
     },
     exitPriority: [],
     evaluationSecondsBeforeClose: 20,
-  rsiThreshold: 70,
   });
   const [expandedTreeNodes, setExpandedTreeNodes] = useState<Set<string>>(new Set());
 
@@ -410,10 +406,6 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
             },
             exitPriority: rules.exit_priority || prev.exitPriority,
             evaluationSecondsBeforeClose: rules.evaluation?.seconds_before_close ?? prev.evaluationSecondsBeforeClose,
-            rsiThreshold:
-              rules.signals?.PE?.rsi_threshold ??
-              rules.signals?.pe?.rsi_threshold ??
-              prev.rsiThreshold,
           }));
         }
       } catch (rulesError) {
@@ -427,12 +419,10 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
   useEffect(() => {
     const defaultStopLossPercent = Math.abs(ruleConfig.optionTrade.stopLossPercent) * 100;
     const defaultTargetPercent = Math.abs(ruleConfig.optionTrade.targetPercent) * 100;
-    const defaultRsiThreshold = ruleConfig.rsiThreshold ?? 70;
 
     if (!optimizerResults) {
       setOptimizerStopLossPercent(Number(defaultStopLossPercent.toFixed(2)));
       setOptimizerTargetPercent(Number(defaultTargetPercent.toFixed(2)));
-      setOptimizerRsiThreshold(Number(defaultRsiThreshold.toFixed(2)));
     }
   }, [ruleConfig.optionTrade.stopLossPercent, ruleConfig.optionTrade.targetPercent, optimizerResults]);
   
@@ -601,10 +591,6 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
       return 'Target percent must be greater than 0';
     }
 
-    if (optimizerRsiThreshold <= 0) {
-      return 'RSI threshold must be greater than 0';
-    }
-
     if (optimizerInitialInvestment <= 0) {
       return 'Initial investment must be greater than 0';
     }
@@ -639,7 +625,6 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
           option_stop_loss_percent: optimizerStopLossPercent,
           option_target_percent: optimizerTargetPercent,
           initial_investment: optimizerInitialInvestment,
-          rsi_threshold: optimizerRsiThreshold,
         }),
       });
 
@@ -2468,7 +2453,6 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
       const drawdownPercentValue = safePercent(cardSummary.maxDrawdownPercent);
       const roiValue = safePercent(cardSummary.roiPercent);
       const initialInvestmentValue = safeNumber(cardSummary.parameters.initialInvestment);
-      const rsiThresholdValue = safeNumber(cardSummary.parameters.rsiThreshold);
 
       const totalPnlClass = totalPnlValue >= 0 ? 'text-success' : 'text-danger';
       const averagePnlClass = averagePnlValue >= 0 ? 'text-success' : 'text-danger';
@@ -2574,7 +2558,6 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
             <div className="row mt-3 align-items-center">
               <div className="col-md-6">
                 <small className="text-muted">
-                  <strong>Parameters:</strong> SL {formatNumericValue(cardSummary.parameters.stopLossPercent)}% | Target {formatNumericValue(cardSummary.parameters.targetPercent)}% | Lot {cardSummary.parameters.lotSize} | Strike Step {cardSummary.parameters.strikeStep} | RSI {formatNumericValue(rsiThresholdValue)} | Initial ₹{formatNumericValue(initialInvestmentValue)}
                 </small>
               </div>
               {cardSummary.dateRange && (
@@ -2699,24 +2682,6 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
                 />
               </div>
               <div className="col-md-3">
-                <label htmlFor="optimizer-rsi" className="form-label fw-bold">
-                  <i className="bi bi-activity me-2"></i>RSI Threshold
-                </label>
-                <input
-                  type="number"
-                  id="optimizer-rsi"
-                  className="form-control"
-                  value={optimizerRsiThreshold}
-                  min={10}
-                  max={100}
-                  step={0.5}
-                  onChange={(e) => {
-                    const value = parseFloat(e.target.value);
-                    setOptimizerRsiThreshold(Number.isNaN(value) ? 0 : value);
-                  }}
-                />
-              </div>
-              <div className="col-md-3">
                 <label htmlFor="optimizer-investment" className="form-label fw-bold">
                   <i className="bi bi-cash-coin me-2"></i>Initial Investment (₹)
                 </label>
@@ -2750,11 +2715,9 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
                   onClick={() => {
                     const defaultStopLossPercent = Math.abs(ruleConfig.optionTrade.stopLossPercent) * 100;
                     const defaultTargetPercent = Math.abs(ruleConfig.optionTrade.targetPercent) * 100;
-                    const defaultRsiThreshold = ruleConfig.rsiThreshold ?? 70;
                     setOptimizerStopLossPercent(Number(defaultStopLossPercent.toFixed(2)));
                     setOptimizerTargetPercent(Number(defaultTargetPercent.toFixed(2)));
                     setOptimizerInitialInvestment(100000);
-                    setOptimizerRsiThreshold(Number(defaultRsiThreshold.toFixed(2)));
                   }}
                   disabled={optimizerLoading}
                 >

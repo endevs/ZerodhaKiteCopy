@@ -14,8 +14,6 @@ const Dashboard: React.FC = () => {
   const [userName, setUserName] = useState<string>('Guest');
   const [niftyPrice, setNiftyPrice] = useState<string>('Loading...');
   const [bankNiftyPrice, setBankNiftyPrice] = useState<string>('Loading...');
-  const [balance, setBalance] = useState<string>('0.00');
-  const [accessToken, setAccessToken] = useState<boolean>(false);
 
   const [showChartModal, setShowChartModal] = useState<boolean>(false);
   const [chartInstrumentToken, setChartInstrumentToken] = useState<string | undefined>(undefined);
@@ -51,9 +49,7 @@ const Dashboard: React.FC = () => {
         const data = await response.json();
         if (response.ok) {
           setUserName(data.user_name || 'User');
-          setBalance(data.balance ? data.balance.toFixed(2) : '0.00');
           const hasAccessToken = data.access_token_present || false;
-          setAccessToken(hasAccessToken);
           
           // If access token was just set (user just logged in), request ticker startup via HTTP
           if (hasAccessToken) {
@@ -251,16 +247,7 @@ const Dashboard: React.FC = () => {
   const renderContent = () => {
     switch (activeTab) {
       case 'dashboard':
-        return (
-          <DashboardContent
-            niftyPrice={niftyPrice}
-            bankNiftyPrice={bankNiftyPrice}
-            balance={balance}
-            access_token={accessToken}
-            onViewLiveStrategy={handleViewLiveStrategy}
-            onViewChart={handleViewChart}
-          />
-        );
+        return <DashboardContent onViewLiveStrategy={handleViewLiveStrategy} />;
       case 'algo-visualization':
         return <AlgoVisualizationContent />;
       case 'live-trade':
@@ -268,16 +255,7 @@ const Dashboard: React.FC = () => {
       case 'ai-ml':
         return <AIMLContent />;
       default:
-        return (
-          <DashboardContent
-            niftyPrice={niftyPrice}
-            bankNiftyPrice={bankNiftyPrice}
-            balance={balance}
-            access_token={accessToken}
-            onViewLiveStrategy={handleViewLiveStrategy}
-            onViewChart={handleViewChart}
-          />
-        );
+        return <DashboardContent onViewLiveStrategy={handleViewLiveStrategy} />;
     }
   };
 
@@ -288,6 +266,8 @@ const Dashboard: React.FC = () => {
         onTabChange={setActiveTab}
         userName={userName}
         onLogout={handleLogout}
+        niftyPrice={niftyPrice}
+        bankNiftyPrice={bankNiftyPrice}
       />
     }>
       {renderContent()}

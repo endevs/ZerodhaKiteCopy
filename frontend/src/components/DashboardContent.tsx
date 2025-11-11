@@ -1,78 +1,11 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import EnhancedAdvancedStrategyBuilder from './EnhancedAdvancedStrategyBuilder';
-
-// Enhanced Market Data Component
-const MarketData: React.FC<{ niftyPrice: string; bankNiftyPrice: string }> = ({ niftyPrice, bankNiftyPrice }) => (
-  <div className="card shadow-sm border-0 mb-4">
-    <div className="card-header bg-primary text-white">
-      <h5 className="card-title mb-0">
-        <i className="bi bi-graph-up-arrow me-2"></i>Live Market Data
-      </h5>
-    </div>
-    <div className="card-body">
-      <div className="row g-3">
-        <div className="col-md-6">
-          <div className="d-flex align-items-center p-3 bg-light rounded">
-            <div className="flex-grow-1">
-              <small className="text-muted d-block">NIFTY 50</small>
-              <h4 className="mb-0 fw-bold text-primary" id="nifty-price">{niftyPrice}</h4>
-            </div>
-            <div className="ms-3">
-              <span className="badge bg-success fs-6">LIVE</span>
-            </div>
-          </div>
-        </div>
-        <div className="col-md-6">
-          <div className="d-flex align-items-center p-3 bg-light rounded">
-            <div className="flex-grow-1">
-              <small className="text-muted d-block">BANK NIFTY</small>
-              <h4 className="mb-0 fw-bold text-info" id="banknifty-price">{bankNiftyPrice}</h4>
-            </div>
-            <div className="ms-3">
-              <span className="badge bg-success fs-6">LIVE</span>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
-);
-
-// Enhanced Account Info Component
-const AccountInfo: React.FC<{ balance: string; access_token: boolean }> = ({ balance, access_token }) => (
-  <div className="card shadow-sm border-0 mb-4">
-    <div className="card-header bg-success text-white">
-      <h5 className="card-title mb-0">
-        <i className="bi bi-wallet2 me-2"></i>Account Information
-      </h5>
-    </div>
-    <div className="card-body">
-      <div className="d-flex justify-content-between align-items-center mb-3">
-        <span className="text-muted">Available Balance:</span>
-        <h4 className="mb-0 fw-bold text-success" id="balance">₹{balance}</h4>
-      </div>
-      {!access_token && (
-        <a href="http://localhost:8000/zerodha_login" className="btn btn-primary w-100">
-          <i className="bi bi-box-arrow-in-right me-2"></i>Connect with Zerodha
-        </a>
-      )}
-    </div>
-  </div>
-);
-
-const StrategyConfiguration: React.FC<{ 
-  onStrategySaved: () => void; 
-  editingStrategy?: any;
-  isOpen?: boolean;
-  onToggle?: (open: boolean) => void;
-}> = ({ onStrategySaved, editingStrategy, isOpen, onToggle }) => {
-  return <EnhancedAdvancedStrategyBuilder 
-    onStrategySaved={onStrategySaved} 
-    editingStrategy={editingStrategy}
-    isOpen={isOpen}
-    onToggle={onToggle}
-  />;
-};
 
 interface Strategy {
   id: string;
@@ -91,10 +24,24 @@ interface Strategy {
   trade_type?: string;
   strike_price?: string;
   trailing_stop_loss?: number;
-  indicators?: string; // JSON string
-  entry_rules?: string; // JSON string
-  exit_rules?: string; // JSON string
-  // Add other strategy properties as needed
+  indicators?: string;
+  entry_rules?: string;
+  exit_rules?: string;
+}
+
+interface StrategyConfigurationProps {
+  onStrategySaved: () => void;
+  editingStrategy: Strategy | null;
+  isOpen: boolean;
+  onToggle: (open: boolean) => void;
+}
+
+interface SavedStrategiesProps {
+  onViewLive: (strategyId: string) => void;
+  onStrategyUpdated: number;
+  onEditStrategy: (strategy: Strategy) => void;
+  isOpen: boolean;
+  onToggle: (open: boolean) => void;
 }
 
 interface ChatMessage {
@@ -110,25 +57,232 @@ interface StrategyValidation {
   warnings: string[];
 }
 
-interface SavedStrategiesProps {
-  onViewLive: (strategyId: string) => void;
-  onStrategyUpdated: number;
-  onEditStrategy?: (strategy: Strategy) => void;
-  isOpen?: boolean;
-  onToggle?: (open: boolean) => void;
-  refreshTrigger?: () => void; // Optional manual refresh trigger
+interface FlowNode {
+  id: string;
+  title: string;
+  subtitle?: string;
+  details: string[];
 }
 
-const SavedStrategies: React.FC<SavedStrategiesProps> = ({ onViewLive, onStrategyUpdated, onEditStrategy, isOpen = false, onToggle, refreshTrigger }) => {
-  const [strategies, setStrategies] = useState<Strategy[]>([]);
-  const [selectedStrategyInfo, setSelectedStrategyInfo] = useState<Strategy | null>(null);
-  const [showStrategyInfoModal, setShowStrategyInfoModal] = useState<boolean>(false);
+const StrategyConfiguration: React.FC<StrategyConfigurationProps> = ({
+  onStrategySaved,
+  editingStrategy,
+  isOpen,
+  onToggle,
+}) => (
+  <div className="accordion-item">
+    <h2 className="accordion-header" id="dashboard-builder-heading">
+      <button
+        className={`accordion-button ${isOpen ? '' : 'collapsed'}`}
+        type="button"
+        onClick={() => onToggle(!isOpen)}
+        aria-expanded={isOpen}
+        aria-controls="dashboard-builder"
+      >
+        Strategy Builder
+      </button>
+    </h2>
+    <div
+      id="dashboard-builder"
+      className={`accordion-collapse collapse ${isOpen ? 'show' : ''}`}
+      aria-labelledby="dashboard-builder-heading"
+      data-bs-parent="#dashboardAccordion"
+    >
+      <div className="accordion-body">
+        <EnhancedAdvancedStrategyBuilder
+          onStrategySaved={onStrategySaved}
+          editingStrategy={editingStrategy}
+          isOpen={isOpen}
+          onToggle={onToggle}
+        />
+      </div>
+    </div>
+  </div>
+);
 
-  const fetchStrategies = async () => {
+const StrategyInfoContent: React.FC<{ strategy: Strategy }> = ({ strategy }) => {
+  const parseJson = (raw?: string) => {
+    if (!raw) return [];
     try {
-      const response = await fetch('http://localhost:8000/api/strategies', { credentials: 'include' });
+      return JSON.parse(raw);
+    } catch (error) {
+      console.error('Failed to parse strategy JSON block:', error);
+      return [];
+    }
+  };
+
+  const indicators = parseJson(strategy.indicators);
+  const entryRules = parseJson(strategy.entry_rules);
+  const exitRules = parseJson(strategy.exit_rules);
+
+  const description = useMemo(() => {
+    switch (strategy.strategy_type) {
+      case 'orb':
+        return 'Opening range breakout strategy using configurable time windows.';
+      case 'capture_mountain_signal':
+        return 'Pattern recognition for mountain formations with confirmation steps.';
+      case 'custom':
+        return 'Custom strategy defined via the advanced builder.';
+      default:
+        return 'Algorithmic trading routine.';
+    }
+  }, [strategy.strategy_type]);
+
+  return (
+    <div>
+      <div className="row g-3 mb-3">
+        <div className="col-md-6">
+          <strong>Name:</strong> {strategy.strategy_name}
+        </div>
+        <div className="col-md-6">
+          <strong>Type:</strong>{' '}
+          <span className="badge bg-primary">
+            {strategy.strategy_type || 'custom'}
+          </span>
+        </div>
+        <div className="col-md-4">
+          <strong>Instrument:</strong> {strategy.instrument}
+        </div>
+        <div className="col-md-4">
+          <strong>Lots:</strong> {strategy.total_lot}
+        </div>
+        <div className="col-md-4">
+          <strong>Status:</strong>{' '}
+          <span className={`badge ${strategy.status === 'running' ? 'bg-success' : 'bg-secondary'}`}>
+            {strategy.status || 'saved'}
+          </span>
+        </div>
+      </div>
+
+      <p className="text-muted small mb-4">{description}</p>
+
+      <div className="row g-2 mb-4">
+        <div className="col-sm-3">
+          <div className="card border-warning">
+            <div className="card-body text-center">
+              <strong className="text-warning d-block">Stop Loss</strong>
+              <span>{strategy.stop_loss ?? 0}%</span>
+            </div>
+          </div>
+        </div>
+        <div className="col-sm-3">
+          <div className="card border-success">
+            <div className="card-body text-center">
+              <strong className="text-success d-block">Target</strong>
+              <span>{strategy.target_profit ?? 0}%</span>
+            </div>
+          </div>
+        </div>
+        <div className="col-sm-3">
+          <div className="card border-info">
+            <div className="card-body text-center">
+              <strong className="text-info d-block">Trailing</strong>
+              <span>{strategy.trailing_stop_loss ?? 0}%</span>
+            </div>
+          </div>
+        </div>
+        <div className="col-sm-3">
+          <div className="card border-primary">
+            <div className="card-body text-center">
+              <strong className="text-primary d-block">Timeframe</strong>
+              <span>{strategy.candle_time || '5'} min</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {indicators.length > 0 && (
+        <div className="mb-3">
+          <h6 className="text-primary mb-2">
+            <i className="bi bi-graph-up me-2" />
+            Indicators
+          </h6>
+          <div className="row g-2">
+            {indicators.map((indicator: any, idx: number) => (
+              <div key={idx} className="col-md-6">
+                <div className="border rounded p-2">
+                  <strong>{indicator.name || indicator.id}</strong>
+                  {indicator.params && (
+                    <div className="small text-muted">
+                      Params:{' '}
+                      {Object.entries(indicator.params)
+                        .map(([k, v]) => `${k}: ${v}`)
+                        .join(', ')}
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {entryRules.length > 0 && (
+        <div className="mb-3">
+          <h6 className="text-success mb-2">
+            <i className="bi bi-box-arrow-in-right me-2" />
+            Entry Rules
+          </h6>
+          {entryRules.map((rule: any, idx: number) => (
+            <div key={idx} className="border rounded p-2 mb-2">
+              <strong>{rule.name || `Entry Rule ${idx + 1}`}</strong>
+              {rule.conditions?.length > 0 && (
+                <ul className="small mb-0 mt-2">
+                  {rule.conditions.map((cond: any, cIdx: number) => (
+                    <li key={cIdx}>
+                      {cond.indicator} {cond.operator} {cond.value}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {exitRules.length > 0 && (
+        <div>
+          <h6 className="text-danger mb-2">
+            <i className="bi bi-box-arrow-left me-2" />
+            Exit Rules
+          </h6>
+          {exitRules.map((rule: any, idx: number) => (
+            <div key={idx} className="border rounded p-2 mb-2">
+              <strong>{rule.name || `Exit Rule ${idx + 1}`}</strong>
+              {rule.conditions?.length > 0 && (
+                <ul className="small mb-0 mt-2">
+                  {rule.conditions.map((cond: any, cIdx: number) => (
+                    <li key={cIdx}>
+                      {cond.indicator} {cond.operator} {cond.value}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const SavedStrategies: React.FC<SavedStrategiesProps> = ({
+  onViewLive,
+  onStrategyUpdated,
+  onEditStrategy,
+  isOpen,
+  onToggle,
+}) => {
+  const [strategies, setStrategies] = useState<Strategy[]>([]);
+  const [selectedStrategy, setSelectedStrategy] = useState<Strategy | null>(null);
+
+  const fetchStrategies = useCallback(async () => {
+    try {
+      const response = await fetch('http://localhost:8000/api/strategies', {
+        credentials: 'include',
+      });
       const data = await response.json();
-      if (data.status === 'success') {
+      if (response.ok && data.status === 'success') {
         setStrategies(data.strategies);
       } else {
         console.error('Error fetching strategies:', data.message);
@@ -136,345 +290,227 @@ const SavedStrategies: React.FC<SavedStrategiesProps> = ({ onViewLive, onStrateg
     } catch (error) {
       console.error('Error fetching strategies:', error);
     }
-  };
-
-  // Expose fetchStrategies to parent via useImperativeHandle or callback
-  React.useEffect(() => {
-    if (refreshTrigger) {
-      // Store the refresh function reference (if we need to expose it)
-    }
-  }, [refreshTrigger]);
+  }, []);
 
   useEffect(() => {
     fetchStrategies();
-  }, [onStrategyUpdated]); // Re-fetch when onStrategyUpdated is called
-  
-  // Also listen to window events or custom events for refresh
-  useEffect(() => {
-    const handleRefresh = () => {
-      fetchStrategies();
-    };
-    
-    // Listen for custom refresh event
-    window.addEventListener('refreshStrategies', handleRefresh);
-    
-    return () => {
-      window.removeEventListener('refreshStrategies', handleRefresh);
-    };
-  }, []);
-  
-  // Also fetch on initial load and when the section is expanded
-  useEffect(() => {
-    const savedStrategiesSection = document.getElementById('collapseTwo');
-    if (savedStrategiesSection) {
-      const observer = new MutationObserver((mutations) => {
-        mutations.forEach((mutation) => {
-          if (mutation.type === 'attributes' && mutation.attributeName === 'class') {
-            const target = mutation.target as HTMLElement;
-            if (target.classList.contains('show')) {
-              // Section is now expanded, refresh strategies
-              fetchStrategies();
-            }
-          }
-        });
-      });
-      
-      observer.observe(savedStrategiesSection, {
-        attributes: true,
-        attributeFilter: ['class']
-      });
-      
-      return () => observer.disconnect();
-    }
-  }, []);
+  }, [fetchStrategies, onStrategyUpdated]);
 
-  const handleEditStrategy = async (strategyId: string) => {
-    try {
-      const response = await fetch(`http://localhost:8000/strategy/edit/${strategyId}`, { credentials: 'include' });
-      const data = await response.json();
-      if (response.ok && data.status === 'success') {
-        const strategyToEdit = data.strategy;
-        if (onEditStrategy) {
-          onEditStrategy(strategyToEdit);
-        }
-        // Scroll to strategy builder
-        setTimeout(() => {
-          const collapseElement = document.getElementById('collapseOne');
-          if (collapseElement) {
-            collapseElement.scrollIntoView({ behavior: 'smooth', block: 'start' });
-            // Expand if collapsed
-            if (!collapseElement.classList.contains('show')) {
-              const bsCollapse = new (window as any).bootstrap.Collapse(collapseElement);
-              bsCollapse.show();
-            }
-          }
-        }, 300);
-      } else {
-        alert('Error: ' + (data.message || 'Failed to load strategy'));
-      }
-    } catch (error) {
-      console.error('Error loading strategy for edit:', error);
-      alert('An error occurred while loading the strategy.');
-    }
-  };
+  useEffect(() => {
+    const handler = () => fetchStrategies();
+    window.addEventListener('refreshStrategies', handler);
+    return () => window.removeEventListener('refreshStrategies', handler);
+  }, [fetchStrategies]);
 
-  const handleDeleteStrategy = async (strategyId: string) => {
-    if (!window.confirm('Are you sure you want to delete this strategy?')) {
+  const handleAction = async (
+    url: string,
+    confirmMessage?: string,
+  ): Promise<void> => {
+    if (confirmMessage && !window.confirm(confirmMessage)) {
       return;
     }
     try {
-      const response = await fetch(`http://localhost:8000/api/strategy/delete/${strategyId}`, { method: 'POST', credentials: 'include' });
-      const data = await response.json();
-      if (response.ok) {
-        alert(data.message);
-        fetchStrategies();
-      } else {
-        alert('Error: ' + data.message);
-      }
-    } catch (error) {
-      console.error('Error deleting strategy:', error);
-      alert('An error occurred while deleting the strategy.');
-    }
-  };
-
-  const handleDeployStrategy = async (strategyId: string) => {
-    try {
-      const response = await fetch(`http://localhost:8000/api/strategy/deploy/${strategyId}`, { 
-        method: 'POST', 
+      const response = await fetch(url, {
+        method: 'POST',
         credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({})
       });
-      
-      let data;
-      const contentType = response.headers.get('content-type');
-      if (contentType && contentType.includes('application/json')) {
-        data = await response.json();
-      } else {
-        const text = await response.text();
-        console.error('Non-JSON response:', text);
-        alert(`Error deploying strategy: ${response.status} ${response.statusText}. Please check if backend server is running and route exists.`);
-        return;
+      const data =
+        response.headers.get('content-type')?.includes('application/json')
+          ? await response.json()
+          : await response.text();
+      if (!response.ok) {
+        throw new Error(
+          typeof data === 'string' ? data : data.message || 'Request failed',
+        );
       }
-      
-      if (response.ok) {
-        alert(data.message || 'Strategy deployed successfully!');
-        fetchStrategies();
-      } else {
-        alert('Error: ' + (data.message || 'Failed to deploy strategy'));
+      if (typeof data !== 'string') {
+        alert(data.message || 'Action completed successfully.');
       }
+      fetchStrategies();
     } catch (error: any) {
-      console.error('Error deploying strategy:', error);
-      alert(`An error occurred while deploying the strategy: ${error.message}`);
-    }
-  };
-
-  const handlePauseStrategy = async (strategyId: string) => {
-    try {
-      const response = await fetch(`http://localhost:8000/api/strategy/pause/${strategyId}`, { 
-        method: 'POST', 
-        credentials: 'include' 
-      });
-      
-      let data;
-      const contentType = response.headers.get('content-type');
-      if (contentType && contentType.includes('application/json')) {
-        data = await response.json();
-      } else {
-        const text = await response.text();
-        console.error('Non-JSON response from pause:', text);
-        alert(`Error pausing strategy: ${response.status} ${response.statusText}`);
-        return;
-      }
-      
-      if (response.ok) {
-        alert(data.message || 'Strategy paused successfully!');
-        fetchStrategies();
-        // Trigger refresh for Saved Strategies
-        window.dispatchEvent(new CustomEvent('refreshStrategies'));
-      } else {
-        alert('Error: ' + (data.message || 'Failed to pause strategy'));
-      }
-    } catch (error: any) {
-      console.error('Error pausing strategy:', error);
-      alert(`An error occurred while pausing the strategy: ${error.message || 'Unknown error'}`);
-    }
-  };
-
-  const handleSquareOffStrategy = async (strategyId: string) => {
-    if (!window.confirm('Are you sure you want to square off this strategy?')) {
-      return;
-    }
-    try {
-      const response = await fetch(`http://localhost:8000/api/strategy/squareoff/${strategyId}`, { method: 'POST', credentials: 'include' });
-      const data = await response.json();
-      if (response.ok) {
-        alert(data.message);
-        fetchStrategies();
-      } else {
-        alert('Error: ' + data.message);
-      }
-    } catch (error) {
-      console.error('Error squaring off strategy:', error);
-      alert('An error occurred while squaring off the strategy.');
+      console.error('Saved strategies action failed:', error);
+      alert(error.message || 'An unexpected error occurred.');
     }
   };
 
   return (
     <div className="accordion-item mt-3">
-      <h2 className="accordion-header" id="headingTwo">
+      <h2 className="accordion-header" id="saved-strategies-heading">
         <button
           className={`accordion-button ${isOpen ? '' : 'collapsed'}`}
           type="button"
-          onClick={() => onToggle && onToggle(!isOpen)}
+          onClick={() => onToggle(!isOpen)}
           aria-expanded={isOpen}
-          aria-controls="collapseTwo"
+          aria-controls="saved-strategies"
         >
           Saved Strategies
         </button>
       </h2>
-      <div 
-        id="collapseTwo" 
-        className={`accordion-collapse collapse ${isOpen ? 'show' : ''}`} 
-        aria-labelledby="headingTwo" 
+      <div
+        id="saved-strategies"
+        className={`accordion-collapse collapse ${isOpen ? 'show' : ''}`}
+        aria-labelledby="saved-strategies-heading"
         data-bs-parent="#dashboardAccordion"
       >
         <div className="accordion-body">
-          <table className="table table-striped">
-            <thead>
-              <tr>
-                <th>Strategy Name</th>
-                <th>Type</th>
-                <th>Instrument</th>
-                <th>Lots</th>
-                <th>Stop Loss / Target</th>
-                <th>Status</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody id="saved-strategies-table-body">
-              {strategies.length === 0 ? (
+          <div className="table-responsive">
+            <table className="table table-striped align-middle">
+              <thead>
                 <tr>
-                  <td colSpan={7} className="text-center text-muted py-4">
-                    <i className="bi bi-inbox fs-1 d-block mb-2"></i>
-                    No strategies saved yet. Create your first strategy above!
-                  </td>
+                  <th>Name</th>
+                  <th>Type</th>
+                  <th>Instrument</th>
+                  <th>Lots</th>
+                  <th>SL / TP</th>
+                  <th>Status</th>
+                  <th className="text-end">Actions</th>
                 </tr>
-              ) : (
-                strategies.map((strategy) => (
-                  <tr key={strategy.id}>
-                    <td>
-                      <div className="d-flex align-items-center">
-                        <strong className="me-2">{strategy.strategy_name || 'Unnamed Strategy'}</strong>
-                        <button
-                          type="button"
-                          className="btn btn-link p-0 text-info"
-                          style={{ fontSize: '0.9rem', lineHeight: '1', border: 'none', background: 'none' }}
-                          onClick={() => {
-                            setSelectedStrategyInfo(strategy);
-                            setShowStrategyInfoModal(true);
-                          }}
-                          title="View Strategy Details"
-                        >
-                          <i className="bi bi-info-circle"></i>
-                        </button>
-                      </div>
-                    </td>
-                    <td>
-                      <span className="badge bg-secondary">{strategy.strategy_type || 'custom'}</span>
-                    </td>
-                    <td>{strategy.instrument || 'N/A'}</td>
-                    <td>{strategy.total_lot || 1}</td>
-                    <td>
-                      <small>
-                        SL: {strategy.stop_loss || 0}% / TP: {strategy.target_profit || 0}%
-                      </small>
-                    </td>
-                    <td>
-                      <span className={`badge ${
-                        strategy.status === 'running' ? 'bg-success' :
-                        strategy.status === 'paused' ? 'bg-warning' :
-                        strategy.status === 'error' ? 'bg-danger' :
-                        strategy.status === 'sq_off' ? 'bg-info' :
-                        'bg-secondary'
-                      }`}>
-                        {strategy.status || 'saved'}
-                      </span>
-                    </td>
-                    <td>
-                      <div className="btn-group" role="group">
-                        <button 
-                          className="btn btn-sm btn-info" 
-                          onClick={() => handleEditStrategy(strategy.id)}
-                          title="Edit Strategy"
-                        >
-                          <i className="bi bi-pencil"></i>
-                        </button>
-                        {(strategy.status === 'saved' || strategy.status === 'paused' || strategy.status === 'error' || strategy.status === 'sq_off') && (
-                          <button 
-                            className="btn btn-sm btn-success" 
-                            onClick={() => handleDeployStrategy(strategy.id)}
-                            title="Deploy/Play Strategy"
-                          >
-                            <i className="bi bi-play-fill"></i>
-                          </button>
-                        )}
-                        {strategy.status === 'running' && (
-                          <button 
-                            className="btn btn-sm btn-warning" 
-                            onClick={() => handlePauseStrategy(strategy.id)}
-                            title="Pause Strategy"
-                          >
-                            <i className="bi bi-pause-fill"></i>
-                          </button>
-                        )}
-                        <button 
-                          className="btn btn-sm btn-danger" 
-                          onClick={() => handleDeleteStrategy(strategy.id)}
-                          title="Delete Strategy"
-                        >
-                          <i className="bi bi-trash"></i>
-                        </button>
-                      </div>
+              </thead>
+              <tbody>
+                {strategies.length === 0 ? (
+                  <tr>
+                    <td colSpan={7} className="text-center text-muted py-4">
+                      <i className="bi bi-inbox fs-1 d-block mb-2" />
+                      No strategies saved yet. Build one using the Strategy Builder.
                     </td>
                   </tr>
-                ))
-              )}
-            </tbody>
-          </table>
+                ) : (
+                  strategies.map((strategy) => (
+                    <tr key={strategy.id}>
+                      <td>
+                        <strong>{strategy.strategy_name || 'Unnamed Strategy'}</strong>
+                        <button
+                          type="button"
+                          className="btn btn-link btn-sm ms-2 p-0"
+                          title="View details"
+                          onClick={() => setSelectedStrategy(strategy)}
+                        >
+                          <i className="bi bi-info-circle" />
+                        </button>
+                      </td>
+                      <td>
+                        <span className="badge bg-secondary">
+                          {strategy.strategy_type || 'custom'}
+                        </span>
+                      </td>
+                      <td>{strategy.instrument || 'N/A'}</td>
+                      <td>{strategy.total_lot || 1}</td>
+                      <td>
+                        <small>
+                          SL {strategy.stop_loss ?? 0}% / TP {strategy.target_profit ?? 0}%
+                        </small>
+                      </td>
+                      <td>
+                        <span
+                          className={`badge ${
+                            strategy.status === 'running'
+                              ? 'bg-success'
+                              : strategy.status === 'paused'
+                              ? 'bg-warning'
+                              : strategy.status === 'error'
+                              ? 'bg-danger'
+                              : strategy.status === 'sq_off'
+                              ? 'bg-info'
+                              : 'bg-secondary'
+                          }`}
+                        >
+                          {strategy.status || 'saved'}
+                        </span>
+                      </td>
+                      <td className="text-end">
+                        <div className="btn-group btn-group-sm" role="group">
+                          <button
+                            className="btn btn-outline-primary"
+                            title="Live monitor"
+                            onClick={() => onViewLive(strategy.id)}
+                          >
+                            <i className="bi bi-activity" />
+                          </button>
+                          <button
+                            className="btn btn-outline-info"
+                            title="Edit"
+                            onClick={() => onEditStrategy(strategy)}
+                          >
+                            <i className="bi bi-pencil" />
+                          </button>
+                          {(strategy.status === 'saved' ||
+                            strategy.status === 'paused' ||
+                            strategy.status === 'error' ||
+                            strategy.status === 'sq_off') && (
+                            <button
+                              className="btn btn-outline-success"
+                              title="Deploy"
+                              onClick={() =>
+                                handleAction(
+                                  `http://localhost:8000/api/strategy/deploy/${strategy.id}`,
+                                )
+                              }
+                            >
+                              <i className="bi bi-play-fill" />
+                            </button>
+                          )}
+                          {strategy.status === 'running' && (
+                            <button
+                              className="btn btn-outline-warning"
+                              title="Pause"
+                              onClick={() =>
+                                handleAction(
+                                  `http://localhost:8000/api/strategy/pause/${strategy.id}`,
+                                )
+                              }
+                            >
+                              <i className="bi bi-pause-fill" />
+                            </button>
+                          )}
+                          <button
+                            className="btn btn-outline-danger"
+                            title="Delete"
+                            onClick={() =>
+                              handleAction(
+                                `http://localhost:8000/api/strategy/delete/${strategy.id}`,
+                                'Delete this strategy permanently?',
+                              )
+                            }
+                          >
+                            <i className="bi bi-trash" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
-
-      {/* Strategy Info Modal */}
-      {showStrategyInfoModal && selectedStrategyInfo && (
-        <div 
-          className="modal fade show d-block" 
-          style={{ backgroundColor: 'rgba(0,0,0,0.5)' }}
-          onClick={() => setShowStrategyInfoModal(false)}
+      {selectedStrategy && (
+        <div
+          className="modal fade show d-block"
+          style={{ background: 'rgba(0,0,0,0.5)' }}
+          onClick={() => setSelectedStrategy(null)}
         >
           <div className="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
-            <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-content" onClick={(event) => event.stopPropagation()}>
               <div className="modal-header bg-primary text-white">
                 <h5 className="modal-title">
-                  <i className="bi bi-info-circle me-2"></i>
-                  Strategy Details: {selectedStrategyInfo.strategy_name}
+                  <i className="bi bi-info-circle me-2" />
+                  Strategy Details — {selectedStrategy.strategy_name}
                 </h5>
                 <button
                   type="button"
                   className="btn-close btn-close-white"
-                  onClick={() => setShowStrategyInfoModal(false)}
-                ></button>
+                  onClick={() => setSelectedStrategy(null)}
+                />
               </div>
               <div className="modal-body">
-                <StrategyInfoContent strategy={selectedStrategyInfo} />
+                <StrategyInfoContent strategy={selectedStrategy} />
               </div>
               <div className="modal-footer">
                 <button
                   type="button"
                   className="btn btn-secondary"
-                  onClick={() => setShowStrategyInfoModal(false)}
+                  onClick={() => setSelectedStrategy(null)}
                 >
                   Close
                 </button>
@@ -487,304 +523,144 @@ const SavedStrategies: React.FC<SavedStrategiesProps> = ({ onViewLive, onStrateg
   );
 };
 
-// Component to display strategy information
-const StrategyInfoContent: React.FC<{ strategy: Strategy }> = ({ strategy }) => {
-  // Parse JSON strings for indicators and rules
-  let indicators: any[] = [];
-  let entryRules: any[] = [];
-  let exitRules: any[] = [];
-  
-  try {
-    if (strategy.indicators) {
-      indicators = JSON.parse(strategy.indicators);
-    }
-  } catch (e) {
-    console.error('Error parsing indicators:', e);
-  }
-  
-  try {
-    if (strategy.entry_rules) {
-      entryRules = JSON.parse(strategy.entry_rules);
-    }
-  } catch (e) {
-    console.error('Error parsing entry rules:', e);
-  }
-  
-  try {
-    if (strategy.exit_rules) {
-      exitRules = JSON.parse(strategy.exit_rules);
-    }
-  } catch (e) {
-    console.error('Error parsing exit rules:', e);
+const StrategyFlowDiagram: React.FC<{ nodes: FlowNode[] }> = ({ nodes }) => (
+  <div className="card border-0 shadow-sm h-100">
+    <div className="card-header bg-info text-white">
+      <h6 className="mb-0">
+        <i className="bi bi-diagram-3 me-2" />
+        Strategy Flow Diagram
+      </h6>
+    </div>
+    <div className="card-body">
+      {nodes.length === 0 ? (
+        <div className="text-center text-muted py-5">
+          <i className="bi bi-diagram-3 fs-1 d-block mb-3" />
+          Generate a strategy to view the execution flow.
+        </div>
+      ) : (
+        <div className="position-relative ps-4">
+          <div
+            className="position-absolute top-0 bottom-0 start-0 bg-secondary"
+            style={{ width: '2px', opacity: 0.3 }}
+          />
+          {nodes.map((node, index) => (
+            <div key={node.id} className="mb-4 position-relative">
+              <span
+                className="position-absolute translate-middle badge rounded-pill bg-primary"
+                style={{ left: '-18px', top: '0' }}
+              >
+                {index + 1}
+              </span>
+              <div className="ps-3">
+                <h6 className="mb-1">{node.title}</h6>
+                {node.subtitle && (
+                  <small className="text-muted d-block mb-1">{node.subtitle}</small>
+                )}
+                <ul className="list-unstyled small mb-0">
+                  {node.details.map((detail, detailIdx) => (
+                    <li key={`${node.id}-${detailIdx}`}>• {detail}</li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  </div>
+);
+
+const buildFlowNodes = (strategyText: string): FlowNode[] => {
+  if (!strategyText) return [];
+
+  const nodes: FlowNode[] = [];
+
+  const strategyMatch = strategyText.match(/STRATEGY\s+"([^"]+)"\s+VERSION\s+([^\n]+)/i);
+  if (strategyMatch) {
+    nodes.push({
+      id: 'strategy',
+      title: `Strategy: ${strategyMatch[1]}`,
+      subtitle: `Version ${strategyMatch[2].trim()}`,
+      details: [],
+    });
   }
 
-  // Strategy type descriptions
-  const getStrategyTypeDescription = (type: string | undefined) => {
-    switch (type) {
-      case 'orb':
-        return {
-          name: 'Opening Range Breakout (ORB)',
-          logic: `This strategy identifies the opening range (high and low) during the first ${strategy.candle_time || 15} minutes of trading. It enters a position when price breaks above the range high (long) or below the range low (short). The strategy uses the following logic:
-          
-• Opening Range: Calculated from ${strategy.start_time || '09:15'} to the first ${strategy.candle_time || 15} minutes
-• Entry Signal: Price breaks above range high (bullish) or below range low (bearish)
-• Stop Loss: ${strategy.stop_loss || 1}% from entry price
-• Target Profit: ${strategy.target_profit || 2}% from entry price
-• Position Size: ${strategy.total_lot || 1} lot(s) of ${strategy.instrument || 'NIFTY'} ${strategy.segment || 'Option'}
-• Trade Type: ${strategy.trade_type || 'Buy'}
-• Strike Selection: ${strategy.strike_price || 'ATM'} with ${strategy.expiry_type || 'Weekly'} expiry
-• Trailing Stop: ${strategy.trailing_stop_loss || 0}% trailing stop loss for profit protection`,
-          howItWorks: 'The ORB strategy capitalizes on the momentum that occurs when price breaks out of the opening range. This is based on the theory that the first 15-30 minutes often set the tone for the day. When price breaks above/below this range with volume, it indicates strong directional momentum.'
-        };
-      case 'capture_mountain_signal':
-        return {
-          name: 'Capture Mountain Signal',
-          logic: `This pattern recognition strategy identifies "mountain" formations in price charts. The strategy logic includes:
-          
-• Pattern Detection: Monitors price action for mountain-like patterns (peaks and valleys)
-• Signal Confirmation: Validates signals using technical indicators and price action
-• Entry: Enters on confirmed mountain pattern signals
-• Exit: Uses stop loss (${strategy.stop_loss || 1}%) and target profit (${strategy.target_profit || 2}%)
-• Position Management: ${strategy.total_lot || 1} lot(s) with trailing stop (${strategy.trailing_stop_loss || 0}%)
-• Execution Window: Active from ${strategy.start_time || '09:15'} to ${strategy.end_time || '15:00'}
-• Instrument: ${strategy.instrument || 'NIFTY'} ${strategy.segment || 'Option'} with ${strategy.expiry_type || 'Weekly'} expiry`,
-          howItWorks: 'The strategy analyzes candlestick patterns and price formations to identify mountain-like structures. When a mountain pattern is detected along with confirmation signals, the strategy enters trades anticipating trend reversals or continuations. It uses multiple timeframes and technical analysis to validate signals.'
-        };
-      case 'custom':
-        return {
-          name: 'Custom Strategy',
-          logic: `This is a custom-built strategy using technical indicators and custom rules. Strategy configuration:
-          
-• Indicators Used: ${indicators.length > 0 ? indicators.map((ind: any) => ind.name || ind.id).join(', ') : 'None configured'}
-• Entry Rules: ${entryRules.length} rule(s) defined
-• Exit Rules: ${exitRules.length} rule(s) defined
-• Risk Parameters: Stop Loss ${strategy.stop_loss || 1}%, Target ${strategy.target_profit || 2}%, Trailing Stop ${strategy.trailing_stop_loss || 0}%
-• Position Size: ${strategy.total_lot || 1} lot(s)
-• Execution: ${strategy.start_time || '09:15'} to ${strategy.end_time || '15:00'}
-• Instrument: ${strategy.instrument || 'NIFTY'} ${strategy.segment || 'Option'}`,
-          howItWorks: 'This custom strategy combines multiple technical indicators with logical conditions to generate entry and exit signals. The strategy evaluates conditions based on indicator values and executes trades when all conditions are met according to the defined rules.'
-        };
-      default:
-        return {
-          name: strategy.strategy_type || 'Unknown Strategy',
-          logic: 'Strategy logic details not available.',
-          howItWorks: 'This strategy uses custom logic configured during creation.'
-        };
-    }
+  const descriptionMatch = strategyText.match(/DESCRIPTION\s+"([^"]+)"/i);
+  if (descriptionMatch) {
+    nodes.push({
+      id: 'description',
+      title: 'Description',
+      details: [descriptionMatch[1]],
+    });
+  }
+
+  const scheduleMatch = strategyText.match(/SCHEDULE\s+every\s+([^\n]+)/i);
+  const timingMatch = strategyText.match(/TIMING\s+evaluate\s+([^\n]+)/i);
+  if (scheduleMatch || timingMatch) {
+    nodes.push({
+      id: 'timing',
+      title: 'Evaluation Window',
+      details: [
+        scheduleMatch ? `Schedule: every ${scheduleMatch[1]}` : 'Schedule not specified',
+        timingMatch ? `Timing: evaluate ${timingMatch[1]}` : 'Timing not specified',
+      ],
+    });
+  }
+
+  const ruleRegex = /RULE\s+"([^"]+)"([\s\S]*?)(?=\nRULE|\nENTRY|\nEXIT|$)/gi;
+  let ruleMatch: RegExpExecArray | null;
+  while ((ruleMatch = ruleRegex.exec(strategyText)) !== null) {
+    const lines = ruleMatch[2]
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .slice(0, 6);
+    nodes.push({
+      id: `rule-${nodes.length}`,
+      title: `Rule: ${ruleMatch[1]}`,
+      details: lines,
+    });
+  }
+
+  const extractBlock = (label: string) => {
+    const regex = new RegExp(`${label}[\\s\\S]*?(?=\\n[A-Z ]{3,}|$)`, 'i');
+    const match = strategyText.match(regex);
+    if (!match) return null;
+    return match[0]
+      .split('\n')
+      .slice(1)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .slice(0, 6);
   };
 
-  const strategyInfo = getStrategyTypeDescription(strategy.strategy_type);
+  const entryBlock = extractBlock('ENTRY');
+  if (entryBlock) {
+    nodes.push({
+      id: 'entry',
+      title: 'Entry Logic',
+      details: entryBlock,
+    });
+  }
 
-  return (
-    <div>
-      {/* Basic Information */}
-      <div className="mb-4">
-        <h6 className="text-primary mb-3">
-          <i className="bi bi-card-heading me-2"></i>Basic Information
-        </h6>
-        <div className="row g-3">
-          <div className="col-md-6">
-            <strong>Strategy Name:</strong> {strategy.strategy_name}
-          </div>
-          <div className="col-md-6">
-            <strong>Type:</strong> <span className="badge bg-primary">{strategyInfo.name}</span>
-          </div>
-          <div className="col-md-6">
-            <strong>Instrument:</strong> {strategy.instrument}
-          </div>
-          <div className="col-md-6">
-            <strong>Segment:</strong> {strategy.segment || 'Option'}
-          </div>
-          <div className="col-md-6">
-            <strong>Execution Window:</strong> {strategy.start_time || '09:15'} - {strategy.end_time || '15:00'}
-          </div>
-          <div className="col-md-6">
-            <strong>Status:</strong> 
-            <span className={`badge ms-2 ${
-              strategy.status === 'running' ? 'bg-success' :
-              strategy.status === 'paused' ? 'bg-warning' :
-              strategy.status === 'error' ? 'bg-danger' :
-              'bg-secondary'
-            }`}>
-              {strategy.status || 'saved'}
-            </span>
-          </div>
-        </div>
-      </div>
+  const exitBlock = extractBlock('EXIT');
+  if (exitBlock) {
+    nodes.push({
+      id: 'exit',
+      title: 'Exit Logic',
+      details: exitBlock,
+    });
+  }
 
-      {/* Strategy Logic */}
-      <div className="mb-4">
-        <h6 className="text-success mb-3">
-          <i className="bi bi-cpu me-2"></i>Strategy Logic
-        </h6>
-        <div className="card bg-light">
-          <div className="card-body">
-            <pre style={{ whiteSpace: 'pre-wrap', fontFamily: 'inherit', margin: 0 }}>{strategyInfo.logic}</pre>
-          </div>
-        </div>
-      </div>
-
-      {/* How It Works */}
-      <div className="mb-4">
-        <h6 className="text-info mb-3">
-          <i className="bi bi-gear me-2"></i>How It Works
-        </h6>
-        <p className="text-muted">{strategyInfo.howItWorks}</p>
-      </div>
-
-      {/* Risk Management */}
-      <div className="mb-4">
-        <h6 className="text-warning mb-3">
-          <i className="bi bi-shield-check me-2"></i>Risk Management
-        </h6>
-        <div className="row g-3">
-          <div className="col-md-3">
-            <div className="card border-warning">
-              <div className="card-body text-center">
-                <strong className="text-warning d-block">Stop Loss</strong>
-                <span className="fs-5">{strategy.stop_loss || 0}%</span>
-              </div>
-            </div>
-          </div>
-          <div className="col-md-3">
-            <div className="card border-success">
-              <div className="card-body text-center">
-                <strong className="text-success d-block">Target Profit</strong>
-                <span className="fs-5">{strategy.target_profit || 0}%</span>
-              </div>
-            </div>
-          </div>
-          <div className="col-md-3">
-            <div className="card border-info">
-              <div className="card-body text-center">
-                <strong className="text-info d-block">Trailing Stop</strong>
-                <span className="fs-5">{strategy.trailing_stop_loss || 0}%</span>
-              </div>
-            </div>
-          </div>
-          <div className="col-md-3">
-            <div className="card border-primary">
-              <div className="card-body text-center">
-                <strong className="text-primary d-block">Position Size</strong>
-                <span className="fs-5">{strategy.total_lot || 1} lot(s)</span>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Custom Strategy Details */}
-      {strategy.strategy_type === 'custom' && (
-        <>
-          {/* Indicators */}
-          {indicators.length > 0 && (
-            <div className="mb-4">
-              <h6 className="text-primary mb-3">
-                <i className="bi bi-graph-up me-2"></i>Technical Indicators ({indicators.length})
-              </h6>
-              <div className="row g-2">
-                {indicators.map((indicator: any, idx: number) => (
-                  <div key={idx} className="col-md-6">
-                    <div className="card">
-                      <div className="card-body p-2">
-                        <strong>{indicator.name || indicator.id}</strong>
-                        {indicator.params && Object.keys(indicator.params).length > 0 && (
-                          <div className="small text-muted">
-                            Params: {Object.entries(indicator.params).map(([k, v]) => `${k}: ${v}`).join(', ')}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Entry Rules */}
-          {entryRules.length > 0 && (
-            <div className="mb-4">
-              <h6 className="text-success mb-3">
-                <i className="bi bi-arrow-right-circle me-2"></i>Entry Rules ({entryRules.length})
-              </h6>
-              {entryRules.map((rule: any, idx: number) => (
-                <div key={idx} className="card mb-2 border-success">
-                  <div className="card-body">
-                    <strong>{rule.name || `Entry Rule ${idx + 1}`}</strong>
-                    {rule.conditions && rule.conditions.length > 0 && (
-                      <div className="mt-2">
-                        {rule.conditions.map((cond: any, cIdx: number) => (
-                          <div key={cIdx} className="small ms-3">
-                            {cIdx > 0 && <span className="badge bg-secondary me-1">{cond.logic || 'AND'}</span>}
-                            <span>{cond.indicator} {cond.operator} {cond.value}</span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-
-          {/* Exit Rules */}
-          {exitRules.length > 0 && (
-            <div className="mb-4">
-              <h6 className="text-danger mb-3">
-                <i className="bi bi-arrow-left-circle me-2"></i>Exit Rules ({exitRules.length})
-              </h6>
-              {exitRules.map((rule: any, idx: number) => (
-                <div key={idx} className="card mb-2 border-danger">
-                  <div className="card-body">
-                    <strong>{rule.name || `Exit Rule ${idx + 1}`}</strong>
-                    {rule.conditions && rule.conditions.length > 0 && (
-                      <div className="mt-2">
-                        {rule.conditions.map((cond: any, cIdx: number) => (
-                          <div key={cIdx} className="small ms-3">
-                            {cIdx > 0 && <span className="badge bg-secondary me-1">{cond.logic || 'AND'}</span>}
-                            <span>{cond.indicator} {cond.operator} {cond.value}</span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </>
-      )}
-
-      {/* Trading Parameters */}
-      <div className="mb-3">
-        <h6 className="text-secondary mb-3">
-          <i className="bi bi-sliders me-2"></i>Trading Parameters
-        </h6>
-        <div className="row g-2">
-          <div className="col-md-4">
-            <small><strong>Trade Type:</strong> {strategy.trade_type || 'Buy'}</small>
-          </div>
-          <div className="col-md-4">
-            <small><strong>Strike Price:</strong> {strategy.strike_price || 'ATM'}</small>
-          </div>
-          <div className="col-md-4">
-            <small><strong>Expiry:</strong> {strategy.expiry_type || 'Weekly'}</small>
-          </div>
-          <div className="col-md-4">
-            <small><strong>Candle Timeframe:</strong> {strategy.candle_time || '5'} min</small>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
+  return nodes;
 };
 
 const AIEnabledStrategyChat: React.FC = () => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [inputValue, setInputValue] = useState<string>('');
-  const [loading, setLoading] = useState<boolean>(false);
+  const [inputValue, setInputValue] = useState('');
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [latestStrategy, setLatestStrategy] = useState<string>('');
+  const [latestStrategy, setLatestStrategy] = useState('');
   const [latestValidation, setLatestValidation] = useState<StrategyValidation | null>(null);
   const [lastSavedPath, setLastSavedPath] = useState<string | null>(null);
   const chatBodyRef = useRef<HTMLDivElement | null>(null);
@@ -795,8 +671,13 @@ const AIEnabledStrategyChat: React.FC = () => {
     }
   }, [messages]);
 
-  const buildHistoryPayload = (msgs: ChatMessage[]) =>
-    msgs.map(({ role, content }) => ({ role, content }));
+  const historyPayload = useCallback(
+    (history: ChatMessage[]) =>
+      history.slice(-10).map(({ role, content }) => ({ role, content })),
+    [],
+  );
+
+  const flowNodes = useMemo(() => buildFlowNodes(latestStrategy), [latestStrategy]);
 
   const handleSend = async () => {
     const trimmed = inputValue.trim();
@@ -827,76 +708,49 @@ const AIEnabledStrategyChat: React.FC = () => {
         credentials: 'include',
         body: JSON.stringify({
           message: trimmed,
-          history: buildHistoryPayload([...messages, userMessage].slice(-10)),
+          history: historyPayload([...messages, userMessage]),
         }),
       });
 
       if (!response.ok) {
-        const errPayload = await response.json().catch(() => ({}));
-        throw new Error(errPayload.message || 'Failed to generate strategy');
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.message || 'Failed to generate strategy');
       }
 
       const data = await response.json();
 
-      const assistantMessage: ChatMessage = {
-        id: `assistant-${Date.now()}`,
-        role: 'assistant',
-        content: data.strategy
-          ? 'Strategy blueprint generated. Review the formatted output on the right.'
-          : data.message || 'Response received.',
-        timestamp: new Date().toISOString(),
-      };
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `assistant-${Date.now()}`,
+          role: 'assistant',
+          content: data.strategy
+            ? 'Strategy blueprint generated. Review the formatted output on the right.'
+            : data.message || 'Response received.',
+          timestamp: new Date().toISOString(),
+        },
+      ]);
 
-      setMessages((prev) => [...prev, assistantMessage]);
-
-      if (typeof data.strategy === 'string') {
-        setLatestStrategy(data.strategy);
-      } else {
-        setLatestStrategy('');
-      }
-
-      if (data.validation) {
-        setLatestValidation(data.validation);
-      } else {
-        setLatestValidation(null);
-      }
-
+      setLatestStrategy(typeof data.strategy === 'string' ? data.strategy : '');
+      setLatestValidation(data.validation ?? null);
       if (data.savedPath) {
         setLastSavedPath(data.savedPath);
       }
     } catch (apiError: any) {
       console.error('AI assistant error:', apiError);
       setError(apiError.message || 'Unexpected error occurred while generating strategy');
-      const failureMessage: ChatMessage = {
-        id: `assistant-${Date.now()}`,
-        role: 'assistant',
-        content: '⚠️ Unable to generate strategy. Please try again or refine your request.',
-        timestamp: new Date().toISOString(),
-      };
-      setMessages((prev) => [...prev, failureMessage]);
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `assistant-error-${Date.now()}`,
+          role: 'assistant',
+          content:
+            '⚠️ Unable to generate strategy. Please try again or refine your request.',
+          timestamp: new Date().toISOString(),
+        },
+      ]);
     } finally {
       setLoading(false);
-    }
-  };
-
-  const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.key === 'Enter' && !event.shiftKey) {
-      event.preventDefault();
-      handleSend();
-    }
-  };
-
-  const handleCopyStrategy = async () => {
-    if (!latestStrategy) {
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(latestStrategy);
-      setLastSavedPath('Copied to clipboard');
-      setError(null);
-    } catch (copyError: any) {
-      console.error('Failed to copy strategy:', copyError);
-      setError('Failed to copy strategy to clipboard');
     }
   };
 
@@ -904,8 +758,8 @@ const AIEnabledStrategyChat: React.FC = () => {
     if (!latestStrategy || loading) {
       return;
     }
-    setError(null);
     setLoading(true);
+    setError(null);
     try {
       const response = await fetch('http://localhost:8000/api/ai/strategy_chat/save', {
         method: 'POST',
@@ -915,43 +769,61 @@ const AIEnabledStrategyChat: React.FC = () => {
         credentials: 'include',
         body: JSON.stringify({ strategy_text: latestStrategy }),
       });
+
       if (!response.ok) {
-        const errPayload = await response.json().catch(() => ({}));
-        throw new Error(errPayload.message || 'Failed to save strategy');
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.message || 'Failed to save strategy');
       }
+
       const data = await response.json();
-      setLastSavedPath(data.savedPath || 'Strategy saved');
-      if (data.validation) {
-        setLatestValidation(data.validation);
-      }
-    } catch (saveError: any) {
-      console.error('Error saving strategy:', saveError);
-      setError(saveError.message || 'An error occurred while saving the strategy');
+      setLastSavedPath(data.savedPath || 'Strategy saved.');
+      setLatestValidation(data.validation ?? null);
+    } catch (error: any) {
+      console.error('Error saving strategy:', error);
+      setError(error.message || 'An error occurred while saving the strategy');
     } finally {
       setLoading(false);
     }
   };
 
-  const renderValidation = () => {
-    if (!latestValidation) {
-      return null;
+  const handleCopyStrategy = async () => {
+    if (!latestStrategy) return;
+    try {
+      await navigator.clipboard.writeText(latestStrategy);
+      setLastSavedPath('Copied to clipboard');
+    } catch (copyError: any) {
+      console.error('Failed to copy strategy:', copyError);
+      setError('Failed to copy strategy to clipboard');
     }
+  };
 
+  const handleKeyDown: React.KeyboardEventHandler<HTMLTextAreaElement> = (event) => {
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault();
+      handleSend();
+    }
+  };
+
+  const renderValidation = () => {
+    if (!latestValidation) return null;
     return (
       <div className="mt-3">
         <div className="d-flex flex-wrap align-items-center gap-2">
-          <span className={`badge ${latestValidation.is_valid ? 'bg-success' : 'bg-warning text-dark'}`}>
+          <span
+            className={`badge ${
+              latestValidation.is_valid ? 'bg-success' : 'bg-warning text-dark'
+            }`}
+          >
             {latestValidation.is_valid ? 'Format Valid' : 'Needs Attention'}
           </span>
           {lastSavedPath && (
-            <span className="badge bg-info text-dark">
-              {lastSavedPath}
-            </span>
+            <span className="badge bg-info text-dark">{lastSavedPath}</span>
           )}
         </div>
         {latestValidation.missing_sections?.length > 0 && (
           <div className="alert alert-warning mt-3 py-2 px-3">
-            <strong>Missing Sections:</strong> {latestValidation.missing_sections.join(', ')}
+            <strong>Missing Sections:</strong>{' '}
+            {latestValidation.missing_sections.join(', ')}
           </div>
         )}
         {latestValidation.warnings?.length > 0 && (
@@ -969,20 +841,20 @@ const AIEnabledStrategyChat: React.FC = () => {
   };
 
   return (
-    <div className="card shadow-sm border-0 mt-4">
+    <div className="card border-0 shadow-sm mt-4">
       <div className="card-header bg-dark text-white d-flex align-items-center justify-content-between">
         <div>
           <h5 className="card-title mb-0">
-            <i className="bi bi-robot me-2"></i>
+            <i className="bi bi-robot me-2" />
             AI Strategy Assistant
           </h5>
           <small className="text-white-50">
-            Describe trading ideas in natural language and receive production-ready strategy blueprints.
+            Describe trading ideas in natural language and receive production-ready blueprints.
           </small>
         </div>
         {loading && (
           <span className="badge bg-secondary">
-            <span className="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>
+            <span className="spinner-border spinner-border-sm me-2" role="status" />
             Generating...
           </span>
         )}
@@ -990,19 +862,21 @@ const AIEnabledStrategyChat: React.FC = () => {
       <div className="card-body">
         {error && (
           <div className="alert alert-danger d-flex align-items-center" role="alert">
-            <i className="bi bi-exclamation-triangle-fill me-2"></i>
+            <i className="bi bi-exclamation-triangle-fill me-2" />
             <div>{error}</div>
           </div>
         )}
         <div className="row g-4">
-          <div className="col-lg-6">
+          <div className="col-xl-4 col-lg-6 col-12">
             <div className="border rounded p-3 h-100 d-flex flex-column">
               <div className="d-flex justify-content-between align-items-center mb-3">
                 <h6 className="mb-0">
-                  <i className="bi bi-chat-text-fill me-2 text-primary"></i>
+                  <i className="bi bi-chat-text-fill me-2 text-primary" />
                   Conversation
                 </h6>
-                <span className="badge bg-light text-muted">{messages.length} messages</span>
+                <span className="badge bg-light text-muted">
+                  {messages.length} messages
+                </span>
               </div>
               <div
                 ref={chatBodyRef}
@@ -1011,24 +885,33 @@ const AIEnabledStrategyChat: React.FC = () => {
               >
                 {messages.length === 0 ? (
                   <div className="text-center text-muted py-5">
-                    <i className="bi bi-stars fs-1 d-block mb-3"></i>
+                    <i className="bi bi-stars fs-1 d-block mb-3" />
                     Ask the assistant to design a strategy. Example:
                     <div className="mt-3">
-                      <code>Build a Bank Nifty PE strategy that triggers when RSI crosses above 70 with 5m candles.</code>
+                      <code>
+                        Build a BankNifty PE strategy when RSI crosses 70 on 5 minute candles.
+                      </code>
                     </div>
                   </div>
                 ) : (
                   messages.map((msg) => (
                     <div
                       key={msg.id}
-                      className={`mb-3 d-flex ${msg.role === 'user' ? 'justify-content-end' : 'justify-content-start'}`}
+                      className={`mb-3 d-flex ${
+                        msg.role === 'user' ? 'justify-content-end' : 'justify-content-start'
+                      }`}
                     >
                       <div
-                        className={`p-3 rounded shadow-sm ${msg.role === 'user' ? 'bg-primary text-white' : 'bg-white border'}`}
+                        className={`p-3 rounded shadow-sm ${
+                          msg.role === 'user'
+                            ? 'bg-primary text-white'
+                            : 'bg-white border'
+                        }`}
                         style={{ maxWidth: '85%' }}
                       >
                         <div className="small text-muted mb-1">
-                          {msg.role === 'user' ? 'You' : 'Assistant'} · {new Date(msg.timestamp).toLocaleTimeString()}
+                          {msg.role === 'user' ? 'You' : 'Assistant'} ·{' '}
+                          {new Date(msg.timestamp).toLocaleTimeString()}
                         </div>
                         <div style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div>
                       </div>
@@ -1043,13 +926,13 @@ const AIEnabledStrategyChat: React.FC = () => {
                 <textarea
                   id="ai-strategy-input"
                   className="form-control"
-                  placeholder="E.g., Create a momentum breakout strategy using 5m Bank Nifty candles with EMA and volume confirmation..."
+                  placeholder="E.g., Create a momentum breakout strategy using 5m BankNifty candles with EMA and volume confirmation..."
                   rows={3}
                   value={inputValue}
-                  onChange={(e) => setInputValue(e.target.value)}
+                  onChange={(event) => setInputValue(event.target.value)}
                   onKeyDown={handleKeyDown}
                   disabled={loading}
-                ></textarea>
+                />
                 <div className="d-flex justify-content-end mt-2 gap-2">
                   <button
                     type="button"
@@ -1065,18 +948,18 @@ const AIEnabledStrategyChat: React.FC = () => {
                     onClick={handleSend}
                     disabled={loading || inputValue.trim().length === 0}
                   >
-                    <i className="bi bi-send-fill me-2"></i>
+                    <i className="bi bi-send-fill me-2" />
                     Send
                   </button>
                 </div>
               </div>
             </div>
           </div>
-          <div className="col-lg-6">
+          <div className="col-xl-4 col-lg-6 col-12">
             <div className="border rounded p-3 h-100 d-flex flex-column bg-light">
               <div className="d-flex justify-content-between align-items-center mb-3">
                 <h6 className="mb-0">
-                  <i className="bi bi-file-code-fill me-2 text-success"></i>
+                  <i className="bi bi-file-code-fill me-2 text-success" />
                   Generated Strategy Blueprint
                 </h6>
                 <div className="btn-group btn-group-sm">
@@ -1086,7 +969,7 @@ const AIEnabledStrategyChat: React.FC = () => {
                     onClick={handleCopyStrategy}
                     disabled={!latestStrategy}
                   >
-                    <i className="bi bi-clipboard me-2"></i>
+                    <i className="bi bi-clipboard me-2" />
                     Copy
                   </button>
                   <button
@@ -1095,25 +978,34 @@ const AIEnabledStrategyChat: React.FC = () => {
                     onClick={handleSaveStrategy}
                     disabled={!latestStrategy || loading}
                   >
-                    <i className="bi bi-save me-2"></i>
+                    <i className="bi bi-save me-2" />
                     Save
                   </button>
                 </div>
               </div>
-              <div className="bg-white border rounded p-3 flex-grow-1 overflow-auto" style={{ maxHeight: '420px' }}>
+              <div
+                className="bg-white border rounded p-3 flex-grow-1 overflow-auto"
+                style={{ maxHeight: '420px' }}
+              >
                 {latestStrategy ? (
-                  <pre className="mb-0" style={{ whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: '0.85rem' }}>
+                  <pre
+                    className="mb-0"
+                    style={{ whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: '0.85rem' }}
+                  >
                     {latestStrategy}
                   </pre>
                 ) : (
                   <div className="text-muted text-center py-5">
-                    <i className="bi bi-journal-code fs-1 d-block mb-3"></i>
+                    <i className="bi bi-journal-code fs-1 d-block mb-3" />
                     Generated strategy code will appear here once the assistant responds.
                   </div>
                 )}
               </div>
               {renderValidation()}
             </div>
+          </div>
+          <div className="col-xl-4 col-12">
+            <StrategyFlowDiagram nodes={flowNodes} />
           </div>
         </div>
       </div>
@@ -1122,58 +1014,44 @@ const AIEnabledStrategyChat: React.FC = () => {
 };
 
 interface DashboardContentProps {
-  niftyPrice: string;
-  bankNiftyPrice: string;
-  balance: string;
-  access_token: boolean;
   onViewLiveStrategy: (strategyId: string) => void;
-  onViewChart: (instrumentToken: string) => void;
 }
 
-const DashboardContent: React.FC<DashboardContentProps> = ({ niftyPrice, bankNiftyPrice, balance, access_token, onViewLiveStrategy, onViewChart }) => {
-  const [refreshStrategies, setRefreshStrategies] = useState<number>(0);
-  const [editingStrategy, setEditingStrategy] = useState<any>(null);
-  const [strategyBuilderOpen, setStrategyBuilderOpen] = useState<boolean>(false);
-  const [savedStrategiesOpen, setSavedStrategiesOpen] = useState<boolean>(false);
+const DashboardContent: React.FC<DashboardContentProps> = ({ onViewLiveStrategy }) => {
+  const [refreshStrategies, setRefreshStrategies] = useState(0);
+  const [editingStrategy, setEditingStrategy] = useState<Strategy | null>(null);
+  const [builderOpen, setBuilderOpen] = useState(true);
+  const [savedOpen, setSavedOpen] = useState(true);
 
   const handleStrategySaved = () => {
-    setRefreshStrategies(prev => prev + 1);
-    setEditingStrategy(null); // Reset editing state after save
-    // Auto-open saved strategies section
-    setSavedStrategiesOpen(true);
+    setRefreshStrategies((prev) => prev + 1);
+    setEditingStrategy(null);
+    setSavedOpen(true);
   };
 
-  const handleEditStrategy = (strategy: any) => {
+  const handleEditStrategy = (strategy: Strategy) => {
     setEditingStrategy(strategy);
-    setStrategyBuilderOpen(true);
+    setBuilderOpen(true);
   };
 
   return (
-    <div className="container mt-4" id="dashboard-content">
-      <div className="row">
-        <div className="col-md-4">
-          <MarketData niftyPrice={niftyPrice} bankNiftyPrice={bankNiftyPrice} />
-          <AccountInfo balance={balance} access_token={access_token} />
-        </div>
-        <div className="col-md-8">
-          <div className="accordion" id="dashboardAccordion">
-            <StrategyConfiguration 
-              onStrategySaved={handleStrategySaved} 
-              editingStrategy={editingStrategy}
-              isOpen={strategyBuilderOpen}
-              onToggle={setStrategyBuilderOpen}
-            />
-            <SavedStrategies 
-              onViewLive={onViewLiveStrategy} 
-              onStrategyUpdated={refreshStrategies}
-              onEditStrategy={handleEditStrategy}
-              isOpen={savedStrategiesOpen}
-              onToggle={setSavedStrategiesOpen}
-            />
-          </div>
-          <AIEnabledStrategyChat />
-        </div>
+    <div className="pb-4" id="dashboard-content">
+      <div className="accordion" id="dashboardAccordion">
+        <StrategyConfiguration
+          onStrategySaved={handleStrategySaved}
+          editingStrategy={editingStrategy}
+          isOpen={builderOpen}
+          onToggle={setBuilderOpen}
+        />
+        <SavedStrategies
+          onViewLive={onViewLiveStrategy}
+          onStrategyUpdated={refreshStrategies}
+          onEditStrategy={handleEditStrategy}
+          isOpen={savedOpen}
+          onToggle={setSavedOpen}
+        />
       </div>
+      <AIEnabledStrategyChat />
     </div>
   );
 };

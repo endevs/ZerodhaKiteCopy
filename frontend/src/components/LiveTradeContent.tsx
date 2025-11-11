@@ -74,7 +74,6 @@ interface LiveTradePreview {
   stopLossPercentDisplay: number;
   targetPercent: number;
   targetPercentDisplay: number;
-  rsiThreshold: number;
 }
 
 interface LiveDeploymentState {
@@ -100,7 +99,6 @@ interface LiveDeploymentState {
     targetPercent?: number;
     evaluationSecondsBeforeClose?: number;
     candleIntervalMinutes?: number;
-    rsiThreshold?: number;
   };
   openOrdersCount?: number;
   openPositionsCount?: number;
@@ -515,10 +513,6 @@ const LiveTradeContent: React.FC = () => {
                       <span>Target</span>
                       <span>{preview.targetPercentDisplay.toFixed(2)}% (₹{preview.targetPrice.toFixed(2)})</span>
                     </div>
-                    <div className="d-flex justify-content-between">
-                      <span>RSI Threshold</span>
-                      <span>{preview.rsiThreshold ?? 70}</span>
-                    </div>
                   </div>
                 ) : (
                   <div className="text-muted small">
@@ -737,10 +731,6 @@ const LiveTradeContent: React.FC = () => {
                           {stopLossDisplay !== null && targetDisplay !== null
                             ? `${stopLossDisplay.toFixed(2)}% / ${targetDisplay.toFixed(2)}%`
                             : '—'}
-                        </p>
-                        <p className="mb-1">
-                          <strong>RSI Threshold:</strong>{' '}
-                          {config.rsiThreshold ?? preview?.rsiThreshold ?? 70}
                         </p>
                         <p className="mb-0">
                           <strong>Live P&L:</strong>{' '}

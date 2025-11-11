@@ -244,4 +244,3 @@ const BacktestResultsDashboard: React.FC<Props> = ({ metrics, trades = [] }) => 
 export default BacktestResultsDashboard;
 
 
-

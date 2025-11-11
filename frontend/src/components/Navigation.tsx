@@ -5,9 +5,18 @@ interface NavigationProps {
   onTabChange: (tab: string) => void;
   userName: string;
   onLogout: () => void;
+  niftyPrice: string;
+  bankNiftyPrice: string;
 }
 
-const Navigation: React.FC<NavigationProps> = ({ activeTab, onTabChange, userName, onLogout }) => {
+const Navigation: React.FC<NavigationProps> = ({
+  activeTab,
+  onTabChange,
+  userName,
+  onLogout,
+  niftyPrice,
+  bankNiftyPrice,
+}) => {
   const navItems = [
     { id: 'dashboard', label: 'Dashboard', icon: '📊' },
     { id: 'algo-visualization', label: 'Algo Visualization', icon: '🎯' },
@@ -86,7 +95,20 @@ const Navigation: React.FC<NavigationProps> = ({ activeTab, onTabChange, userNam
               </li>
             ))}
           </ul>
-          <ul className="navbar-nav ms-auto">
+          <ul className="navbar-nav ms-auto align-items-center">
+            <li className="nav-item me-lg-3 mb-2 mb-lg-0">
+              <span className="nav-link text-warning d-flex align-items-center">
+                <i className="bi bi-activity me-2" />
+                <span className="me-3">
+                  <small className="text-uppercase text-white-50 d-block">Nifty 50</small>
+                  <span className="fw-semibold">{niftyPrice}</span>
+                </span>
+                <span>
+                  <small className="text-uppercase text-white-50 d-block">Bank Nifty</small>
+                  <span className="fw-semibold">{bankNiftyPrice}</span>
+                </span>
+              </span>
+            </li>
             <li className="nav-item">
               <span className="nav-link text-light">
                 <i className="bi bi-person-circle me-2"></i>
