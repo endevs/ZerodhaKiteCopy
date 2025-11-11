@@ -1,3 +1,3 @@
 @echo off
-cd /d "D:\WorkSpace\ZerodhaKite\frontend"
+cd /d "D:\WorkSpace\ZerodhaKiteGit\frontend"
 npm start
