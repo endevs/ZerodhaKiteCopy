@@ -9,13 +9,8 @@ const LandingPage: React.FC = () => {
     <div className="landing-page">
       <header className="landing-hero">
         <nav className="landing-nav container">
-          <div className="d-flex align-items-center gap-3">
-            <img
-              src="/drp-infotech-logo.png"
-              alt="DRP Infotech Pvt Ltd"
-              className="landing-logo"
-            />
-            <span className="landing-brand">DRP Infotech Pvt Ltd</span>
+          <div className="d-flex align-items-center">
+            <img src="/drp-infotech-logo.png" alt="DRP Infotech Pvt Ltd" className="landing-logo" />
           </div>
           <div className="d-flex align-items-center gap-3">
             <Link to="/login" className="btn btn-outline-light btn-sm px-3">
@@ -281,15 +276,8 @@ const LandingPage: React.FC = () => {
       <footer className="landing-footer">
         <div className="container d-flex flex-column flex-lg-row align-items-center justify-content-between gap-3">
           <div className="d-flex align-items-center gap-3">
-            <img
-              src="/drp-infotech-logo.png"
-              alt="DRP Infotech Pvt Ltd"
-              className="landing-logo small"
-            />
-            <div>
-              <span className="landing-brand text-white">DRP Infotech Pvt Ltd</span>
-              <p className="mb-0 text-white-50">Algorithmic Trading | AI Strategy Automation</p>
-            </div>
+            <img src="/drp-infotech-logo.png" alt="DRP Infotech Pvt Ltd" className="landing-logo small" />
+            <p className="mb-0 text-white-50">Algorithmic Trading | AI Strategy Automation</p>
           </div>
           <div className="text-white-50">
             <span className="me-3">

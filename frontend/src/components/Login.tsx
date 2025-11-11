@@ -73,14 +73,11 @@ const Login: React.FC = () => {
       <LoaderOverlay visible={loading} message="Sending OTP..." />
       <div className="auth-overlay" />
       <nav className="auth-nav container">
-        <div className="d-flex align-items-center">
-          <img
-            src="/drp-infotech-logo.png"
-            alt="DRP Infotech Pvt Ltd"
-            className="auth-logo"
-          />
-          <span className="auth-brand">DRP Infotech Pvt Ltd</span>
-        </div>
+        <img
+          src="/drp-infotech-logo.png"
+          alt="DRP Infotech Pvt Ltd"
+          className="auth-logo"
+        />
         <div className="d-flex align-items-center gap-2">
           <Link to="/signup" className="btn btn-outline-light btn-sm px-3">
             Sign up
