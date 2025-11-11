@@ -1906,16 +1906,12 @@ def api_signup():
             data = request.get_json()
             mobile = data.get('mobile')
             email = data.get('email')
-            app_key = data.get('app_key')
-            app_secret = data.get('app_secret')
         else:
             mobile = request.form.get('mobile')
             email = request.form.get('email')
-            app_key = request.form.get('app_key')
-            app_secret = request.form.get('app_secret')
         
-        if not all([mobile, email, app_key, app_secret]):
-            return jsonify({'status': 'error', 'message': 'All fields are required'}), 400
+        if not all([mobile, email]):
+            return jsonify({'status': 'error', 'message': 'Mobile and email are required'}), 400
 
         conn = get_db_connection()
         user = conn.execute('SELECT * FROM users WHERE email = ?', (email,)).fetchone()
@@ -1930,8 +1926,8 @@ def api_signup():
         otp = secrets.token_hex(3).upper()
         otp_expiry = datetime.datetime.now() + datetime.timedelta(minutes=10)
 
-        conn.execute('INSERT INTO users (mobile, email, app_key, app_secret, otp, otp_expiry) VALUES (?, ?, ?, ?, ?, ?)',
-                     (mobile, email, app_key, app_secret, otp, otp_expiry))
+        conn.execute('INSERT INTO users (mobile, email, otp, otp_expiry) VALUES (?, ?, ?, ?)',
+                     (mobile, email, otp, otp_expiry))
         conn.commit()
         conn.close()
 
@@ -2145,8 +2141,7 @@ def zerodha_login():
     conn.close()
 
     if not user or not user['app_key'] or not user['app_secret']:
-        flash('Please set up your API key and secret during signup.', 'error')
-        return redirect('/signup')
+        return redirect(f"{config.FRONTEND_URL}/welcome?credentials=missing")
 
     kite.api_key = user['app_key']
     login_url = kite.login_url()
@@ -2284,6 +2279,55 @@ def api_user_data():
             'balance': 0,
             'access_token_present': False
         })
+
+
+@app.route("/api/user-credentials", methods=['GET', 'POST'])
+def api_user_credentials():
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+
+    user_id = session['user_id']
+    conn = get_db_connection()
+
+    if request.method == 'GET':
+        try:
+            row = conn.execute(
+                'SELECT app_key, app_secret FROM users WHERE id = ?',
+                (user_id,)
+            ).fetchone()
+            conn.close()
+            has_credentials = bool(row and row['app_key'] and row['app_secret'])
+            return jsonify({'status': 'success', 'has_credentials': has_credentials})
+        except Exception as exc:
+            conn.close()
+            logging.error("Failed to fetch user credentials state: %s", exc, exc_info=True)
+            return jsonify({'status': 'error', 'message': 'Unable to fetch credentials state'}), 500
+
+    try:
+        payload = request.get_json(silent=True) or {}
+        app_key = (payload.get('app_key') or '').strip()
+        app_secret = (payload.get('app_secret') or '').strip()
+        if not app_key or not app_secret:
+            conn.close()
+            return jsonify({'status': 'error', 'message': 'API key and secret are required'}), 400
+
+        conn.execute(
+            'UPDATE users SET app_key = ?, app_secret = ? WHERE id = ?',
+            (app_key, app_secret, user_id)
+        )
+        conn.commit()
+        conn.close()
+        return jsonify({'status': 'success', 'message': 'Zerodha credentials saved successfully.'})
+    except sqlite3.IntegrityError as db_err:
+        conn.rollback()
+        conn.close()
+        logging.error("Database error while saving credentials: %s", db_err, exc_info=True)
+        return jsonify({'status': 'error', 'message': 'Failed to save credentials. Please try again.'}), 500
+    except Exception as exc:
+        conn.rollback()
+        conn.close()
+        logging.error("Unexpected error while saving credentials: %s", exc, exc_info=True)
+        return jsonify({'status': 'error', 'message': 'Unexpected error occurred.'}), 500
 
 @app.route("/strategy/save", methods=['POST'])
 @app.route("/api/strategy/save", methods=['POST'])

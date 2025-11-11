@@ -4,8 +4,6 @@ import { Link, useNavigate } from 'react-router-dom';
 const Signup: React.FC = () => {
   const [mobile, setMobile] = useState<string>('');
   const [email, setEmail] = useState<string>('');
-  const [appKey, setAppKey] = useState<string>('');
-  const [appSecret, setAppSecret] = useState<string>('');
   const [message, setMessage] = useState<{ type: string; text: string } | null>(null);
   const navigate = useNavigate();
 
@@ -20,7 +18,7 @@ const Signup: React.FC = () => {
           'Content-Type': 'application/json',
         },
         credentials: 'include',
-        body: JSON.stringify({ mobile, email, app_key: appKey, app_secret: appSecret }),
+        body: JSON.stringify({ mobile, email }),
       });
 
       const data = await response.json();
@@ -91,8 +89,8 @@ const Signup: React.FC = () => {
               </div>
             </div>
             <div className="auth-side-note mt-4">
-              <strong>What you need:</strong> your contact info and the Zerodha Kite API credentials you
-              received after enabling developer access. We handle secure storage and OTP verification.
+              <strong>What you need:</strong> just your contact information today. We’ll guide you to add your
+              Zerodha Kite API key and secret once you reach your workspace, keeping sign-up fast and seamless.
             </div>
           </div>
           <div className="col-lg-5 offset-lg-1 col-xl-4">
@@ -100,7 +98,7 @@ const Signup: React.FC = () => {
               <h3 className="fw-semibold mb-4">Create your account</h3>
               <p className="text-white-50 mb-4">
                 Provide the details below to activate your AI trading console. We&apos;ll email an OTP to
-                confirm your access.
+                confirm your access, then help you connect Zerodha in the next step.
               </p>
               {message && (
                 <div className={`alert alert-${message.type} mb-4`} role="alert">
@@ -136,36 +134,6 @@ const Signup: React.FC = () => {
                     onChange={(e) => setEmail(e.target.value)}
                     placeholder="you@company.com"
                     autoComplete="email"
-                    required
-                  />
-                </div>
-                <div>
-                  <label htmlFor="app_key" className="form-label">
-                    Zerodha API Key
-                  </label>
-                  <input
-                    type="text"
-                    className="form-control"
-                    id="app_key"
-                    name="app_key"
-                    value={appKey}
-                    onChange={(e) => setAppKey(e.target.value)}
-                    placeholder="kiteconnect_apikey"
-                    required
-                  />
-                </div>
-                <div>
-                  <label htmlFor="app_secret" className="form-label">
-                    Zerodha API Secret
-                  </label>
-                  <input
-                    type="text"
-                    className="form-control"
-                    id="app_secret"
-                    name="app_secret"
-                    value={appSecret}
-                    onChange={(e) => setAppSecret(e.target.value)}
-                    placeholder="kiteconnect_secret"
                     required
                   />
                 </div>

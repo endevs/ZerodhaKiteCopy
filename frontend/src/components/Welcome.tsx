@@ -1,4 +1,146 @@
 import React, { useEffect, useState } from 'react';
+
+const WelcomeContent: React.FC<{ message: { type: string; text: string } | null; onLogout: () => void }> = ({ message, onLogout }) => {
+  const [loading, setLoading] = useState(true);
+  const [hasCredentials, setHasCredentials] = useState(false);
+  const [appKey, setAppKey] = useState('');
+  const [appSecret, setAppSecret] = useState('');
+  const [feedback, setFeedback] = useState<{ type: string; text: string } | null>(null);
+
+  useEffect(() => {
+    const fetchCredentialsStatus = async () => {
+      try {
+        const response = await fetch('http://localhost:8000/api/user-credentials', {
+          credentials: 'include',
+        });
+        if (!response.ok) {
+          throw new Error('Failed to fetch credentials state');
+        }
+        const data = await response.json();
+        setHasCredentials(Boolean(data?.has_credentials));
+      } catch (error) {
+        console.error('Unable to fetch user credential status:', error);
+      } finally {
+        setLoading(false);
+      }
+    };
+    fetchCredentialsStatus();
+  }, []);
+
+  const handleSaveCredentials = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setFeedback(null);
+    try {
+      const response = await fetch('http://localhost:8000/api/user-credentials', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ app_key: appKey.trim(), app_secret: appSecret.trim() }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data?.message || 'Failed to store credentials');
+      }
+      setFeedback({ type: 'success', text: data.message || 'Credentials saved successfully.' });
+      setHasCredentials(true);
+      setAppKey('');
+      setAppSecret('');
+    } catch (error: any) {
+      setFeedback({ type: 'danger', text: error.message || 'Unexpected error occurred.' });
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="text-center text-white-50">
+        <div className="spinner-border text-light" role="status">
+          <span className="visually-hidden">Loading...</span>
+        </div>
+        <p className="mt-3">Checking your configuration...</p>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <h3 className="fw-semibold mb-4">
+        {hasCredentials ? 'Authorize Zerodha access' : 'Enter Zerodha API credentials'}
+      </h3>
+      <p className="text-white-50 mb-4">
+        {hasCredentials
+          ? 'Clicking the button below redirects you to Zerodha to grant API access. After authorising, you’ll return here automatically.'
+          : 'Provide your Zerodha Kite Connect API key and secret so we can establish secure connectivity for strategy deployment.'}
+      </p>
+
+      {message && (
+        <div className={`alert alert-${message.type} mb-3`} role="alert">
+          {message.text}
+        </div>
+      )}
+      {feedback && (
+        <div className={`alert alert-${feedback.type} mb-3`} role="alert">
+          {feedback.text}
+        </div>
+      )}
+
+      {hasCredentials ? (
+        <div className="d-grid gap-3">
+          <a href="/api/zerodha_login" className="btn btn-primary">
+            Authenticate with Zerodha
+          </a>
+          <button onClick={onLogout} className="btn btn-outline-light">
+            Sign out
+          </button>
+        </div>
+      ) : (
+        <form onSubmit={handleSaveCredentials} className="d-flex flex-column gap-3">
+          <div>
+            <label htmlFor="app_key" className="form-label">
+              Zerodha API Key
+            </label>
+            <input
+              type="text"
+              id="app_key"
+              className="form-control"
+              value={appKey}
+              onChange={(event) => setAppKey(event.target.value)}
+              placeholder="kiteconnect_apikey"
+              required
+            />
+          </div>
+          <div>
+            <label htmlFor="app_secret" className="form-label">
+              Zerodha API Secret
+            </label>
+            <input
+              type="password"
+              id="app_secret"
+              className="form-control"
+              value={appSecret}
+              onChange={(event) => setAppSecret(event.target.value)}
+              placeholder="kiteconnect_secret"
+              required
+            />
+          </div>
+          <button type="submit" className="btn btn-primary">
+            Save Credentials
+          </button>
+          <button onClick={onLogout} type="button" className="btn btn-outline-light">
+            Sign out
+          </button>
+        </form>
+      )}
+      <div className="text-center text-white-50 mt-4 small">
+        Need help? Refer to your Zerodha developer console or contact{' '}
+        <a href="mailto:contact@drpinfotech.com" className="text-white text-decoration-none">
+          contact@drpinfotech.com
+        </a>
+        .
+      </div>
+    </>
+  );
+};
+
 const Welcome: React.FC = () => {
   const [message, setMessage] = useState<{ type: string; text: string } | null>(null);
 
@@ -7,6 +149,12 @@ const Welcome: React.FC = () => {
     const loginSuccess = params.get('loginSuccess');
     if (loginSuccess === 'true') {
       setMessage({ type: 'success', text: 'You have successfully logged in.' });
+    }
+    const credStatus = params.get('credentials');
+    if (credStatus === 'missing') {
+      setMessage({ type: 'warning', text: 'Please add your Zerodha API credentials before authenticating.' });
+    } else if (credStatus === 'saved') {
+      setMessage({ type: 'success', text: 'Zerodha API credentials saved successfully. You can authenticate now.' });
     }
   }, []);
 
@@ -88,33 +236,7 @@ const Welcome: React.FC = () => {
           </div>
           <div className="col-lg-5 offset-lg-1 col-xl-4">
             <div className="auth-card shadow-lg">
-              <h3 className="fw-semibold mb-4">Authorize Zerodha access</h3>
-              <p className="text-white-50 mb-4">
-                Clicking the button below redirects you to Zerodha to grant API access. After authorising,
-                you&apos;ll return here automatically.
-              </p>
-
-              {message && (
-                <div className={`alert alert-${message.type} mb-4`} role="alert">
-                  {message.text}
-                </div>
-              )}
-
-              <div className="d-grid gap-3">
-                <a href="/api/zerodha_login" className="btn btn-primary">
-                  Authenticate with Zerodha
-                </a>
-                <button onClick={handleLogout} className="btn btn-outline-light">
-                  Sign out
-                </button>
-              </div>
-              <div className="text-center text-white-50 mt-4 small">
-                Need help? Check your Zerodha app key/secret or contact{' '}
-                <a href="mailto:contact@drpinfotech.com" className="text-white text-decoration-none">
-                  contact@drpinfotech.com
-                </a>
-                .
-              </div>
+              <WelcomeContent message={message} onLogout={handleLogout} />
             </div>
           </div>
         </div>
