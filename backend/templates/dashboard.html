@@ -1,0 +1,1006 @@
+{% extends "base.html" %}
+
+{% block title %}Trading Dashboard{% endblock %}
+
+{% block content %}
+    <div class="container mt-4" id="dashboard-content">
+        <div class="row">
+            <div class="col-md-4">
+                <div class="card">
+                    <div class="card-body">
+                        <h5 class="card-title">Market Data</h5>
+                        <p class="card-text">Nifty: <span id="nifty-price"></span></p>
+                        <p class="card-text">Bank Nifty: <span id="banknifty-price"></span></p>
+                    </div>
+                </div>
+                <div class="card mt-3">
+                    <div class="card-body">
+                        <h5 class="card-title">Account</h5>
+                        <p class="card-text">Available Balance: <span id="balance">{{ balance }}</span></p>
+                        {% if not access_token %}
+                        <a href="/zerodha_login" class="btn btn-primary">Login with Zerodha</a>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-8">
+                <div class="accordion" id="dashboardAccordion">
+                    <div class="accordion-item">
+                        <h2 class="accordion-header" id="headingOne">
+                            <button class="accordion-button" type="button" data-bs-toggle="collapse" data-bs-target="#collapseOne" aria-expanded="true" aria-controls="collapseOne">
+                                Strategy Configuration
+                            </button>
+                        </h2>
+                        <div id="collapseOne" class="accordion-collapse collapse show" aria-labelledby="headingOne" data-bs-parent="#dashboardAccordion">
+                            <div class="accordion-body">
+                                <div class="mb-3">
+                                    <label for="strategy-select" class="form-label">Select Strategy</label>
+                                    <select class="form-select" id="strategy-select">
+                                        <option value="" disabled selected>Select Strategy</option>
+                                        <option value="orb">Opening Range Breakout (ORB)</option>
+                                        <option value="capture_mountain_signal">Capture Mountain Signal</option>
+                                    </select>
+                                </div>
+                                <div id="strategy-description" class="alert alert-info"></div>
+                                <div id="orb-strategy-form">
+                                    <div id="success-message" class="alert alert-success" style="display: none;"></div>
+                                    <form id="strategy-form" action="/strategy/save" method="POST">
+                                        <input type="hidden" name="strategy" id="strategy-input" value="orb">
+                                        <input type="hidden" name="strategy_id" id="strategy-id">
+                                        <div class="row">
+                                            <div class="col-md-12 mb-3">
+                                                <label for="strategy-name" class="form-label">Strategy Name</label>
+                                                <input type="text" class="form-control" id="strategy-name" name="strategy-name" required>
+                                            </div>
+                                        </div>
+                                        <div class="row" id="ema-period-row" style="display: none;">
+                                            <div class="col-md-12 mb-3">
+                                                <label for="ema-period" class="form-label">EMA Period</label>
+                                                <input type="number" class="form-control" id="ema-period" name="ema-period" value="5">
+                                            </div>
+                                        </div>
+                                        <div class="row">
+                                            <div class="col-md-6 mb-3">
+                                                <label for="segment" class="form-label">Select Segment</label>
+                                                <select class="form-select" id="segment" name="segment" readonly>
+                                                    <option value="Option" selected>Option</option>
+                                                    <option value="Future">Future</option>
+                                                </select>
+                                            </div>
+                                            <div class="col-md-6 mb-3">
+                                                <label for="total-lot" class="form-label">Total Lot</label>
+                                                <input type="number" class="form-control" id="total-lot" name="total-lot" min="1" max="50" value="1" required>
+                                            </div>
+                                        </div>
+                                        <div class="row">
+                                            <div class="col-md-6 mb-3">
+                                                <label for="trade-type" class="form-label">Buy or Sell</label>
+                                                <select class="form-select" id="trade-type" name="trade-type" readonly>
+                                                    <option value="Buy" selected>Buy</option>
+                                                    <option value="Sell">Sell</option>
+                                                </select>
+                                            </div>
+                                            <div class="col-md-6 mb-3">
+                                                <label for="strike-price" class="form-label">Strike Price</label>
+                                                <input type="text" class="form-control" id="strike-price" name="strike-price" value="ATM" readonly>
+                                            </div>
+                                        </div>
+                                        <div class="row">
+                                            <div class="col-md-6 mb-3">
+                                                <label for="expiry-type" class="form-label">Expiry Type</label>
+                                                <select class="form-select" id="expiry-type" name="expiry-type">
+                                                    <option value="Weekly">Weekly</option>
+                                                    <option value="Next Weekly">Next Weekly</option>
+                                                    <option value="Monthly">Monthly</option>
+                                                </select>
+                                            </div>
+                                        </div>
+                                        <div class="row">
+                                            <div class="col-md-6 mb-3">
+                                                <label for="instrument" class="form-label">Instrument</label>
+                                                <select class="form-select" id="instrument" name="instrument">
+                                                    <option value="NIFTY">NIFTY</option>
+                                                    <option value="BANKNIFTY">BANKNIFTY</option>
+                                                </select>
+                                            </div>
+                                            <div class="col-md-6 mb-3">
+                                                <label for="candle-time" class="form-label">Candle Time</label>
+                                                <select class="form-select" id="candle-time" name="candle-time">
+                                                    <option value="5">5 minutes</option>
+                                                    <option value="10">10 minutes</option>
+                                                    <option value="15">15 minutes</option>
+                                                </select>
+                                            </div>
+                                        </div>
+                                        <div class="row">
+                                            <div class="col-md-6 mb-3">
+                                                <label for="execution-start" class="form-label">Execution Start</label>
+                                                <input type="time" class="form-control" id="execution-start" name="execution-start" value="09:15">
+                                            </div>
+                                            <div class="col-md-6 mb-3">
+                                                <label for="execution-end" class="form-label">Execution End</label>
+                                                <input type="time" class="form-control" id="execution-end" name="execution-end" value="15:00">
+                                            </div>
+                                        </div>
+                                        <div class="row">
+                                            <div class="col-md-6 mb-3">
+                                                <label for="stop-loss" class="form-label">Stop Loss (%)</label>
+                                                <input type="number" class="form-control" id="stop-loss" name="stop-loss" value="1">
+                                            </div>
+                                            <div class="col-md-6 mb-3">
+                                                <label for="target-profit" class="form-label">Target Profit (%)</label>
+                                                <input type="number" class="form-control" id="target-profit" name="target-profit" value="2">
+                                            </div>
+                                        </div>
+                                        <div class="row">
+                                            <div class="col-md-6 mb-3">
+                                                <label for="trailing-stop-loss" class="form-label">Trailing Stop Loss (%)</label>
+                                                <input type="number" class="form-control" id="trailing-stop-loss" name="trailing-stop-loss" value="0.5">
+                                            </div>
+                                            <div class="col-md-6 mb-3 form-check mt-4">
+                                                <input type="checkbox" class="form-check-input" id="paper-trade" name="paper_trade">
+                                                <label class="form-check-label" for="paper-trade">Paper Trade</label>
+                                            </div>
+                                        </div>
+                                        <button type="submit" class="btn btn-primary">Save Strategy</button>
+                                    </form>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="accordion-item mt-3">
+                        <h2 class="accordion-header" id="headingTwo">
+                            <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#collapseTwo" aria-expanded="false" aria-controls="collapseTwo">
+                                Saved Strategies
+                            </button>
+                        </h2>
+                        <div id="collapseTwo" class="accordion-collapse collapse" aria-labelledby="headingTwo" data-bs-parent="#dashboardAccordion">
+                            <div class="accordion-body">
+                                <table class="table table-striped">
+                                    <thead>
+                                        <tr>
+                                            <th>Name</th>
+                                            <th>Instrument</th>
+                                            <th>Expiry</th>
+                                            <th>Lots</th>
+                                            <th>Status</th>
+                                            <th>Actions</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="saved-strategies-table-body">
+                                        {% for strategy in strategies %}
+                                        <tr>
+                                            <td>{{ strategy.strategy_name }}</td>
+                                            <td>{{ strategy.instrument }}</td>
+                                            <td>{{ strategy.expiry_type }}</td>
+                                            <td>{{ strategy.total_lot }}</td>
+                                            <td>{{ strategy.status }}</td>
+                                            <td>
+                                                <button class="btn btn-sm btn-info edit-strategy" data-id="{{ strategy.id }}">Edit</button>
+                                                <button class="btn btn-sm btn-danger delete-strategy" data-id="{{ strategy.id }}">Delete</button>
+                                                                            {% if strategy.status == 'saved' or strategy.status == 'paused' or strategy.status == 'error' or strategy.status == 'sq_off' %}
+                                                                                <button class="btn btn-sm btn-success deploy-strategy" data-id="{{ strategy.id }}">Deploy</button>
+                                                                            {% elif strategy.status == 'running' %}
+                                                                                <button class="btn btn-sm btn-warning pause-strategy" data-id="{{ strategy.id }}">Pause</button>
+                                                                                <button class="btn btn-sm btn-danger squareoff-strategy" data-id="{{ strategy.id }}">Square Off</button>
+                                                                                <button class="btn btn-sm btn-primary view-live" data-id="{{ strategy.id }}">View Live</button>
+                                                                            {% endif %}                                            </td>
+                                        </tr>
+                                        {% else %}
+                                        <tr>
+                                            <td colspan="6">No strategies saved yet.</td>
+                                        </tr>
+                                        {% endfor %}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="card mt-3">
+                    <div class="card-body">
+                        <h5 class="card-title">Live P&L</h5>
+                        <p class="card-text">P&L: <span id="pnl">0</span></p>
+                    </div>
+                </div>
+                <div class="card mt-3">
+                    <div class="card-body">
+                        <h5 class="card-title">Active Trade</h5>
+                        <button id="square-off-btn" class="btn btn-danger" style="display: none;">Square Off</button>
+                    </div>
+                </div>
+                <div class="card mt-3">
+                    <div class="card-body">
+                        <h5 class="card-title">Running Strategies</h5>
+                        <table class="table">
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>Name</th>
+                                    <th>Instrument</th>
+                                    <th>Status</th>
+                                    <th>Action</th>
+                                </tr>
+                            </thead>
+                            <tbody id="running-strategies">
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="container mt-4" id="backtest-content" style="display: none;">
+        <h2>Backtest Strategy</h2>
+        <form id="backtest-form">
+            <div class="row">
+                <div class="col-md-6 mb-3">
+                    <label for="backtest-strategy" class="form-label">Strategy</label>
+                    <select class="form-select" id="backtest-strategy" name="strategy">
+                        <option value="orb">Opening Range Breakout (ORB)</option>
+                    </select>
+                </div>
+                <div class="col-md-6 mb-3">
+                    <label for="backtest-instrument" class="form-label">Instrument</label>
+                    <select class="form-select" id="backtest-instrument" name="instrument">
+                        <option value="NIFTY">NIFTY</option>
+                        <option value="BANKNIFTY">BANKNIFTY</option>
+                    </select>
+                </div>
+            </div>
+            <div class="row">
+                <div class="col-md-6 mb-3">
+                    <label for="backtest-segment" class="form-label">Select Segment</label>
+                    <select class="form-select" id="backtest-segment" name="segment">
+                        <option value="Option" selected>Option</option>
+                        <option value="Future">Future</option>
+                    </select>
+                </div>
+                <div class="col-md-6 mb-3">
+                    <label for="backtest-total-lot" class="form-label">Total Lot</label>
+                    <input type="number" class="form-control" id="backtest-total-lot" name="total-lot" min="1" max="50" value="1">
+                </div>
+            </div>
+            <div class="row">
+                <div class="col-md-6 mb-3">
+                    <label for="backtest-trade-type" class="form-label">Buy or Sell</label>
+                    <select class="form-select" id="backtest-trade-type" name="trade-type">
+                        <option value="Buy" selected>Buy</option>
+                        <option value="Sell">Sell</option>
+                    </select>
+                </div>
+                <div class="col-md-6 mb-3">
+                    <label for="backtest-strike-price" class="form-label">Strike Price</label>
+                    <input type="text" class="form-control" id="backtest-strike-price" name="strike-price" value="ATM">
+                </div>
+            </div>
+            <div class="row">
+                <div class="col-md-6 mb-3">
+                    <label for="backtest-expiry-type" class="form-label">Expiry Type</label>
+                    <select class="form-select" id="backtest-expiry-type" name="expiry-type">
+                        <option value="Weekly">Weekly</option>
+                        <option value="Next Weekly">Next Weekly</option>
+                        <option value="Monthly">Monthly</option>
+                    </select>
+                </div>
+            </div>
+            <div class="row">
+                <div class="col-md-6 mb-3">
+                    <label for="backtest-candle-time" class="form-label">Candle Time</label>
+                    <select class="form-select" id="backtest-candle-time" name="candle-time">
+                        <option value="5">5 minutes</option>
+                        <option value="10">10 minutes</option>
+                        <option value="15">15 minutes</option>
+                    </select>
+                </div>
+                <div class="col-md-6 mb-3">
+                    <label for="backtest-execution-start" class="form-label">Execution Start</label>
+                    <input type="time" class="form-control" id="backtest-execution-start" name="execution-start" value="09:15">
+                </div>
+            </div>
+            <div class="row">
+                <div class="col-md-6 mb-3">
+                    <label for="backtest-execution-end" class="form-label">Execution End</label>
+                    <input type="time" class="form-control" id="backtest-execution-end" name="execution-end" value="15:00">
+                </div>
+                <div class="col-md-6 mb-3">
+                    <label for="backtest-stop-loss" class="form-label">Stop Loss (%)</label>
+                    <input type="number" class="form-control" id="backtest-stop-loss" name="stop-loss" value="1">
+                </div>
+            </div>
+            <div class="row">
+                <div class="col-md-6 mb-3">
+                    <label for="backtest-target-profit" class="form-label">Target Profit (%)</label>
+                    <input type="number" class="form-control" id="backtest-target-profit" name="target-profit" value="2">
+                </div>
+                <div class="col-md-6 mb-3">
+                    <label for="backtest-trailing-stop-loss" class="form-label">Trailing Stop Loss (%)</label>
+                    <input type="number" class="form-control" id="backtest-trailing-stop-loss" name="trailing-stop-loss" value="0.5">
+                </div>
+            </div>
+            <div class="row">
+                <div class="col-md-6 mb-3">
+                    <label for="backtest-from-date" class="form-label">From Date</label>
+                    <input type="date" class="form-control" id="backtest-from-date" name="backtest-from-date">
+                </div>
+                <div class="col-md-6 mb-3">
+                    <label for="backtest-to-date" class="form-label">To Date</label>
+                    <input type="date" class="form-control" id="backtest-to-date" name="backtest-to-date">
+                </div>
+            </div>
+            <button type="submit" class="btn btn-primary">Run Backtest</button>
+        </form>
+        <div id="backtest-results" class="mt-4"></div>
+    </div>
+
+    <div class="container mt-4" id="market-replay-content" style="display: none;">
+        <h2>Market Replay</h2>
+        <form id="market-replay-form">
+            <div class="row">
+                <div class="col-md-6 mb-3">
+                    <label for="replay-strategy" class="form-label">Strategy</label>
+                    <select class="form-select" id="replay-strategy" name="strategy">
+                        <option value="" disabled selected>Select Strategy</option>
+                        {% for strategy in strategies %}
+                            <option value="{{ strategy.id }}">{{ strategy.strategy_name }}</option>
+                        {% endfor %}
+                    </select>
+                    <div id="replay-strategy-description" class="alert alert-info mt-2" style="display: none;"></div>
+                    <div id="replay-strategy-details" class="mt-2"></div>
+                </div>
+                <div class="col-md-6 mb-3">
+                    <label for="replay-instrument" class="form-label">Instrument</label>
+                    <select class="form-select" id="replay-instrument" name="instrument">
+                        <option value="NIFTY">NIFTY</option>
+                        <option value="BANKNIFTY">BANKNIFTY</option>
+                    </select>
+                </div>
+            </div>
+            <div class="row">
+                <div class="col-md-6 mb-3">
+                    <label for="replay-from-date" class="form-label">From Date</label>
+                    <input type="date" class="form-control" id="replay-from-date" name="from-date">
+                </div>
+                <div class="col-md-6 mb-3">
+                    <label for="replay-to-date" class="form-label">To Date</label>
+                    <input type="date" class="form-control" id="replay-to-date" name="to-date">
+                </div>
+            </div>
+            <button type="submit" class="btn btn-primary">Start Replay</button>
+        </form>
+        <div id="market-replay-results" class="mt-4"></div>
+    </div>
+
+    <div class="container mt-4" id="tick-data-content" style="display: none;">
+        <h2>Tick Data Collection Status</h2>
+        <div class="mb-3">
+            <button id="start-tick-collection" class="btn btn-success">Start</button>
+            <button id="pause-tick-collection" class="btn btn-warning">Pause</button>
+            <button id="stop-tick-collection" class="btn btn-danger">Stop</button>
+            <button id="refresh-tick-collection" class="btn btn-primary">Refresh</button>
+        </div>
+        <table class="table table-striped">
+            <thead>
+                <tr>
+                    <th>Instrument</th>
+                    <th>Status</th>
+                    <th>Row Count</th>
+                    <th>Last Collected At</th>
+                    <th>Chart</th>
+                </tr>
+            </thead>
+            <tbody id="tick-data-status-table-body">
+            </tbody>
+        </table>
+    </div>
+
+    <div class="modal fade" id="chart-modal" tabindex="-1" aria-labelledby="chart-modal-label" aria-hidden="true">
+      <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title" id="chart-modal-label">Tick Data Chart</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+          </div>
+          <div class="modal-body">
+            <p>Chart will be displayed here.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal fade" id="live-strategy-modal" tabindex="-1" aria-labelledby="live-strategy-modal-label" aria-hidden="true">
+      <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title" id="live-strategy-modal-label">Live Strategy Status</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+          </div>
+          <div class="modal-body" id="live-strategy-panel">
+            <!-- Content will be loaded here by JavaScript -->
+          </div>
+        </div>
+      </div>
+    </div>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <script>
+        const strategyDescriptions = {
+            'orb': `
+                <h5>Opening Range Breakout (ORB)</h5>
+                <p>This strategy identifies the high and low of the opening range and places a trade when the price breaks out of this range.</p>
+                <strong>Timeframe:</strong> Configurable (e.g., 15 minutes)<br>
+                <strong>Instruments:</strong> Nifty & BankNifty<br>
+                <strong>Logic:</strong><br>
+                <ul>
+                    <li><strong>Opening Range:</strong> The high and low of the first 'x' minutes of the trading session.</li>
+                    <li><strong>Buy Signal:</strong> Price breaks above the opening range high.</li>
+                    <li><strong>Sell Signal:</strong> Price breaks below the opening range low.</li>
+                    <li><strong>Stop Loss & Target:</strong> Configurable percentages.</li>
+                </ul>
+            `,
+            'capture_mountain_signal': `
+                <h5>Capture Mountain Signal</h5>
+                <p><strong>Instruments:</strong> Nifty & BankNifty ATM Options</p>
+                <p><strong>Timeframe:</strong> 5-minute candles</p>
+                <p><strong>Indicator:</strong> 5-period EMA</p>
+                <h6>PE (Put Entry) Logic</h6>
+                <ul>
+                    <li><strong>Signal Candle:</strong> Candle's LOW > 5 EMA</li>
+                    <li><strong>Entry Trigger:</strong> Next candle CLOSE < signal candle's LOW</li>
+                    <li><strong>Stop Loss:</strong> Price closes above signal candle's HIGH</li>
+                    <li><strong>Target:</strong> Wait for at least 1 candle where HIGH < 5 EMA, then if 2 consecutive candles CLOSE > 5 EMA -> Exit PE trade</li>
+                </ul>
+                <h6>CE (Call Entry) Logic</h6>
+                <ul>
+                    <li><strong>Signal Candle:</strong> Candle's HIGH < 5 EMA</li>
+                    <li><strong>Entry Trigger:</strong> Next candle CLOSE > signal candle's HIGH</li>
+                    <li><strong>Stop Loss:</strong> Price closes below signal candle's LOW</li>
+                    <li><strong>Target:</strong> Wait for at least 1 candle where LOW > 5 EMA, then if 2 consecutive candles CLOSE < 5 EMA -> Exit CE trade</li>
+                </ul>
+            `
+        };
+
+        function openChartModal(instrument) {
+            console.log('Opening chart for:', instrument);
+            const chartModal = new bootstrap.Modal(document.getElementById('chart-modal'));
+            chartModal.show();
+        }
+
+        document.addEventListener('DOMContentLoaded', (event) => {
+            const strategySelect = document.getElementById('strategy-select');
+            const strategyDescription = document.getElementById('strategy-description');
+            const emaPeriodRow = document.getElementById('ema-period-row');
+            const strategyInput = document.getElementById('strategy-input');
+
+            function updateStrategyView() {
+                const selectedStrategy = strategySelect.value;
+                strategyDescription.innerHTML = strategyDescriptions[selectedStrategy];
+                strategyInput.value = selectedStrategy;
+
+                if (selectedStrategy === 'capture_mountain_signal') {
+                    emaPeriodRow.style.display = 'block';
+                } else {
+                    emaPeriodRow.style.display = 'none';
+                }
+            }
+
+            strategySelect.addEventListener('change', updateStrategyView);
+
+            // Initial view setup
+            updateStrategyView();
+
+            const dashboardTab = document.getElementById('dashboard-tab');
+            const backtestTab = document.getElementById('backtest-tab');
+            const marketReplayTab = document.getElementById('market-replay-tab');
+            const tickDataTab = document.getElementById('tick-data-tab');
+            const dashboardContent = document.getElementById('dashboard-content');
+            const backtestContent = document.getElementById('backtest-content');
+            const marketReplayContent = document.getElementById('market-replay-content');
+            const tickDataContent = document.getElementById('tick-data-content');
+            let tickDataInterval;
+
+            function showContent(contentId) {
+                // Hide all content sections
+                dashboardContent.style.display = 'none';
+                backtestContent.style.display = 'none';
+                marketReplayContent.style.display = 'none';
+                tickDataContent.style.display = 'none';
+
+                // Remove active class from all tabs
+                dashboardTab.classList.remove('active');
+                backtestTab.classList.remove('active');
+                marketReplayTab.classList.remove('active');
+                tickDataTab.classList.remove('active');
+
+                // Clear any existing tick data interval
+                clearInterval(tickDataInterval);
+
+                // Show the selected content and add active class to its tab
+                if (contentId === 'dashboard-content') {
+                    dashboardContent.style.display = 'block';
+                    dashboardTab.classList.add('active');
+                } else if (contentId === 'backtest-content') {
+                    backtestContent.style.display = 'block';
+                    backtestTab.classList.add('active');
+                } else if (contentId === 'market-replay-content') {
+                    marketReplayContent.style.display = 'block';
+                    marketReplayTab.classList.add('active');
+                } else if (contentId === 'tick-data-content') {
+                    tickDataContent.style.display = 'block';
+                    tickDataTab.classList.add('active');
+                    fetchTickDataStatus();
+                    tickDataInterval = setInterval(fetchTickDataStatus, 5000); // Refresh every 5 seconds
+                }
+            }
+
+            // Event listeners for navigation tabs
+            dashboardTab.addEventListener('click', (e) => {
+                e.preventDefault();
+                showContent('dashboard-content');
+                history.pushState(null, '', '#dashboard-content');
+            });
+
+            backtestTab.addEventListener('click', (e) => {
+                e.preventDefault();
+                showContent('backtest-content');
+                history.pushState(null, '', '#backtest-content');
+            });
+
+            marketReplayTab.addEventListener('click', (e) => {
+                e.preventDefault();
+                showContent('market-replay-content');
+                history.pushState(null, '', '#market-replay-content');
+            });
+
+            tickDataTab.addEventListener('click', (e) => {
+                e.preventDefault();
+                showContent('tick-data-content');
+                history.pushState(null, '', '#tick-data-content');
+            });
+
+            // Handle initial load based on URL hash
+            const initialHash = window.location.hash;
+            if (initialHash) {
+                showContent(initialHash.substring(1)); // Remove '#' from hash
+            } else {
+                showContent('dashboard-content'); // Default to dashboard
+            }
+
+            function fetchTickDataStatus() {
+                fetch('/tick_data_status')
+                    .then(response => response.json())
+                    .then(data => {
+                        const tableBody = document.getElementById('tick-data-status-table-body');
+                        tableBody.innerHTML = '';
+                        data.forEach(item => {
+                            const row = document.createElement('tr');
+                            row.innerHTML = `
+                                <td>${item.instrument}</td>
+                                <td>${item.status}</td>
+                                <td>${item.row_count}</td>
+                                <td>${item.last_collected_at}</td>
+                                <td><i class="fas fa-chart-line" onclick="openChartModal('${item.instrument_token}')"></i></td>
+                            `;
+                            tableBody.appendChild(row);
+                        });
+                    });
+            }
+
+            document.getElementById('start-tick-collection').addEventListener('click', () => {
+                fetch('/tick_data/start', { method: 'POST' })
+                    .then(() => fetchTickDataStatus());
+            });
+
+            document.getElementById('pause-tick-collection').addEventListener('click', () => {
+                fetch('/tick_data/pause', { method: 'POST' })
+                    .then(() => fetchTickDataStatus());
+            });
+
+            document.getElementById('stop-tick-collection').addEventListener('click', () => {
+                fetch('/tick_data/stop', { method: 'POST' })
+                    .then(() => fetchTickDataStatus());
+            });
+
+            document.getElementById('refresh-tick-collection').addEventListener('click', () => {
+                fetchTickDataStatus();
+            });
+
+            var socket = io.connect(location.protocol + '//' + document.domain + ':' + location.port);
+
+            socket.on('connect', function() {
+                socket.emit('my_event', {data: 'I\'m connected!'});
+            });
+
+            socket.on('unauthorized', function(msg) {
+                alert(msg.message);
+                window.location.href = '/logout';
+            });
+
+            socket.on('market_data', function(msg) {
+                const niftyPriceElement = document.getElementById('nifty-price');
+                const bankniftyPriceElement = document.getElementById('banknifty-price');
+                if (niftyPriceElement && msg.nifty_price) {
+                    niftyPriceElement.textContent = msg.nifty_price;
+                }
+                if (bankniftyPriceElement && msg.banknifty_price) {
+                    bankniftyPriceElement.textContent = msg.banknifty_price;
+                }
+            });
+
+            function populateSavedStrategiesTable(strategies) {
+                const strategiesBody = document.getElementById('saved-strategies-table-body');
+                strategiesBody.innerHTML = '';
+
+                if (strategies.length === 0) {
+                    strategiesBody.innerHTML = '<tr><td colspan="6">No strategies saved yet.</td></tr>';
+                    return;
+                }
+
+                strategies.forEach(strategy => {
+                    const row = document.createElement('tr');
+                    row.innerHTML = `
+                        <td>${strategy.strategy_name}</td>
+                        <td>${strategy.instrument}</td>
+                        <td>${strategy.expiry_type}</td>
+                        <td>${strategy.total_lot}</td>
+                        <td>${strategy.status}</td>
+                        <td>
+                            <button class="btn btn-sm btn-info edit-strategy" data-id="${strategy.id}">Edit</button>
+                            <button class="btn btn-sm btn-danger delete-strategy" data-id="${strategy.id}">Delete</button>
+                            ${(strategy.status === 'saved' || strategy.status === 'paused' || strategy.status === 'error' || strategy.status === 'sq_off') ? 
+                                `<button class="btn btn-sm btn-success deploy-strategy" data-id="${strategy.id}">Deploy</button>` : ''}
+                            ${(strategy.status === 'running') ? 
+                                `<button class="btn btn-sm btn-warning pause-strategy" data-id="${strategy.id}">Pause</button>
+                                 <button class="btn btn-sm btn-danger squareoff-strategy" data-id="${strategy.id}">Square Off</button>
+                                 <button class="btn btn-sm btn-primary view-live" data-id="${strategy.id}">View Live</button>` : ''}
+                        </td>
+                    `;
+                    strategiesBody.appendChild(row);
+                });
+
+                attachStrategyButtonListeners();
+            }
+
+            function attachStrategyButtonListeners() {
+                document.querySelectorAll('.edit-strategy').forEach(button => {
+                    button.onclick = (e) => handleEditStrategy(e.target.dataset.id);
+                });
+                document.querySelectorAll('.delete-strategy').forEach(button => {
+                    button.onclick = (e) => handleDeleteStrategy(e.target.dataset.id);
+                });
+                document.querySelectorAll('.deploy-strategy').forEach(button => {
+                    button.onclick = (e) => handleDeployStrategy(e.target.dataset.id);
+                });
+                document.querySelectorAll('.pause-strategy').forEach(button => {
+                    button.onclick = (e) => handlePauseStrategy(e.target.dataset.id);
+                });
+                document.querySelectorAll('.squareoff-strategy').forEach(button => {
+                    button.onclick = (e) => handleSquareOffStrategy(e.target.dataset.id);
+                });
+                document.querySelectorAll('.view-live').forEach(button => {
+                    button.addEventListener('click', (e) => {
+                        const strategyId = e.target.dataset.id;
+                        const modal = new bootstrap.Modal(document.getElementById('live-strategy-modal'));
+                        modal.show();
+                        
+                        fetchLiveStrategyStatus(strategyId);
+                        liveStrategyInterval = setInterval(() => fetchLiveStrategyStatus(strategyId), 2000);
+                    });
+                });
+            }
+
+            let liveStrategyInterval;
+
+            function fetchLiveStrategyStatus(strategyId) {
+                fetch(`/strategy/status/${strategyId}`)
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.status === 'error') {
+                            document.getElementById('live-strategy-panel').innerHTML = `<div class="alert alert-danger">${data.message}</div>`;
+                            clearInterval(liveStrategyInterval);
+                            return;
+                        }
+
+                        // Update modal title with strategy name
+                        document.getElementById('live-strategy-modal-label').textContent = `Live Status: ${data.strategy_name_display}`;
+
+                        const panel = document.getElementById('live-strategy-panel');
+                        let tradeHistoryHtml = '';
+                        if (data.trade_history && data.trade_history.length > 0) {
+                            tradeHistoryHtml = `
+                                <table class="table table-striped table-sm">
+                                    <thead>
+                                        <tr>
+                                            <th>Time</th>
+                                            <th>Action</th>
+                                            <th>Instrument</th>
+                                            <th>Price</th>
+                                            <th>Order ID</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        ${data.trade_history.map(trade => `
+                                            <tr>
+                                                <td>${trade.time}</td>
+                                                <td>${trade.action}</td>
+                                                <td>${trade.instrument}</td>
+                                                <td>${trade.price.toFixed(2)}</td>
+                                                <td>${trade.order_id}</td>
+                                            </tr>
+                                        `).join('')}
+                                    </tbody>
+                                </table>
+                            `;
+                        } else {
+                            tradeHistoryHtml = '<p>No trade history yet.</p>';
+                        }
+
+                        let strategySpecificDetails = '';
+                        if (data.strategy_type === 'orb') {
+                            strategySpecificDetails = `
+                                <p><strong>Opening Range High:</strong> ${data.opening_range_high.toFixed(2)}</p>
+                                <p><strong>Opening Range Low:</strong> ${data.opening_range_low.toFixed(2)}</p>
+                            `;
+                        } else if (data.strategy_type === 'capture_mountain_signal') {
+                            strategySpecificDetails = `
+                                <p><strong>Current LTP:</strong> ${data.current_ltp.toFixed(2)}</p>
+                                <p><strong>Signal Status:</strong> ${data.signal_status}</p>
+                                <p><strong>Signal Candle Time:</strong> ${data.signal_candle_time}</p>
+                                <p><strong>Signal Candle High:</strong> ${data.signal_candle_high.toFixed(2)}</p>
+                                <p><strong>Signal Candle Low:</strong> ${data.signal_candle_low.toFixed(2)}</p>
+                            `;
+                        }
+
+                        panel.innerHTML = `
+                            ${data.paper_trade_mode ? '<div class="alert alert-info"><strong>PAPER TRADE MODE ACTIVE</strong></div>' : ''}
+                            <p><strong>State:</strong> ${data.state}</p>
+                            <p><strong>Message:</strong> ${data.message}</p>
+                            ${strategySpecificDetails}
+                            <p><strong>Instrument:</strong> ${data.traded_instrument || 'N/A'}</p>
+                            <p><strong>Entry Price:</strong> ${data.entry_price.toFixed(2)}</p>
+                            <p><strong>Stop Loss Level:</strong> ${data.stop_loss_level.toFixed(2)}</p>
+                            <p><strong>Target Profit Level:</strong> ${data.target_profit_level !== 'N/A' && !isNaN(data.target_profit_level) ? data.target_profit_level.toFixed(2) : 'N/A'}</p>
+                            <p><strong>Entry Order ID:</strong> ${data.entry_order_id}</p>
+                            <p><strong>SL Order ID:</strong> ${data.sl_order_id}</p>
+                            <p><strong>TP Order ID:</strong> ${data.tp_order_id}</p>
+                            <p><strong>Live P&L:</strong> ${data.pnl.toFixed(2)}</p>
+                            <h5>Trade History</h5>
+                            ${tradeHistoryHtml}
+                        `;
+                    });
+            }
+
+            document.getElementById('live-strategy-modal').addEventListener('hidden.bs.modal', () => {
+                clearInterval(liveStrategyInterval);
+            });
+
+            function fetchStrategiesAndPopulateTable() {
+                fetch('/api/strategies')
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.status === 'success') {
+                            populateSavedStrategiesTable(data.strategies);
+                        } else {
+                            console.error('Error fetching strategies:', data.message);
+                            alert('Error fetching strategies: ' + data.message);
+                        }
+                    })
+                    .catch(error => console.error('Error fetching strategies:', error));
+            }
+
+            fetchStrategiesAndPopulateTable();
+
+            function handleEditStrategy(strategyId) {
+                fetch(`/strategy/edit/${strategyId}`)
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.status === 'success') {
+                            const strategy = data.strategy;
+                            document.getElementById('strategy-id').value = strategy.id;
+                            document.getElementById('strategy-name').value = strategy.strategy_name;
+                            document.getElementById('instrument').value = strategy.instrument;
+                            document.getElementById('candle-time').value = strategy.candle_time;
+                            document.getElementById('execution-start').value = strategy.start_time;
+                            document.getElementById('execution-end').value = strategy.end_time;
+                            document.getElementById('stop-loss').value = strategy.stop_loss;
+                            document.getElementById('target-profit').value = strategy.target_profit;
+                            document.getElementById('total-lot').value = strategy.total_lot;
+                            document.getElementById('trailing-stop-loss').value = strategy.trailing_stop_loss;
+                            document.getElementById('segment').value = strategy.segment;
+                            document.getElementById('trade-type').value = strategy.trade_type;
+                            document.getElementById('strike-price').value = strategy.strike_price;
+                            document.getElementById('expiry-type').value = strategy.expiry_type;
+                            
+                            const strategySelect = document.getElementById('strategy-select');
+                            strategySelect.value = strategy.strategy_type;
+                            updateStrategyView();
+
+                            const collapseOne = new bootstrap.Collapse(document.getElementById('collapseOne'), { toggle: false });
+                            collapseOne.show();
+                        } else {
+                            alert('Error: ' + data.message);
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Error fetching strategy for edit:', error);
+                        alert('An error occurred while fetching strategy data.');
+                    });
+            }
+
+            function handleDeleteStrategy(strategyId) {
+                if (!confirm('Are you sure you want to delete this strategy?')) {
+                    return;
+                }
+                fetch(`/strategy/delete/${strategyId}`, { method: 'POST' })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        alert(data.message);
+                        fetchStrategiesAndPopulateTable();
+                    } else {
+                        alert('Error: ' + data.message);
+                    }
+                })
+                .catch(error => {
+                    console.error('Error deleting strategy:', error);
+                    alert('An error occurred while deleting the strategy.');
+                });
+            }
+
+            function handleDeployStrategy(strategyId) {
+                const deployButton = document.querySelector(`.deploy-strategy[data-id='${strategyId}']`);
+                deployButton.disabled = true;
+                deployButton.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Deploying...';
+
+                fetch(`/strategy/deploy/${strategyId}`, { method: 'POST' })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        alert(data.message);
+                        fetchStrategiesAndPopulateTable();
+                    } else {
+                        alert('Error: ' + data.message);
+                    }
+                })
+                .catch(error => {
+                    console.error('Error deploying strategy:', error);
+                    alert('An error occurred while deploying the strategy.');
+                })
+                .finally(() => {
+                    deployButton.disabled = false;
+                    deployButton.innerHTML = 'Deploy';
+                });
+            }
+
+            function handlePauseStrategy(strategyId) {
+                fetch(`/strategy/pause/${strategyId}`, { method: 'POST' })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        alert(data.message);
+                        fetchStrategiesAndPopulateTable();
+                    } else {
+                        alert('Error: ' + data.message);
+                    }
+                })
+                .catch(error => {
+                    console.error('Error pausing strategy:', error);
+                    alert('An error occurred while pausing the strategy.');
+                });
+            }
+
+            function handleSquareOffStrategy(strategyId) {
+                if (!confirm('Are you sure you want to square off this strategy?')) {
+                    return;
+                }
+                fetch(`/strategy/squareoff/${strategyId}`, { method: 'POST' })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        alert(data.message);
+                        fetchStrategiesAndPopulateTable();
+                    } else {
+                        alert('Error: ' + data.message);
+                    }
+                })
+                .catch(error => {
+                    console.error('Error squaring off strategy:', error);
+                    alert('An error occurred while squaring off the strategy.');
+                });
+            }
+
+            document.getElementById('strategy-form').addEventListener('submit', function(event) {
+                event.preventDefault();
+                const formData = new FormData(this);
+                fetch('/strategy/save', { method: 'POST', body: formData })
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.status === 'success') {
+                            const successMessage = document.getElementById('success-message');
+                            successMessage.textContent = data.message;
+                            successMessage.style.display = 'block';
+                            setTimeout(() => {
+                                successMessage.style.display = 'none';
+                            }, 3000);
+                            fetchStrategiesAndPopulateTable();
+                            document.getElementById('strategy-form').reset();
+                            document.getElementById('strategy-id').value = '';
+                        } else {
+                            alert('Error: ' + data.message);
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Error saving strategy:', error);
+                        alert('An error occurred while saving the strategy.');
+                    });
+            });
+
+            document.getElementById('backtest-form').addEventListener('submit', function(event) {
+                event.preventDefault();
+                const formData = new FormData(this);
+                fetch('/backtest', { method: 'POST', body: formData })
+                    .then(response => response.json())
+                    .then(data => {
+                        const resultsDiv = document.getElementById('backtest-results');
+                        resultsDiv.innerHTML = `
+                            <h5>Backtest Results</h5>
+                            <p>P&L: ${data.pnl}</p>
+                            <p>Number of Trades: ${data.trades}</p>
+                        `;
+                    });
+            });
+
+            document.getElementById('market-replay-form').addEventListener('submit', function(event) {
+                event.preventDefault();
+                const formData = new FormData(this);
+                fetch('/market_replay', { method: 'POST', body: formData })
+                    .then(response => response.json())
+                    .then(data => {
+                        const resultsDiv = document.getElementById('market-replay-results');
+                        resultsDiv.innerHTML = `
+                            <h5>Market Replay Results</h5>
+                            <p>P&L: ${data.pnl}</p>
+                            <p>Number of Trades: ${data.trades}</p>
+                        `;
+                    });
+            });
+
+            document.getElementById('replay-strategy').addEventListener('change', function() {
+                const strategyId = this.value;
+                const descriptionDiv = document.getElementById('replay-strategy-description');
+                const detailsDiv = document.getElementById('replay-strategy-details');
+
+                if (strategyId) {
+                    fetch(`/strategy/edit/${strategyId}`)
+                        .then(response => response.json())
+                        .then(data => {
+                            if (data.status === 'success') {
+                                const strategy = data.strategy;
+                                const strategyType = strategy.strategy_type;
+
+                                if (strategyDescriptions[strategyType]) {
+                                    descriptionDiv.innerHTML = strategyDescriptions[strategyType];
+                                    descriptionDiv.style.display = 'block';
+                                } else {
+                                    descriptionDiv.style.display = 'none';
+                                }
+
+                                let detailsHtml = '<h5>Strategy Details</h5>';
+                                for (const [key, value] of Object.entries(strategy)) {
+                                    detailsHtml += `<p><strong>${key}:</strong> ${value}</p>`;
+                                }
+                                detailsDiv.innerHTML = detailsHtml;
+                            } else {
+                                descriptionDiv.style.display = 'none';
+                                detailsDiv.innerHTML = '<p>Could not fetch strategy details.</p>';
+                            }
+                        });
+                } else {
+                    descriptionDiv.style.display = 'none';
+                    detailsDiv.innerHTML = '';
+                }
+            });
+        });
+    </script>
+{% endblock %}

@@ -1,0 +1,27 @@
+{% if session.get('user_id') %}
+<ul class="navbar-nav me-auto mb-2 mb-lg-0">
+    <li class="nav-item">
+        <a class="nav-link" aria-current="page" href="/dashboard" id="dashboard-tab">Dashboard</a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link" href="/dashboard#backtest-content" id="backtest-tab">Backtest</a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link" href="/dashboard#market-replay-content" id="market-replay-tab">Market Replay</a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link" href="/dashboard#tick-data-content" id="tick-data-tab">Tick Data</a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link" href="{{ url_for('chat.chat') }}" id="chat-tab">Chat</a>
+    </li>
+</ul>
+<ul class="navbar-nav ms-auto">
+    <li class="nav-item">
+        <a class="nav-link" href="#">Welcome, <span id="user-name">{{ user_name }}</span></a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link" href="/logout">Logout</a>
+    </li>
+</ul>
+{% endif %}

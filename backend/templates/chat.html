@@ -1,0 +1,92 @@
+
+{% extends 'base.html' %}
+
+{% block title %}TradeSync | Chart{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+    <h2 class="my-4">Candlestick Chart</h2>
+    <div class="row mb-3">
+        <div class="col-md-3">
+            <label for="date-picker">Select Date:</label>
+            <input type="date" id="date-picker" class="form-control">
+        </div>
+        <div class="col-md-2">
+            <button id="show-chart-btn" class="btn btn-primary mt-4">Show Chart</button>
+        </div>
+    </div>
+    <div class="chart-container" style="position: relative; height:60vh; width:80vw">
+        <canvas id="candlestick-chart"></canvas>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-chart-financial"></script>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const ctx = document.getElementById('candlestick-chart').getContext('2d');
+    let chart;
+
+    function fetchDataAndRenderChart(date) {
+        fetch(`/api/chart_data?date=${date}`)
+            .then(response => response.json())
+            .then(data => {
+                console.log('Data received from backend:', data);
+                if (chart) {
+                    chart.destroy();
+                }
+                                try {
+                                    chart = new Chart(ctx, {
+                                        type: 'line',
+                                        data: {
+                                            datasets: [{
+                                                label: 'Close Price',
+                                                data: data.candles.map(d => ({x: new Date(d.x), y: d.c})),
+                                                borderColor: 'black',
+                                                backgroundColor: 'rgba(0, 0, 0, 0.1)',
+                                            }, {
+                                                label: '5-period EMA',
+                                                data: data.ema.map(d => ({x: new Date(d.x), y: d.y})),
+                                                type: 'line',
+                                borderColor: 'blue',
+                                borderWidth: 1,
+                                pointRadius: 0
+                            }]
+                        },
+                        options: {
+                            scales: {
+                                x: {
+                                    type: 'time',
+                                    time: {
+                                        unit: 'minute',
+                                        displayFormats: {
+                                            minute: 'HH:mm'
+                                        }
+                                    }
+                                },
+                                y: {
+                                    beginAtZero: false
+                                }
+                            }
+                        }
+                    });
+                } catch (error) {
+                    console.error('Error rendering chart:', error);
+                }
+            })
+            .catch(error => {
+                console.error('Error fetching data:', error);
+            });
+    }
+
+    document.getElementById('show-chart-btn').addEventListener('click', function() {
+        const selectedDate = document.getElementById('date-picker').value;
+        if (selectedDate) {
+            fetchDataAndRenderChart(selectedDate);
+        }
+    });
+});
+</script>
+{% endblock %}

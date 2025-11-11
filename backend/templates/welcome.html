@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+
+{% block title %}Welcome{% endblock %}
+
+{% block content %}
+    <div class="row justify-content-center">
+        <div class="col-md-6">
+            <div class="card mt-5">
+                <div class="card-body">
+                    <h3 class="card-title text-center">Welcome!</h3>
+                    {% with messages = get_flashed_messages(with_categories=true) %}
+                      {% if messages %}
+                        {% for category, message in messages %}
+                          <div class="alert alert-{{ category }}">{{ message }}</div>
+                        {% endfor %}
+                      {% endif %}
+                    {% endwith %}
+                    <p class="text-center">You have successfully logged in.</p>
+                    <div class="text-center mt-4">
+                        <a href="/zerodha_login" class="btn btn-primary">Login with Zerodha</a>
+                    </div>
+                    <div class="text-center mt-3">
+                        <a href="/logout">Logout</a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+{% endblock %}
