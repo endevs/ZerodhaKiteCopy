@@ -1,6 +1,5 @@
 import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import Layout from './Layout';
 
 const Login: React.FC = () => {
   const [email, setEmail] = useState<string>('');
@@ -60,46 +59,75 @@ const Login: React.FC = () => {
   };
 
   return (
-    <Layout>
-      <div className="position-absolute top-0 start-0 m-3" style={{ zIndex: 1000 }}>
-        <a 
-          href="https://drpinfotech.com" 
-          target="_blank" 
-          rel="noopener noreferrer"
-          className="text-decoration-none"
-        >
-          <img 
-            src="/drp-infotech-logo.png" 
-            alt="DRP Infotech Pvt Ltd Logo" 
-            style={{ 
-              height: '50px', 
-              width: 'auto',
-              objectFit: 'contain'
-            }}
-            onError={(e) => {
-              // Fallback to text if image fails to load
-              e.currentTarget.style.display = 'none';
-              const fallback = document.createElement('span');
-              fallback.className = 'fs-5 fw-bold text-dark';
-              fallback.textContent = 'DRP Infotech Pvt Ltd';
-              e.currentTarget.parentElement?.appendChild(fallback);
-            }}
+    <div className="auth-page">
+      <div className="auth-overlay" />
+      <nav className="auth-nav container">
+        <div className="d-flex align-items-center">
+          <img
+            src="/drp-infotech-logo.png"
+            alt="DRP Infotech Pvt Ltd"
+            className="auth-logo"
           />
-        </a>
-      </div>
-      <div className="row justify-content-center">
-        <div className="col-md-6">
-          <div className="card mt-5">
-            <div className="card-body">
-              <h3 className="card-title text-center">Login</h3>
+          <span className="auth-brand">DRP Infotech Pvt Ltd</span>
+        </div>
+        <div className="d-flex align-items-center gap-2">
+          <Link to="/signup" className="btn btn-outline-light btn-sm px-3">
+            Sign up
+          </Link>
+          <Link to="/login" className="btn btn-light btn-sm px-3 text-primary">
+            Log in
+          </Link>
+        </div>
+      </nav>
+
+      <div className="container auth-container">
+        <div className="row align-items-center g-5">
+          <div className="col-lg-6">
+            <span className="badge bg-primary-subtle text-primary-emphasis mb-3">
+              Secure Access to Your Trading Console
+            </span>
+            <h1 className="display-5 fw-bold text-white">
+              Continue your AI-powered trading journey with confidence.
+            </h1>
+            <p className="lead text-white-50 mt-3">
+              Verify your identity in seconds and step back into your personalised dashboard—
+              complete with live strategies, analytics, and risk controls tailored to your portfolio.
+            </p>
+            <div className="auth-metrics">
+              <div>
+                <strong>500+</strong>
+                <small>Live & paper strategies monitored seamlessly.</small>
+              </div>
+              <div>
+                <strong>24/7</strong>
+                <small>Automated oversight with proactive alerts.</small>
+              </div>
+              <div>
+                <strong>2-step</strong>
+                <small>OTP validation keeps every account secure.</small>
+              </div>
+            </div>
+            <div className="auth-side-note mt-4">
+              <strong>New to the platform?</strong> Your login uses a one-time password emailed to
+              you. No passwords to remember—just secure, frictionless access.
+            </div>
+          </div>
+          <div className="col-lg-5 offset-lg-1 col-xl-4">
+            <div className="auth-card shadow-lg">
+              <h3 className="fw-semibold mb-4">Sign in to your account</h3>
+              <p className="text-white-50 mb-4">
+                Enter the registered email address to receive a one-time passcode.
+              </p>
               {message && (
-                <div className={`alert alert-${message.type}`}>
+                <div className={`alert alert-${message.type} mb-4`} role="alert">
                   {message.text}
                 </div>
               )}
-              <form onSubmit={handleSubmit}>
-                <div className="form-group mb-3">
-                  <label htmlFor="email">Email Address</label>
+              <form onSubmit={handleSubmit} className="d-flex flex-column gap-3">
+                <div>
+                  <label htmlFor="email" className="form-label">
+                    Email Address
+                  </label>
                   <input
                     type="email"
                     className="form-control"
@@ -107,20 +135,31 @@ const Login: React.FC = () => {
                     name="email"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
+                    placeholder="you@company.com"
+                    autoComplete="email"
                     required
                   />
                 </div>
-                <button type="submit" className="btn btn-primary btn-block w-100">Login with OTP</button>
+                <button type="submit" className="btn btn-primary">
+                  Send OTP
+                </button>
               </form>
-              <div className="text-center mt-3">
-                <Link to="/signup">Don't have an account? Sign Up</Link>
+              <div className="text-center text-white-50 mt-4">
+                Don&apos;t have an account?{' '}
+                <Link to="/signup" className="text-white">
+                  Create one now
+                </Link>
               </div>
             </div>
           </div>
         </div>
       </div>
-    </Layout>
+      <div className="container text-center auth-footer-text">
+        © {new Date().getFullYear()} DRP Infotech Pvt Ltd · Intelligent Algo Trading &amp; AI Automation
+      </div>
+    </div>
   );
 };
 
 export default Login;
+

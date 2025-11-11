@@ -1,6 +1,5 @@
 import React, { useState } from 'react';
-import { useNavigate, useLocation } from 'react-router-dom';
-import Layout from './Layout';
+import { useNavigate, useLocation, Link } from 'react-router-dom';
 
 const VerifyOtp: React.FC = () => {
   const [otp, setOtp] = useState<string>('');
@@ -51,20 +50,18 @@ const VerifyOtp: React.FC = () => {
         if (data.status === 'success') {
           setMessage({ type: 'success', text: data.message || 'OTP verified successfully!' });
           if (data.redirect) {
-            // Extract path from full URL if needed, or use directly if it's already a path
             let redirectPath = data.redirect;
             try {
               const url = new URL(data.redirect);
               redirectPath = url.pathname + url.search;
             } catch {
-              // If it's already a path (starts with /), use it directly
               if (!data.redirect.startsWith('http')) {
                 redirectPath = data.redirect;
               }
             }
             navigate(redirectPath);
           } else {
-            navigate('/welcome'); // Fallback if no redirect is provided
+            navigate('/welcome');
           }
         } else {
           setMessage({ type: 'danger', text: data.message || 'OTP verification failed.' });
@@ -79,46 +76,79 @@ const VerifyOtp: React.FC = () => {
   };
 
   return (
-    <Layout>
-      <div className="position-absolute top-0 start-0 m-3" style={{ zIndex: 1000 }}>
-        <a 
-          href="https://drpinfotech.com" 
-          target="_blank" 
-          rel="noopener noreferrer"
-          className="text-decoration-none"
-        >
-          <img 
-            src="/drp-infotech-logo.png" 
-            alt="DRP Infotech Pvt Ltd Logo" 
-            style={{ 
-              height: '50px', 
-              width: 'auto',
-              objectFit: 'contain'
-            }}
-            onError={(e) => {
-              // Fallback to text if image fails to load
-              e.currentTarget.style.display = 'none';
-              const fallback = document.createElement('span');
-              fallback.className = 'fs-5 fw-bold text-dark';
-              fallback.textContent = 'DRP Infotech Pvt Ltd';
-              e.currentTarget.parentElement?.appendChild(fallback);
-            }}
+    <div className="auth-page">
+      <div className="auth-overlay" />
+      <nav className="auth-nav container">
+        <div className="d-flex align-items-center">
+          <img
+            src="/drp-infotech-logo.png"
+            alt="DRP Infotech Pvt Ltd"
+            className="auth-logo"
           />
-        </a>
-      </div>
-      <div className="row justify-content-center">
-        <div className="col-md-6">
-          <div className="card mt-5">
-            <div className="card-body">
-              <h3 className="card-title text-center">Verify OTP</h3>
+          <span className="auth-brand">DRP Infotech Pvt Ltd</span>
+        </div>
+        <div className="d-flex align-items-center gap-2">
+          <Link to="/signup" className="btn btn-outline-light btn-sm px-3">
+            Sign up
+          </Link>
+          <Link to="/login" className="btn btn-light btn-sm px-3 text-primary">
+            Log in
+          </Link>
+        </div>
+      </nav>
+
+      <div className="container auth-container">
+        <div className="row align-items-center g-5">
+          <div className="col-lg-6">
+            <span className="badge bg-primary-subtle text-primary-emphasis mb-3">
+              Final step to unlock your AI trading suite
+            </span>
+            <h1 className="display-5 fw-bold text-white">
+              Confirm your identity and dive back into hyper-intelligent trading.
+            </h1>
+            <p className="lead text-white-50 mt-3">
+              We sent a secure one-time password to <strong>{email || 'your registered email address'}</strong>.
+              Enter it below to continue managing your strategies, data feeds, and live deployments without missing a beat.
+            </p>
+            <div className="auth-metrics">
+              <div>
+                <strong>2 min</strong>
+                <small>Average time to complete OTP verification.</small>
+              </div>
+              <div>
+                <strong>5 layers</strong>
+                <small>Of security guard your execution pipeline.</small>
+              </div>
+              <div>
+                <strong>99.9%</strong>
+                <small>Platform availability backed by automated checks.</small>
+              </div>
+            </div>
+            <div className="auth-side-note mt-4">
+              <strong>Didn&apos;t receive the email?</strong> Check spam or resend the OTP from the login screen. Still facing issues?
+              Reach out at{' '}
+              <a href="mailto:contact@drpinfotech.com" className="text-white text-decoration-none">
+                contact@drpinfotech.com
+              </a>
+              .
+            </div>
+          </div>
+          <div className="col-lg-5 offset-lg-1 col-xl-4">
+            <div className="auth-card shadow-lg">
+              <h3 className="fw-semibold mb-4">Verify one-time passcode</h3>
+              <p className="text-white-50 mb-4">
+                Enter the 6-digit code delivered to your inbox. This keeps every account tightly secured.
+              </p>
               {message && (
-                <div className={`alert alert-${message.type}`}>
+                <div className={`alert alert-${message.type} mb-4`} role="alert">
                   {message.text}
                 </div>
               )}
-              <form onSubmit={handleSubmit}>
-                <div className="form-group mb-3">
-                  <label htmlFor="email">Email Address</label>
+              <form onSubmit={handleSubmit} className="d-flex flex-column gap-3">
+                <div>
+                  <label htmlFor="email" className="form-label">
+                    Email Address
+                  </label>
                   <input
                     type="email"
                     className="form-control"
@@ -126,12 +156,16 @@ const VerifyOtp: React.FC = () => {
                     name="email"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
+                    placeholder="you@company.com"
+                    autoComplete="email"
                     required
                     readOnly={isEmailReadOnly}
                   />
                 </div>
-                <div className="form-group mb-3">
-                  <label htmlFor="otp">OTP</label>
+                <div>
+                  <label htmlFor="otp" className="form-label">
+                    One-Time Passcode
+                  </label>
                   <input
                     type="text"
                     className="form-control"
@@ -139,16 +173,29 @@ const VerifyOtp: React.FC = () => {
                     name="otp"
                     value={otp}
                     onChange={(e) => setOtp(e.target.value)}
+                    placeholder="Enter 6-digit code"
+                    autoComplete="one-time-code"
                     required
                   />
                 </div>
-                <button type="submit" className="btn btn-primary btn-block w-100">Verify</button>
+                <button type="submit" className="btn btn-primary">
+                  Verify &amp; Continue
+                </button>
               </form>
+              <div className="text-center text-white-50 mt-4">
+                Need a new code?{' '}
+                <Link to="/login" className="text-white">
+                  Request OTP again
+                </Link>
+              </div>
             </div>
           </div>
         </div>
       </div>
-    </Layout>
+      <div className="container text-center auth-footer-text">
+        © {new Date().getFullYear()} DRP Infotech Pvt Ltd · Intelligent Algo Trading &amp; AI Automation
+      </div>
+    </div>
   );
 };
 
