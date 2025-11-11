@@ -623,15 +623,35 @@ const buildFlowNodes = (strategyText: string): FlowNode[] => {
   }
 
   const extractBlock = (label: string) => {
-    const regex = new RegExp(`${label}[\\s\\S]*?(?=\\n[A-Z ]{3,}|$)`, 'i');
-    const match = strategyText.match(regex);
-    if (!match) return null;
-    return match[0]
-      .split('\n')
-      .slice(1)
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .slice(0, 6);
+    const lines = strategyText.split(/\r?\n/);
+    const startIndex = lines.findIndex((line) =>
+      line.trim().toUpperCase().startsWith(label.toUpperCase()),
+    );
+    if (startIndex === -1) return null;
+
+    const details: string[] = [];
+    for (let i = startIndex + 1; i < lines.length; i += 1) {
+      const trimmed = lines[i].trim();
+      if (!trimmed) {
+        continue;
+      }
+
+      const isHeading =
+        /^[A-Z0-9][A-Z0-9\s\-:&()]*$/.test(trimmed) &&
+        !trimmed.startsWith('-') &&
+        !trimmed.startsWith('•');
+
+      if (isHeading) {
+        break;
+      }
+
+      details.push(trimmed);
+      if (details.length >= 6) {
+        break;
+      }
+    }
+
+    return details.length > 0 ? details : null;
   };
 
   const entryBlock = extractBlock('ENTRY');
