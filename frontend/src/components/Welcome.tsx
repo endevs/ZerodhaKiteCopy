@@ -1,4 +1,8 @@
 import React, { useEffect, useState } from 'react';
+import LoaderOverlay from './LoaderOverlay';
+import SupportChat from './SupportChat';
+
+const API_TUTORIAL_URL = 'https://www.youtube.com/watch?v=b8m9zhyNQVM';
 
 const WelcomeContent: React.FC<{ message: { type: string; text: string } | null; onLogout: () => void }> = ({ message, onLogout }) => {
   const [loading, setLoading] = useState(true);
@@ -6,6 +10,7 @@ const WelcomeContent: React.FC<{ message: { type: string; text: string } | null;
   const [appKey, setAppKey] = useState('');
   const [appSecret, setAppSecret] = useState('');
   const [feedback, setFeedback] = useState<{ type: string; text: string } | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     const fetchCredentialsStatus = async () => {
@@ -30,6 +35,7 @@ const WelcomeContent: React.FC<{ message: { type: string; text: string } | null;
   const handleSaveCredentials = async (event: React.FormEvent) => {
     event.preventDefault();
     setFeedback(null);
+    setSubmitting(true);
     try {
       const response = await fetch('http://localhost:8000/api/user-credentials', {
         method: 'POST',
@@ -47,17 +53,19 @@ const WelcomeContent: React.FC<{ message: { type: string; text: string } | null;
       setAppSecret('');
     } catch (error: any) {
       setFeedback({ type: 'danger', text: error.message || 'Unexpected error occurred.' });
+    } finally {
+      setSubmitting(false);
     }
   };
 
   if (loading) {
     return (
-      <div className="text-center text-white-50">
-        <div className="spinner-border text-light" role="status">
-          <span className="visually-hidden">Loading...</span>
+      <>
+        <LoaderOverlay visible message="Checking your configuration..." />
+        <div className="text-center text-white-50">
+          <p className="mt-3">Preparing your workspace...</p>
         </div>
-        <p className="mt-3">Checking your configuration...</p>
-      </div>
+      </>
     );
   }
 
@@ -122,8 +130,15 @@ const WelcomeContent: React.FC<{ message: { type: string; text: string } | null;
               required
             />
           </div>
-          <button type="submit" className="btn btn-primary">
-            Save Credentials
+          <button type="submit" className="btn btn-primary" disabled={submitting}>
+            {submitting ? (
+              <>
+                <span className="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>
+                Saving...
+              </>
+            ) : (
+              'Save Credentials'
+            )}
           </button>
           <button onClick={onLogout} type="button" className="btn btn-outline-light">
             Sign out
@@ -131,6 +146,18 @@ const WelcomeContent: React.FC<{ message: { type: string; text: string } | null;
         </form>
       )}
       <div className="text-center text-white-50 mt-4 small">
+        Need help generating your API key?{' '}
+        <a
+          href={API_TUTORIAL_URL}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-white text-decoration-none"
+        >
+          Watch the setup tutorial
+        </a>
+        .
+      </div>
+      <div className="text-center text-white-50 mt-2 small">
         Need help? Refer to your Zerodha developer console or contact{' '}
         <a href="mailto:contact@drpinfotech.com" className="text-white text-decoration-none">
           contact@drpinfotech.com
@@ -244,6 +271,7 @@ const Welcome: React.FC = () => {
       <div className="container text-center auth-footer-text">
         © {new Date().getFullYear()} DRP Infotech Pvt Ltd · Intelligent Algo Trading &amp; AI Automation
       </div>
+      <SupportChat />
     </div>
   );
 };

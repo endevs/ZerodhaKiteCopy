@@ -1597,6 +1597,59 @@ def send_email(to_email, otp):
         server.login(sender_email, password)
         server.sendmail(sender_email, receiver_email, message.as_string())
 
+def send_support_email(name: str, email: str, mobile: str, inquiry: str):
+    port = 465
+    smtp_server = config.SMTP_SERVER
+    sender_email = config.EMAIL_FROM
+    receiver_email = config.EMAIL_FROM
+    password = config.PASSWORD_EMAIL
+
+    message = MIMEMultipart("alternative")
+    message["Subject"] = "New Support Inquiry - DRP Infotech Trading Platform"
+    message["From"] = f"DRP Infotech Pvt Ltd <{sender_email}>"
+    message["To"] = receiver_email
+
+    text = f"""
+    New support inquiry received
+
+    Name: {name}
+    Email: {email}
+    Mobile: {mobile}
+
+    Message:
+    {inquiry}
+    """
+
+    html = f"""
+    <html>
+      <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+        <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
+          <div style="background-color: #0d6efd; color: white; padding: 18px; text-align: center; border-radius: 5px 5px 0 0;">
+            <h2 style="margin: 0;">New Support Inquiry</h2>
+            <p style="margin: 5px 0 0 0; font-size: 14px;">DRP Infotech Trading Platform</p>
+          </div>
+          <div style="background-color: #f8f9fa; padding: 24px; border-radius: 0 0 5px 5px;">
+            <h4 style="color: #0d6efd; margin-top: 0;">Contact Details</h4>
+            <p><strong>Name:</strong> {name}</p>
+            <p><strong>Email:</strong> <a href="mailto:{email}">{email}</a></p>
+            <p><strong>Mobile:</strong> {mobile}</p>
+            <hr style="border: none; border-top: 1px solid #dee2e6; margin: 24px 0;">
+            <h4 style="color: #0d6efd;">Message</h4>
+            <p style="white-space: pre-wrap;">{inquiry}</p>
+          </div>
+        </div>
+      </body>
+    </html>
+    """
+
+    message.attach(MIMEText(text, "plain"))
+    message.attach(MIMEText(html, "html"))
+
+    context = ssl.create_default_context()
+    with smtplib.SMTP_SSL(smtp_server, port, context=context) as server:
+        server.login(sender_email, password)
+        server.sendmail(sender_email, receiver_email, message.as_string())
+
 @app.route('/favicon.ico')
 def favicon():
     return '', 204
@@ -1935,8 +1988,8 @@ def api_signup():
         
         return jsonify({
             'status': 'success',
-            'message': 'Signup successful! OTP sent to your email. Please verify.',
-            'redirect': f'/verify-otp?email={email}'
+            'message': 'Signup successful! We have emailed an OTP. Please log in to continue.',
+            'redirect': '/login'
         })
     except Exception as e:
         logging.error(f"Error in api_signup: {e}")
@@ -2279,6 +2332,40 @@ def api_user_data():
             'balance': 0,
             'access_token_present': False
         })
+
+def _insert_contact_message(name: str, email: str, mobile: str, message: str, user_id: Optional[int] = None) -> None:
+    conn = get_db_connection()
+    conn.execute(
+        'INSERT INTO user_contact_messages (user_id, name, email, mobile, message) VALUES (?, ?, ?, ?, ?)',
+        (user_id, name, email, mobile, message)
+    )
+    conn.commit()
+    conn.close()
+
+
+@app.route("/api/contact", methods=['POST'])
+def api_contact():
+    data = request.get_json(silent=True) or {}
+    name = (data.get('name') or '').strip()
+    email = (data.get('email') or '').strip()
+    mobile = (data.get('mobile') or '').strip()
+    message = (data.get('message') or '').strip()
+
+    if not all([name, email, mobile, message]):
+        return jsonify({'status': 'error', 'message': 'All fields are required.'}), 400
+
+    try:
+        conn = get_db_connection()
+        user = conn.execute('SELECT * FROM users WHERE email = ?', (email,)).fetchone()
+        user_id = user['id'] if user else None
+        _insert_contact_message(name, email, mobile, message, user_id)
+        send_support_email(name, email, mobile, message)
+        return jsonify({'status': 'success', 'message': 'Thank you! Our team will get back to you soon.'})
+    except Exception as exc:
+        logging.error("Failed to process contact message: %s", exc, exc_info=True)
+        return jsonify({'status': 'error', 'message': 'Unable to send message at the moment. Please try again later.'}), 500
+    finally:
+        conn.close()
 
 
 @app.route("/api/user-credentials", methods=['GET', 'POST'])

@@ -1,6 +1,7 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
 import '../App.css';
+import SupportChat from './SupportChat';
 
 const LandingPage: React.FC = () => {
   return (
@@ -308,6 +309,7 @@ const LandingPage: React.FC = () => {
           </div>
         </div>
       </footer>
+      <SupportChat />
     </div>
   );
 };

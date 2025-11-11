@@ -1,14 +1,18 @@
 import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
+import LoaderOverlay from './LoaderOverlay';
+import SupportChat from './SupportChat';
 
 const Login: React.FC = () => {
   const [email, setEmail] = useState<string>('');
   const [message, setMessage] = useState<{ type: string; text: string } | null>(null);
+  const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
     setMessage(null);
+    setLoading(true);
 
     try {
       const response = await fetch('http://localhost:8000/api/login', {
@@ -47,6 +51,9 @@ const Login: React.FC = () => {
         } else {
           navigate('/verify-otp', { state: { email } }); // Fallback if no redirect is provided
         }
+      } else if (data.status === 'otp_required') {
+        setMessage({ type: 'info', text: data.message || 'Please verify the OTP sent to your email and try again.' });
+        navigate('/verify-otp', { state: { email } });
       } else {
         // This case should ideally be caught by !response.ok, but as a fallback
         setMessage({ type: 'danger', text: data.message || 'Login failed.' });
@@ -55,11 +62,14 @@ const Login: React.FC = () => {
     } catch (error) {
       console.error('Error during login:', error);
       setMessage({ type: 'danger', text: 'An unexpected error occurred. Please try again.' });
+    } finally {
+      setLoading(false);
     }
   };
 
   return (
     <div className="auth-page">
+      <LoaderOverlay visible={loading} message="Sending OTP..." />
       <div className="auth-overlay" />
       <nav className="auth-nav container">
         <div className="d-flex align-items-center">
@@ -157,9 +167,11 @@ const Login: React.FC = () => {
       <div className="container text-center auth-footer-text">
         © {new Date().getFullYear()} DRP Infotech Pvt Ltd · Intelligent Algo Trading &amp; AI Automation
       </div>
+      <SupportChat />
     </div>
   );
 };
 
 export default Login;
+
 

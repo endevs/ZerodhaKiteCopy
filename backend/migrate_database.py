@@ -56,6 +56,23 @@ def migrate_strategies_table():
             # Update existing rows with current timestamp
             cursor.execute("UPDATE strategies SET updated_at = CURRENT_TIMESTAMP WHERE updated_at IS NULL")
         
+        cursor.execute("PRAGMA table_info(user_contact_messages)")
+        contact_columns = [row[1] for row in cursor.fetchall()]
+        if not contact_columns:
+            logging.info("Creating 'user_contact_messages' table")
+            cursor.execute("""
+                CREATE TABLE user_contact_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    name TEXT NOT NULL,
+                    email TEXT NOT NULL,
+                    mobile TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users (id)
+                )
+            """)
+        
         conn.commit()
         logging.info("Database migration completed successfully")
         print("SUCCESS: Database migration completed successfully!")

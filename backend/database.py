@@ -22,6 +22,19 @@ def create_tables():
             otp_expiry DATETIME
         )
     """)
+    conn.execute('DROP TABLE IF EXISTS user_contact_messages')
+    conn.execute("""
+        CREATE TABLE user_contact_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            name TEXT NOT NULL,
+            email TEXT NOT NULL,
+            mobile TEXT NOT NULL,
+            message TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users (id)
+        )
+    """)
     conn.execute('DROP TABLE IF EXISTS strategies')
     conn.execute("""
         CREATE TABLE strategies (

@@ -1,9 +1,12 @@
 import React, { useState } from 'react';
 import { useNavigate, useLocation, Link } from 'react-router-dom';
+import LoaderOverlay from './LoaderOverlay';
+import SupportChat from './SupportChat';
 
 const VerifyOtp: React.FC = () => {
   const [otp, setOtp] = useState<string>('');
   const [message, setMessage] = useState<{ type: string; text: string } | null>(null);
+  const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
   const location = useLocation();
   const queryEmail = React.useMemo(() => {
@@ -28,6 +31,7 @@ const VerifyOtp: React.FC = () => {
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
     setMessage(null);
+    setLoading(true);
 
     if (!email.trim()) {
       setMessage({ type: 'danger', text: 'Email is required to verify OTP.' });
@@ -72,11 +76,14 @@ const VerifyOtp: React.FC = () => {
     } catch (error) {
       console.error('Error during OTP verification:', error);
       setMessage({ type: 'danger', text: 'An unexpected error occurred. Please try again.' });
+    } finally {
+      setLoading(false);
     }
   };
 
   return (
     <div className="auth-page">
+      <LoaderOverlay visible={loading} message="Verifying OTP..." />
       <div className="auth-overlay" />
       <nav className="auth-nav container">
         <div className="d-flex align-items-center">
@@ -195,6 +202,7 @@ const VerifyOtp: React.FC = () => {
       <div className="container text-center auth-footer-text">
         © {new Date().getFullYear()} DRP Infotech Pvt Ltd · Intelligent Algo Trading &amp; AI Automation
       </div>
+      <SupportChat />
     </div>
   );
 };

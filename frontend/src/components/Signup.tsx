@@ -1,15 +1,19 @@
 import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
+import LoaderOverlay from './LoaderOverlay';
+import SupportChat from './SupportChat';
 
 const Signup: React.FC = () => {
   const [mobile, setMobile] = useState<string>('');
   const [email, setEmail] = useState<string>('');
   const [message, setMessage] = useState<{ type: string; text: string } | null>(null);
+  const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
     setMessage(null);
+    setLoading(true);
 
     try {
       const response = await fetch('http://localhost:8000/api/signup', {
@@ -24,23 +28,24 @@ const Signup: React.FC = () => {
       const data = await response.json();
 
       if (response.ok) {
-        setMessage({ type: 'success', text: data.message || 'Signup successful! Please verify the OTP.' });
-        if (data.redirect) {
-          navigate(data.redirect, { state: { email } });
-        } else {
-          navigate('/verify-otp', { state: { email } });
-        }
+        setMessage({ type: 'success', text: data.message || 'Signup successful! Please check your email for OTP.' });
+        setTimeout(() => {
+          navigate('/login', { state: { email } });
+        }, 2000);
       } else {
         setMessage({ type: 'danger', text: data.message || 'Signup failed.' });
       }
     } catch (error) {
       console.error('Error during signup:', error);
       setMessage({ type: 'danger', text: 'An error occurred. Please try again.' });
+    } finally {
+      setLoading(false);
     }
   };
 
   return (
     <div className="auth-page">
+      <LoaderOverlay visible={loading} message="Creating your account..." />
       <div className="auth-overlay" />
       <nav className="auth-nav container">
         <div className="d-flex align-items-center">
@@ -158,6 +163,7 @@ const Signup: React.FC = () => {
         </a>{' '}
         · © {new Date().getFullYear()} DRP Infotech Pvt Ltd
       </div>
+      <SupportChat />
     </div>
   );
 };
