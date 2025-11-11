@@ -1036,7 +1036,8 @@ const DashboardContent: React.FC<DashboardContentProps> = ({ onViewLiveStrategy 
 
   return (
     <div className="pb-4" id="dashboard-content">
-      <div className="accordion" id="dashboardAccordion">
+      <AIEnabledStrategyChat />
+      <div className="accordion mt-4" id="dashboardAccordion">
         <StrategyConfiguration
           onStrategySaved={handleStrategySaved}
           editingStrategy={editingStrategy}
@@ -1051,7 +1052,6 @@ const DashboardContent: React.FC<DashboardContentProps> = ({ onViewLiveStrategy 
           onToggle={setSavedOpen}
         />
       </div>
-      <AIEnabledStrategyChat />
     </div>
   );
 };
