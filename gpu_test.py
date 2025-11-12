@@ -29,6 +29,7 @@ def check_gpu():
         print("\n'nvidia-smi' command not found - likely no NVIDIA GPU installed")
 
 
+
 if __name__ == "__main__":
     print("Checking GPU information...")
     check_gpu()
