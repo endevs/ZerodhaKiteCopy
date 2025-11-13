@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { io, Socket } from 'socket.io-client';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import { apiUrl, SOCKET_BASE_URL } from '../config/api';
 
 interface RealTimeStrategyMonitorProps {
   strategyId: string;
@@ -35,7 +36,7 @@ const RealTimeStrategyMonitor: React.FC<RealTimeStrategyMonitorProps> = ({ strat
 
   useEffect(() => {
     // Initialize Socket connection
-  const newSocket = io('http://localhost:8000', { transports: ['polling'] });
+  const newSocket = io(SOCKET_BASE_URL, { transports: ['polling'] });
     setSocket(newSocket);
 
     newSocket.on('connect', () => {
@@ -67,7 +68,7 @@ const RealTimeStrategyMonitor: React.FC<RealTimeStrategyMonitorProps> = ({ strat
     });
 
     // Fetch initial strategy status
-    fetch(`http://localhost:8000/api/strategy/status/${strategyId}`, {
+    fetch(apiUrl(`/api/strategy/status/${strategyId}`), {
       credentials: 'include'
     })
       .then(res => res.json())

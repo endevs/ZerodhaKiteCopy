@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { apiUrl } from '../config/api';
 
 interface StrategyOption {
   id: number;
@@ -197,7 +198,7 @@ const LiveTradeContent: React.FC = () => {
 
   const fetchStrategies = useCallback(async () => {
     try {
-      const response = await fetch('http://localhost:8000/api/strategies', { credentials: 'include' });
+      const response = await fetch(apiUrl('/api/strategies'), { credentials: 'include' });
       const data = await response.json();
       if (response.ok && data.status === 'success') {
         setStrategies(data.strategies || []);
@@ -217,7 +218,7 @@ const LiveTradeContent: React.FC = () => {
       }
       try {
         setPreviewLoading(true);
-        const response = await fetch('http://localhost:8000/api/live_trade/preview', {
+        const response = await fetch(apiUrl('/api/live_trade/preview'), {
           method: 'POST',
           credentials: 'include',
           headers: { 'Content-Type': 'application/json' },
@@ -245,7 +246,7 @@ const LiveTradeContent: React.FC = () => {
   const fetchDeploymentStatus = useCallback(async () => {
     try {
       setStatusLoading(true);
-      const response = await fetch('http://localhost:8000/api/live_trade/status', { credentials: 'include' });
+      const response = await fetch(apiUrl('/api/live_trade/status'), { credentials: 'include' });
       const data = await response.json();
       if (!response.ok) {
         throw new Error(data.message || 'Failed to fetch live trade status');
@@ -307,7 +308,7 @@ const LiveTradeContent: React.FC = () => {
         payload.scheduled_start = isoString;
       }
 
-      const response = await fetch('http://localhost:8000/api/live_trade/deploy', {
+      const response = await fetch(apiUrl('/api/live_trade/deploy'), {
         method: 'POST',
         credentials: 'include',
         headers: {
@@ -343,7 +344,7 @@ const LiveTradeContent: React.FC = () => {
     setError(null);
     setActionMessage(null);
     try {
-      const response = await fetch('http://localhost:8000/api/live_trade/preview_order', {
+      const response = await fetch(apiUrl('/api/live_trade/preview_order'), {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
@@ -371,7 +372,7 @@ const LiveTradeContent: React.FC = () => {
     setActionMessage(null);
     setLoading(true);
     try {
-      const response = await fetch(`http://localhost:8000${endpoint}`, {
+      const response = await fetch(apiUrl(endpoint), {
         method: endpoint === '/api/live_trade/delete' ? 'DELETE' : 'POST',
         credentials: 'include',
         headers: {
@@ -401,7 +402,7 @@ const LiveTradeContent: React.FC = () => {
     setActionMessage(null);
     setLoading(true);
     try {
-      const response = await fetch('http://localhost:8000/api/live_trade/square_off', {
+      const response = await fetch(apiUrl('/api/live_trade/square_off'), {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },

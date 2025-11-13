@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { apiUrl } from '../config/api';
 import { useNavigate, useLocation, Link } from 'react-router-dom';
 import LoaderOverlay from './LoaderOverlay';
 import SupportChat from './SupportChat';
@@ -40,7 +41,7 @@ const VerifyOtp: React.FC = () => {
     }
 
     try {
-      const response = await fetch('http://localhost:8000/api/verify_otp', {
+      const response = await fetch(apiUrl('/api/verify_otp'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

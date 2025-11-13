@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { apiUrl } from '../config/api';
 
 interface MountainSignalFlowDiagramProps {
   strategy: {
@@ -53,7 +54,7 @@ const MountainSignalFlowDiagram: React.FC<MountainSignalFlowDiagramProps> = ({ s
   useEffect(() => {
     const loadRules = async () => {
       try {
-        const response = await fetch('http://localhost:8000/api/rules/mountain_signal', {
+        const response = await fetch(apiUrl('/api/rules/mountain_signal'), {
           credentials: 'include',
         });
         if (!response.ok) return;

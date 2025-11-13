@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { apiUrl } from '../config/api';
 
 const initialFormState = {
   name: '',
@@ -25,7 +26,7 @@ const SupportChat: React.FC = () => {
     setFeedback(null);
     setLoading(true);
     try {
-      const response = await fetch('http://localhost:8000/api/contact', {
+      const response = await fetch(apiUrl('/api/contact'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(form),

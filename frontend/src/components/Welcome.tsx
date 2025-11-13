@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { apiUrl } from '../config/api';
 import LoaderOverlay from './LoaderOverlay';
 import SupportChat from './SupportChat';
 import PolicyLinks from './PolicyLinks';
@@ -16,7 +17,7 @@ const WelcomeContent: React.FC<{ message: { type: string; text: string } | null;
   useEffect(() => {
     const fetchCredentialsStatus = async () => {
       try {
-        const response = await fetch('http://localhost:8000/api/user-credentials', {
+        const response = await fetch(apiUrl('/api/user-credentials'), {
           credentials: 'include',
         });
         if (!response.ok) {
@@ -38,7 +39,7 @@ const WelcomeContent: React.FC<{ message: { type: string; text: string } | null;
     setFeedback(null);
     setSubmitting(true);
     try {
-      const response = await fetch('http://localhost:8000/api/user-credentials', {
+      const response = await fetch(apiUrl('/api/user-credentials'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -188,7 +189,7 @@ const Welcome: React.FC = () => {
 
   const handleLogout = async () => {
     try {
-      const response = await fetch('http://localhost:8000/api/logout', { method: 'POST', credentials: 'include' });
+      const response = await fetch(apiUrl('/api/logout'), { method: 'POST', credentials: 'include' });
       const data = await response.json();
       if (response.ok) {
         window.location.href = '/login';

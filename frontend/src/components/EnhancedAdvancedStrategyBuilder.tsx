@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { apiUrl } from '../config/api';
 
 type VisibilityOption = 'private' | 'public';
 
@@ -442,7 +443,7 @@ const EnhancedAdvancedStrategyBuilder: React.FC<EnhancedAdvancedStrategyBuilderP
     };
 
     try {
-      const response = await fetch('http://localhost:8000/api/strategy/save', {
+      const response = await fetch(apiUrl('/api/strategy/save'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

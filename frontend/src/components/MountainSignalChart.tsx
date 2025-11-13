@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { ComposedChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ReferenceLine, Customized, XAxisProps, YAxisProps } from 'recharts';
+import { apiUrl } from '../config/api';
 
 interface Strategy {
   id: number;
@@ -382,7 +383,7 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
   useEffect(() => {
     const loadRuleConfig = async () => {
       try {
-        const response = await fetch('http://localhost:8000/api/rules/mountain_signal', {
+        const response = await fetch(apiUrl('/api/rules/mountain_signal'), {
           credentials: 'include',
         });
         if (!response.ok) {
@@ -609,7 +610,7 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
     setOptimizerError(null);
 
     try {
-      const response = await fetch('http://localhost:8000/api/optimizer_mountain_signal', {
+      const response = await fetch(apiUrl('/api/optimizer_mountain_signal'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -764,7 +765,9 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
 
     try {
       const response = await fetch(
-        `http://localhost:8000/api/chart_data?date=${selectedDate}&instrument=${encodeURIComponent(strategy.instrument)}&interval=${candleTime}m`,
+        apiUrl(
+          `/api/chart_data?date=${selectedDate}&instrument=${encodeURIComponent(strategy.instrument)}&interval=${candleTime}m`
+        ),
         { credentials: 'include' }
       );
 
@@ -788,7 +791,7 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
 
         try {
           const optionHistoryResponse = await fetch(
-            `http://localhost:8000/api/option_trade_history?instrument=${encodeURIComponent(strategy.instrument)}`,
+            apiUrl(`/api/option_trade_history?instrument=${encodeURIComponent(strategy.instrument)}`),
             { credentials: 'include' }
           );
 
@@ -827,7 +830,7 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
                  try {
                    const uniqueSymbols = Array.from(new Set(openSymbols));
                    const ltpResp = await fetch(
-                     `http://localhost:8000/api/option_ltp?symbols=${encodeURIComponent(uniqueSymbols.join(','))}`,
+                     apiUrl(`/api/option_ltp?symbols=${encodeURIComponent(uniqueSymbols.join(','))}`),
                      { credentials: 'include' }
                    );
                    if (ltpResp.ok) {
@@ -1805,7 +1808,7 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
     setBacktestResults(null);
 
     try {
-      const response = await fetch('http://localhost:8000/api/backtest_mountain_signal', {
+      const response = await fetch(apiUrl('/api/backtest_mountain_signal'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

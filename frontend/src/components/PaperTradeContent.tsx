@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { ComposedChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ReferenceLine, Customized } from 'recharts';
 import { io } from 'socket.io-client';
+import { apiUrl, SOCKET_BASE_URL } from '../config/api';
 
 interface Strategy {
   id: number;
@@ -74,9 +75,9 @@ const PaperTradeContent: React.FC<PaperTradeContentProps> = () => {
   useEffect(() => {
     const fetchSessions = async () => {
       try {
-        const url = selectedDate 
-          ? `http://localhost:8000/api/paper_trade/sessions?date=${selectedDate}`
-          : 'http://localhost:8000/api/paper_trade/sessions';
+        const url = selectedDate
+          ? apiUrl(`/api/paper_trade/sessions?date=${selectedDate}`)
+          : apiUrl('/api/paper_trade/sessions');
         const response = await fetch(url, { credentials: 'include' });
         const data = await response.json();
         if (response.ok && data.status === 'success') {
@@ -98,7 +99,7 @@ const PaperTradeContent: React.FC<PaperTradeContentProps> = () => {
 
     const fetchAuditTrail = async () => {
       try {
-        const response = await fetch(`http://localhost:8000/api/paper_trade/audit_trail/${selectedSessionId}`, {
+        const response = await fetch(apiUrl(`/api/paper_trade/audit_trail/${selectedSessionId}`), {
           credentials: 'include'
         });
         const data = await response.json();
@@ -118,7 +119,7 @@ const PaperTradeContent: React.FC<PaperTradeContentProps> = () => {
     const fetchStrategies = async () => {
       try {
         setLoading(true);
-        const response = await fetch('http://localhost:8000/api/strategies', {
+        const response = await fetch(apiUrl('/api/strategies'), {
           credentials: 'include',
         });
         const data = await response.json();
@@ -145,7 +146,7 @@ const PaperTradeContent: React.FC<PaperTradeContentProps> = () => {
   useEffect(() => {
     if (!isRunning || !selectedStrategy) return;
 
-    const socket = io('http://localhost:8000', {
+    const socket = io(SOCKET_BASE_URL, {
       transports: ['polling', 'websocket'],
       withCredentials: true
     });
@@ -201,7 +202,7 @@ const PaperTradeContent: React.FC<PaperTradeContentProps> = () => {
 
     try {
       setLoading(true);
-      const response = await fetch('http://localhost:8000/api/paper_trade/start', {
+      const response = await fetch(apiUrl('/api/paper_trade/start'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -233,7 +234,7 @@ const PaperTradeContent: React.FC<PaperTradeContentProps> = () => {
   const handleStop = async () => {
     try {
       setLoading(true);
-      const response = await fetch('http://localhost:8000/api/paper_trade/stop', {
+      const response = await fetch(apiUrl('/api/paper_trade/stop'), {
         method: 'POST',
         credentials: 'include',
       });

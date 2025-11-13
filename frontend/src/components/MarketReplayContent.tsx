@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ComposedChart, Area, ReferenceLine } from 'recharts';
 import { io, Socket } from 'socket.io-client';
+import { apiUrl, SOCKET_BASE_URL } from '../config/api';
 
 interface MarketReplayResults {
   pnl: number;
@@ -67,7 +68,7 @@ const MarketReplayContent: React.FC = () => {
 
   useEffect(() => {
     // Initialize socket connection
-    socketRef.current = io('http://localhost:8000', { transports: ['polling'] });
+    socketRef.current = io(SOCKET_BASE_URL, { transports: ['polling'] });
     
     const socket = socketRef.current;
 
@@ -201,7 +202,7 @@ const MarketReplayContent: React.FC = () => {
     };
 
     try {
-      const response = await fetch('http://localhost:8000/api/market_replay', {
+      const response = await fetch(apiUrl('/api/market_replay'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
