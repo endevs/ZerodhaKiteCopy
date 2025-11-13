@@ -6,6 +6,7 @@ import React, {
   useState,
 } from 'react';
 import EnhancedAdvancedStrategyBuilder from './EnhancedAdvancedStrategyBuilder';
+import { apiUrl } from '../config/api';
 
 type VisibilityOption = 'private' | 'public';
 
@@ -290,7 +291,7 @@ const StrategyInfoContent: React.FC<StrategyInfoContentProps> = ({ strategy, onS
     setSaveFeedback(null);
     setSaveError(null);
     try {
-      const response = await fetch('http://localhost:8000/api/strategy/save', {
+      const response = await fetch(apiUrl('/api/strategy/save'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -566,7 +567,7 @@ const SavedStrategies: React.FC<SavedStrategiesProps> = ({
 
   const fetchStrategies = useCallback(async () => {
     try {
-      const response = await fetch('http://localhost:8000/api/strategies', {
+      const response = await fetch(apiUrl('/api/strategies'), {
         credentials: 'include',
       });
       const data = await response.json();
@@ -748,7 +749,7 @@ const SavedStrategies: React.FC<SavedStrategiesProps> = ({
                                   title="Deploy"
                                   onClick={() =>
                                     handleAction(
-                                      `http://localhost:8000/api/strategy/deploy/${strategy.id}`,
+                                    apiUrl(`/api/strategy/deploy/${strategy.id}`),
                                     )
                                   }
                                 >
@@ -761,7 +762,7 @@ const SavedStrategies: React.FC<SavedStrategiesProps> = ({
                                   title="Pause"
                                   onClick={() =>
                                     handleAction(
-                                      `http://localhost:8000/api/strategy/pause/${strategy.id}`,
+                                    apiUrl(`/api/strategy/pause/${strategy.id}`),
                                     )
                                   }
                                 >
@@ -773,7 +774,7 @@ const SavedStrategies: React.FC<SavedStrategiesProps> = ({
                                 title="Delete"
                                 onClick={() =>
                                   handleAction(
-                                    `http://localhost:8000/api/strategy/delete/${strategy.id}`,
+                                    apiUrl(`/api/strategy/delete/${strategy.id}`),
                                     'Delete this strategy permanently?',
                                   )
                                 }
@@ -1040,7 +1041,7 @@ const AIEnabledStrategyChat: React.FC<AIEnabledStrategyChatProps> = ({ onSendToB
     setLoading(true);
 
     try {
-      const response = await fetch('http://localhost:8000/api/ai/strategy_chat', {
+      const response = await fetch(apiUrl('/api/ai/strategy_chat'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -1101,7 +1102,7 @@ const AIEnabledStrategyChat: React.FC<AIEnabledStrategyChatProps> = ({ onSendToB
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch('http://localhost:8000/api/ai/strategy_chat/save', {
+      const response = await fetch(apiUrl('/api/ai/strategy_chat/save'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

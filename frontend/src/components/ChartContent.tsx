@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ComposedChart, Area, Customized } from 'recharts';
+import { apiUrl } from '../config/api';
 
 interface ChartData {
   candles: Array<{
@@ -42,9 +43,16 @@ const ChartContent: React.FC = () => {
     setError(null);
 
     try {
-      const response = await fetch(`http://localhost:8000/api/chart_data?date=${date}&instrument=${encodeURIComponent(selectedInstrument)}&interval=${encodeURIComponent(interval)}` , {
-        credentials: 'include',
-      });
+      const response = await fetch(
+        apiUrl(
+          `/api/chart_data?date=${date}&instrument=${encodeURIComponent(selectedInstrument)}&interval=${encodeURIComponent(
+            interval
+          )}`
+        ),
+        {
+          credentials: 'include',
+        }
+      );
 
       if (!response.ok) {
         throw new Error('Failed to fetch chart data');

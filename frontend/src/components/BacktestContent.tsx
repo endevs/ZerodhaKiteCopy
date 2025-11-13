@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { apiUrl } from '../config/api';
 
 interface BacktestResults {
   pnl: number;
@@ -46,7 +47,7 @@ const BacktestContent: React.FC = () => {
     };
 
     try {
-      const response = await fetch('http://localhost:8000/api/backtest', {
+      const response = await fetch(apiUrl('/api/backtest'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

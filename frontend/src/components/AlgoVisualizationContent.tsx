@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import MountainSignalFlowDiagram from './MountainSignalFlowDiagram';
 import ORBFlowDiagram from './ORBFlowDiagram';
 import MountainSignalChart from './MountainSignalChart';
+import { apiUrl } from '../config/api';
 
 interface Strategy {
   id: number;
@@ -40,7 +41,7 @@ const AlgoVisualizationContent: React.FC<AlgoVisualizationContentProps> = () => 
     const fetchStrategies = async () => {
       try {
         setLoading(true);
-        const response = await fetch('http://localhost:8000/api/strategies', {
+        const response = await fetch(apiUrl('/api/strategies'), {
           credentials: 'include',
         });
         const data = await response.json();

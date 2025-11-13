@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, Legend, ReferenceArea, CartesianGrid, AreaChart, Area, ScatterChart, Scatter, ZAxis } from 'recharts';
+import { apiUrl } from '../config/api';
 
 interface AIMLContentProps {}
 
@@ -588,7 +589,7 @@ const TrainModelPanel: React.FC = () => {
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch('http://localhost:8000/api/ai/lstm/train', {
+      const response = await fetch(apiUrl('/api/ai/lstm/train'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ symbol, years, horizon, lookback, epochs }),
@@ -607,7 +608,7 @@ const TrainModelPanel: React.FC = () => {
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch('http://localhost:8000/api/ai/lstm/predict', {
+      const response = await fetch(apiUrl('/api/ai/lstm/predict'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ symbol, horizon, steps }),
@@ -626,7 +627,7 @@ const TrainModelPanel: React.FC = () => {
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch(`http://localhost:8000/api/ai/lstm/overlay?symbol=${symbol}`);
+      const response = await fetch(apiUrl(`/api/ai/lstm/overlay?symbol=${symbol}`));
       if (!response.ok) throw new Error('Overlay fetch failed');
       const data = await response.json();
       setOverlaySeries(data.series || []);
@@ -668,7 +669,7 @@ const TrainModelPanel: React.FC = () => {
         train_start: trainStart,
         train_end: trainEnd,
       };
-      const res = await fetch('http://localhost:8000/api/rl/train', {
+      const res = await fetch(apiUrl('/api/rl/train'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -702,7 +703,7 @@ const TrainModelPanel: React.FC = () => {
     setRlTradeChart([]);
     try {
       const params = new URLSearchParams({ symbol: rlSymbol, start, end, label });
-      const res = await fetch(`http://localhost:8000/api/rl/evaluate?${params.toString()}`, {
+      const res = await fetch(apiUrl(`/api/rl/evaluate?${params.toString()}`), {
         credentials: 'include',
       });
       const ct = res.headers.get('content-type') || '';
@@ -737,7 +738,7 @@ const TrainModelPanel: React.FC = () => {
     const fetchSavedStrategies = async () => {
       setStrategiesLoading(true);
       try {
-        const res = await fetch('http://localhost:8000/api/strategies', { credentials: 'include' });
+        const res = await fetch(apiUrl('/api/strategies'), { credentials: 'include' });
         const ct = res.headers.get('content-type') || '';
         const data = ct.includes('application/json') ? await res.json() : { status: 'error', message: await res.text() };
         if (res.ok && data.status === 'success') {

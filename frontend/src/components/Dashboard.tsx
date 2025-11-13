@@ -8,6 +8,7 @@ import ChartModal from './ChartModal';
 import EnhancedRealTimeStrategyMonitor from './EnhancedRealTimeStrategyMonitor';
 import AIMLContent from './AIMLContent';
 import LiveTradeContent from './LiveTradeContent';
+import { apiUrl, SOCKET_BASE_URL } from '../config/api';
 
 const Dashboard: React.FC = () => {
   const [activeTab, setActiveTab] = useState<string>('dashboard');
@@ -45,7 +46,7 @@ const Dashboard: React.FC = () => {
   useEffect(() => {
     const fetchUserData = async () => {
       try {
-        const response = await fetch('http://localhost:8000/api/user-data', { credentials: 'include' });
+        const response = await fetch(apiUrl('/api/user-data'), { credentials: 'include' });
         const data = await response.json();
         if (response.ok) {
           setUserName(data.user_name || 'User');
@@ -53,7 +54,7 @@ const Dashboard: React.FC = () => {
           
           // If access token was just set (user just logged in), request ticker startup via HTTP
           if (hasAccessToken) {
-            fetch('http://localhost:8000/api/ticker/start', {
+            fetch(apiUrl('/api/ticker/start'), {
               method: 'POST',
               credentials: 'include'
             })
@@ -75,7 +76,7 @@ const Dashboard: React.FC = () => {
 
     const fetchInitialMarketData = async () => {
       try {
-        const resp = await fetch('http://localhost:8000/api/market_snapshot', { credentials: 'include' });
+        const resp = await fetch(apiUrl('/api/market_snapshot'), { credentials: 'include' });
         const data = await resp.json();
         if (resp.ok && data.status === 'success') {
           if (typeof data.nifty === 'number') setNiftyPrice(data.nifty.toFixed(2));
@@ -94,7 +95,7 @@ const Dashboard: React.FC = () => {
       fetchUserData();
     }, 5000); // Check every 5 seconds
 
-    const socket: Socket = io('http://localhost:8000', {
+    const socket: Socket = io(SOCKET_BASE_URL, {
       transports: ['polling'],
       reconnection: true,
       reconnectionDelay: 1000,
@@ -112,11 +113,11 @@ const Dashboard: React.FC = () => {
       
       // Request ticker startup if user is logged in and has access token
       // Check if access token is present and start ticker via HTTP endpoint
-      fetch('http://localhost:8000/api/user-data', { credentials: 'include' })
+      fetch(apiUrl('/api/user-data'), { credentials: 'include' })
         .then(response => response.json())
         .then(data => {
           if (data.access_token_present) {
-            fetch('http://localhost:8000/api/ticker/start', {
+            fetch(apiUrl('/api/ticker/start'), {
               method: 'POST',
               credentials: 'include'
             })
@@ -231,7 +232,7 @@ const Dashboard: React.FC = () => {
 
   const handleLogout = async () => {
     try {
-      const response = await fetch('http://localhost:8000/api/logout', { method: 'POST', credentials: 'include' });
+      const response = await fetch(apiUrl('/api/logout'), { method: 'POST', credentials: 'include' });
       if (response.ok) {
         window.location.href = '/login';
       } else {

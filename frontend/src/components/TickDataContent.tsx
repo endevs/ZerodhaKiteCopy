@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { apiUrl } from '../config/api';
 
 interface TickDataStatus {
   instrument: string;
@@ -17,7 +18,7 @@ const TickDataContent: React.FC<TickDataContentProps> = ({ onViewChart }) => {
 
   const fetchTickDataStatus = async () => {
     try {
-      const response = await fetch('http://localhost:8000/api/tick_data_status');
+      const response = await fetch(apiUrl('/api/tick_data_status'));
       const data = await response.json();
       if (response.ok) {
         setTickData(data);
@@ -37,7 +38,7 @@ const TickDataContent: React.FC<TickDataContentProps> = ({ onViewChart }) => {
 
   const handleAction = async (action: 'start' | 'pause' | 'stop') => {
     try {
-      const response = await fetch(`http://localhost:8000/api/tick_data/${action}`, { method: 'POST' });
+      const response = await fetch(apiUrl(`/api/tick_data/${action}`), { method: 'POST' });
       if (response.ok) {
         fetchTickDataStatus(); // Refresh status after action
       } else {

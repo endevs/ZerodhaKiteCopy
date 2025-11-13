@@ -1,4 +1,5 @@
 import React, { ReactNode } from 'react';
+import { apiUrl } from '../config/api';
 
 interface LayoutProps {
   children: ReactNode;
@@ -45,7 +46,7 @@ const Layout: React.FC<LayoutProps> = ({ children, navigation }) => {
                     onClick={(e) => {
                       e.preventDefault();
                       // Check authentication before navigating
-                      fetch('http://localhost:8000/api/user-data', { credentials: 'include' })
+                      fetch(apiUrl('/api/user-data'), { credentials: 'include' })
                         .then(res => {
                           if (res.ok) {
                             window.location.href = '/dashboard';

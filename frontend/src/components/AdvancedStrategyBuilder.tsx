@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { apiUrl } from '../config/api';
 
 interface Indicator {
   id: string;
@@ -166,7 +167,7 @@ const AdvancedStrategyBuilder: React.FC<AdvancedStrategyBuilderProps> = ({ onStr
     };
 
     try {
-      const response = await fetch('http://localhost:8000/api/strategy/save', {
+      const response = await fetch(apiUrl('/api/strategy/save'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
