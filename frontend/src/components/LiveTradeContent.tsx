@@ -11,6 +11,8 @@ interface HistoryEntry {
   timestamp?: string;
   level?: string;
   message?: string;
+  category?: string;
+  meta?: Record<string, unknown>;
 }
 
 interface LiveOrder {
@@ -103,6 +105,26 @@ interface LiveDeploymentState {
   openOrdersCount?: number;
   openPositionsCount?: number;
   lastEvaluationTarget?: string;
+  auditCursor?: number;
+  eventStats?: {
+    signalsIdentified?: number;
+    signalsIgnored?: number;
+    tradeEntries?: number;
+    tradeExits?: number;
+    stopLoss?: number;
+    targetHit?: number;
+  };
+  strategyInsights?: {
+    signalStatus?: string;
+    currentMessage?: string;
+    position?: number;
+    tradedInstrument?: string;
+    entryPrice?: number;
+    stopLossLevel?: number;
+    targetLevel?: number;
+    pnl?: number;
+    [key: string]: any;
+  };
 }
 
 interface LiveDeployment {
@@ -399,7 +421,44 @@ const LiveTradeContent: React.FC = () => {
   };
 
   const currentPhase = deployment?.state?.phase || 'idle';
-  const history = deployment?.state?.history ?? [];
+  const history: HistoryEntry[] = Array.isArray(deployment?.state?.history)
+    ? (deployment?.state?.history as HistoryEntry[])
+    : [];
+  const categorizedHistory = useMemo(() => {
+    const buckets = {
+      signalsIdentified: [] as HistoryEntry[],
+      signalsIgnored: [] as HistoryEntry[],
+      trades: [] as HistoryEntry[],
+    };
+    history.forEach((entry) => {
+      const category = (entry.category || '').toLowerCase();
+      if (!category) {
+        return;
+      }
+      if (category === 'signal_ignored') {
+        buckets.signalsIgnored.push(entry);
+      } else if (category.startsWith('signal')) {
+        buckets.signalsIdentified.push(entry);
+      } else if (category.startsWith('trade')) {
+        buckets.trades.push(entry);
+      }
+    });
+    return buckets;
+  }, [history]);
+  const { signalsIdentified, signalsIgnored, trades } = categorizedHistory;
+  const strategyInsights =
+    (deployment?.state?.strategyInsights as { [key: string]: any }) || undefined;
+  const signalStatusText =
+    strategyInsights && typeof strategyInsights.signalStatus === 'string'
+      ? (strategyInsights.signalStatus as string)
+      : undefined;
+  const strategyMessageText =
+    strategyInsights && typeof strategyInsights.currentMessage === 'string'
+      ? (strategyInsights.currentMessage as string)
+      : undefined;
+  const recentSignals = signalsIdentified.slice(-5).reverse();
+  const recentIgnoredSignals = signalsIgnored.slice(-5).reverse();
+  const recentTrades = trades.slice(-5).reverse();
   const orders: LiveOrder[] = Array.isArray(deployment?.state?.orders)
     ? (deployment?.state?.orders as LiveOrder[])
     : [];
@@ -732,7 +791,7 @@ const LiveTradeContent: React.FC = () => {
                             ? `${stopLossDisplay.toFixed(2)}% / ${targetDisplay.toFixed(2)}%`
                             : '—'}
                         </p>
-                        <p className="mb-0">
+                        <p className="mb-1">
                           <strong>Live P&L:</strong>{' '}
                           <span
                             className={
@@ -744,6 +803,16 @@ const LiveTradeContent: React.FC = () => {
                             {formatCurrency(deployment.state?.livePnl)}
                           </span>
                         </p>
+                        {signalStatusText && (
+                          <p className="mb-1">
+                            <strong>Signal:</strong> {signalStatusText}
+                          </p>
+                        )}
+                        {strategyMessageText && (
+                          <p className="mb-0 text-muted small">
+                            {strategyMessageText}
+                          </p>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -754,6 +823,75 @@ const LiveTradeContent: React.FC = () => {
                       {deployment.errorMessage}
                     </div>
                   )}
+
+                  <div className="mb-4">
+                    <h6 className="fw-semibold d-flex align-items-center">
+                      <i className="bi bi-graph-up me-2"></i>
+                      Scheduler Highlights
+                    </h6>
+                    <div className="row g-3">
+                      <div className="col-md-4">
+                        <div className="border rounded-3 h-100 p-3 bg-light">
+                          <div className="d-flex justify-content-between align-items-center mb-2">
+                            <span className="fw-semibold text-primary">Signals Identified</span>
+                            <span className="badge bg-primary">{signalsIdentified.length}</span>
+                          </div>
+                          {signalsIdentified.length === 0 ? (
+                            <p className="text-muted small mb-0">No signals observed yet.</p>
+                          ) : (
+                            <ul className="list-unstyled small mb-0">
+                              {recentSignals.map((entry, idx) => (
+                                <li key={`sig-${idx}`} className="mb-2">
+                                  <div className="fw-semibold">{entry.message || 'Signal update'}</div>
+                                  <div className="text-muted">{formatDateTime(entry.timestamp)}</div>
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                        </div>
+                      </div>
+                      <div className="col-md-4">
+                        <div className="border rounded-3 h-100 p-3 bg-light">
+                          <div className="d-flex justify-content-between align-items-center mb-2">
+                            <span className="fw-semibold text-warning">Ignored Signals</span>
+                            <span className="badge bg-warning text-dark">{signalsIgnored.length}</span>
+                          </div>
+                          {signalsIgnored.length === 0 ? (
+                            <p className="text-muted small mb-0">No ignored signals.</p>
+                          ) : (
+                            <ul className="list-unstyled small mb-0">
+                              {recentIgnoredSignals.map((entry, idx) => (
+                                <li key={`ignored-${idx}`} className="mb-2">
+                                  <div className="fw-semibold">{entry.message || 'Ignored signal'}</div>
+                                  <div className="text-muted">{formatDateTime(entry.timestamp)}</div>
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                        </div>
+                      </div>
+                      <div className="col-md-4">
+                        <div className="border rounded-3 h-100 p-3 bg-light">
+                          <div className="d-flex justify-content-between align-items-center mb-2">
+                            <span className="fw-semibold text-success">Option Trades</span>
+                            <span className="badge bg-success">{trades.length}</span>
+                          </div>
+                          {trades.length === 0 ? (
+                            <p className="text-muted small mb-0">No option trades yet.</p>
+                          ) : (
+                            <ul className="list-unstyled small mb-0">
+                              {recentTrades.map((entry, idx) => (
+                                <li key={`trade-${idx}`} className="mb-2">
+                                  <div className="fw-semibold">{entry.message || 'Trade event'}</div>
+                                  <div className="text-muted">{formatDateTime(entry.timestamp)}</div>
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
 
                   <div className="mb-4">
                     <h6 className="fw-semibold d-flex align-items-center">
@@ -884,7 +1022,9 @@ const LiveTradeContent: React.FC = () => {
                                 {formatDateTime(entry.timestamp)}
                               </span>
                               <span className="badge bg-light text-dark text-uppercase">
-                                {entry.level || 'info'}
+                                {(entry.category || entry.level || 'info')
+                                  .toString()
+                                  .replace(/_/g, ' ')}
                               </span>
                             </div>
                             <div>{entry.message || 'Event recorded.'}</div>

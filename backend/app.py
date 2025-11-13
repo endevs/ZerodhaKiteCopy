@@ -6,11 +6,13 @@ from pathlib import Path
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
 from kiteconnect import KiteConnect
+from kiteconnect import exceptions as kite_exceptions
 import logging
 import random
 import time
+from collections import Counter
 from threading import Thread, Lock
-from typing import Dict, List, Tuple, Any, Optional
+from typing import Dict, List, Tuple, Any, Optional, Callable
 from strategies.orb import ORB
 from strategies.capture_mountain_signal import CaptureMountainSignal
 from rules import load_mountain_signal_pe_rules
@@ -18,12 +20,21 @@ from ticker import Ticker
 import uuid
 import sqlite3
 import smtplib, ssl
+import socket
+import math
+import numbers
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 import datetime
 import calendar
 import secrets
 import config
+import requests
+from requests.exceptions import (
+    RequestException,
+    ConnectionError as RequestsConnectionError,
+    Timeout as RequestsTimeout,
+)
 from database import get_db_connection
 from live_trade import (
     ensure_live_trade_tables,
@@ -32,7 +43,6 @@ from live_trade import (
     get_deployments_for_processing as live_get_deployments_for_processing,
     update_deployment as live_update_deployment,
     delete_deployment as live_delete_deployment,
-    append_state_message as live_append_state_message,
     STATUS_SCHEDULED,
     STATUS_ACTIVE,
     STATUS_PAUSED,
@@ -67,6 +77,181 @@ try:
     from groq import Groq
 except ImportError:
     Groq = None
+
+
+RETRYABLE_ERROR_KEYWORDS = (
+    "timed out",
+    "connection aborted",
+    "connection reset",
+    "temporarily unavailable",
+    "temporary failure",
+    "gateway timeout",
+    "max retries exceeded",
+    "read timeout",
+)
+
+
+def _is_retryable_exception(exc: Exception) -> bool:
+    if isinstance(exc, (kite_exceptions.NetworkException, RequestsConnectionError, RequestsTimeout, RequestException, socket.timeout)):
+        return True
+    message = str(exc).lower()
+    return any(keyword in message for keyword in RETRYABLE_ERROR_KEYWORDS)
+
+
+def execute_with_retries(description: str, func: Callable[[], Any], *, max_attempts: int = 3, base_delay: float = 1.5) -> Any:
+    """
+    Execute a callable with automatic retries for transient Kite/HTTP errors.
+    Raises TokenException immediately so the caller can handle re-auth flows.
+    """
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return func()
+        except kite_exceptions.TokenException as exc:
+            logging.error(f"{description} failed due to invalid Kite session: {exc}")
+            raise
+        except Exception as exc:
+            last_exc = exc
+            if not _is_retryable_exception(exc) or attempt == max_attempts:
+                logging.error(f"{description} failed on attempt {attempt}/{max_attempts}: {exc}")
+                raise
+            delay = base_delay * attempt
+            logging.warning(f"{description} transient error (attempt {attempt}/{max_attempts}): {exc}. Retrying in {delay:.1f}s")
+            time.sleep(delay)
+    if last_exc:
+        raise last_exc
+
+
+def _safe_float(value: Any) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _simplify_for_json(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (datetime.datetime, datetime.date)):
+        return value.isoformat()
+    if isinstance(value, numbers.Integral):
+        return int(value)
+    if isinstance(value, numbers.Real):
+        numeric_value = float(value)
+        if math.isnan(numeric_value) or math.isinf(numeric_value):
+            return None
+        return numeric_value
+    if isinstance(value, dict):
+        return {str(key): _simplify_for_json(val) for key, val in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_simplify_for_json(item) for item in value]
+    return str(value)
+
+
+def _format_live_audit_event(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not isinstance(event, dict):
+        return None
+
+    event_type_raw = event.get('event_type') or event.get('type') or ''
+    event_type = str(event_type_raw).lower()
+    message_raw = (event.get('message') or '').strip()
+    raw_details = event.get('data') or event.get('details') or {}
+    if not isinstance(raw_details, dict):
+        raw_details = {}
+    details = _simplify_for_json(raw_details)
+
+    category = 'audit'
+    level = 'info'
+    formatted_message = message_raw
+
+    if event_type == 'signal_identified':
+        category = 'signal_identified'
+        level = 'info'
+        signal_type = str(raw_details.get('signal_type') or '').upper()
+        candle_window = raw_details.get('candle_time') or ''
+        high = _safe_float(raw_details.get('high'))
+        low = _safe_float(raw_details.get('low'))
+        rsi = _safe_float(raw_details.get('rsi'))
+        descriptor_parts = [part for part in [signal_type, str(candle_window).strip()] if part]
+        metric_parts = []
+        if high is not None and low is not None:
+            metric_parts.append(f"H {high:.2f} / L {low:.2f}")
+        if rsi is not None:
+            metric_parts.append(f"RSI {rsi:.1f}")
+        if descriptor_parts and metric_parts:
+            formatted_message = f"Signal Identified — {' '.join(descriptor_parts)} | {', '.join(metric_parts)}"
+        elif descriptor_parts:
+            formatted_message = f"Signal Identified — {' '.join(descriptor_parts)}"
+        elif metric_parts:
+            formatted_message = f"Signal Identified — {', '.join(metric_parts)}"
+        else:
+            formatted_message = "Signal Identified"
+    elif event_type == 'entry_blocked':
+        category = 'signal_ignored'
+        level = 'warning'
+        reason = str(raw_details.get('reason') or '').replace('_', ' ').strip()
+        if 'rsi' in message_raw.lower():
+            reason_text = 'RSI condition not met'
+        elif reason:
+            reason_text = reason.capitalize()
+        elif message_raw:
+            reason_text = message_raw
+        else:
+            reason_text = 'Entry blocked'
+        formatted_message = f"Ignored Signal — {reason_text}"
+    elif event_type == 'entry':
+        category = 'trade_entry'
+        level = 'success'
+        option_type = str(raw_details.get('option_type') or '').upper()
+        instrument = raw_details.get('instrument') or raw_details.get('option_symbol') or ''
+        entry_price = _safe_float(raw_details.get('entry_price') or raw_details.get('price'))
+        descriptor = ' '.join(part for part in [option_type, str(instrument).strip()] if part)
+        if entry_price is not None:
+            price_text = f" @ {entry_price:.2f}"
+        else:
+            price_text = ''
+        if descriptor:
+            formatted_message = f"Trade Entry — {descriptor}{price_text}"
+        else:
+            formatted_message = f"Trade Entry{price_text}"
+    elif event_type == 'stop_loss':
+        category = 'trade_exit'
+        level = 'danger'
+        exit_price = _safe_float(raw_details.get('exit_price'))
+        formatted_message = (
+            f"Stop Loss Triggered — {exit_price:.2f}" if exit_price is not None else "Stop Loss Triggered"
+        )
+    elif event_type == 'target_hit':
+        category = 'trade_exit'
+        level = 'success'
+        exit_price = _safe_float(raw_details.get('exit_price'))
+        formatted_message = (
+            f"Target Hit — {exit_price:.2f}" if exit_price is not None else "Target Hit"
+        )
+    elif event_type == 'market_close_square_off':
+        category = 'trade_exit'
+        level = 'info'
+        formatted_message = "Square Off — Market close routine executed"
+    elif event_type == 'exit':
+        category = 'trade_exit'
+        level = 'info'
+        formatted_message = message_raw or "Position Exit"
+
+    formatted_message = (formatted_message or '').strip()
+    if not formatted_message:
+        formatted_message = event_type.replace('_', ' ').title()
+
+    return {
+        'message': formatted_message,
+        'category': category,
+        'level': level,
+        'meta': {
+            'eventType': event_type,
+            'details': details,
+        }
+    }
 
 
 def round_to_atm_price(price: float, strike_step: int) -> int:
@@ -110,9 +295,14 @@ def _fetch_candles_for_range(instrument_token: int, start_date: datetime.date, e
         start_dt = datetime.datetime.combine(current_date, datetime.time(9, 15))
         end_dt = datetime.datetime.combine(current_date, datetime.time(15, 30))
         try:
-            hist = kite.historical_data(instrument_token, start_dt, end_dt, interval)
+            hist = execute_with_retries(
+                f"fetching {interval} historical data for token {instrument_token} on {current_date}",
+                lambda: kite.historical_data(instrument_token, start_dt, end_dt, interval)
+            )
             if hist:
                 candles.extend(hist)
+        except kite_exceptions.TokenException:
+            raise
         except Exception as exc:
             logging.warning(f"[RL] Historical fetch failed for {current_date}: {exc}")
         current_date += datetime.timedelta(days=1)
@@ -120,6 +310,136 @@ def _fetch_candles_for_range(instrument_token: int, start_date: datetime.date, e
         if processed % 50 == 0 or current_date > end_date:
             logging.info(f"[RL] Fetch progress: {processed}/{total_days} days, candles collected: {len(candles)}")
     return candles
+
+
+def _ensure_live_strategy_monitor(
+    user_id: int,
+    deployment_id: int,
+    strategy_row: sqlite3.Row,
+    *,
+    access_token: Optional[str],
+    config: Optional[Dict[str, Any]] = None,
+    lot_count: Optional[int] = None,
+) -> None:
+    if not strategy_row or not access_token:
+        return
+
+    strategy_data = dict(strategy_row)
+    strategy_type = (strategy_data.get('strategy_type') or '').lower()
+    if strategy_type != 'capture_mountain_signal':
+        return
+
+    config = config or {}
+
+    try:
+        kite.set_access_token(access_token)
+    except Exception as exc:
+        logging.warning("Unable to set access token for live strategy monitor: %s", exc)
+
+    for run_id, info in list(running_strategies.items()):
+        if info.get('live_deployment_id') == deployment_id:
+            del running_strategies[run_id]
+
+    try:
+        instrument = strategy_data.get('instrument') or config.get('instrument') or 'BANKNIFTY'
+        candle_time_value = strategy_data.get('candle_time') or config.get('candleIntervalMinutes') or 5
+        candle_time = str(candle_time_value)
+        start_time = strategy_data.get('start_time') or '09:15'
+        end_time = strategy_data.get('end_time') or '15:30'
+
+        stop_loss_value = strategy_data.get('stop_loss')
+        if stop_loss_value is None:
+            stop_loss_value = config.get('stopLossPercent')
+        try:
+            stop_loss_value = float(stop_loss_value)
+        except Exception:
+            stop_loss_value = 0.0
+
+        target_profit_value = strategy_data.get('target_profit')
+        if target_profit_value is None:
+            target_profit_value = config.get('targetPercent')
+        try:
+            target_profit_value = float(target_profit_value)
+        except Exception:
+            target_profit_value = 0.0
+
+        total_lot_value: Any = strategy_data.get('total_lot')
+        if total_lot_value in (None, 0):
+            total_lot_value = config.get('lotCount') or lot_count or 1
+        try:
+            total_lot = int(total_lot_value)
+        except Exception:
+            total_lot = int(lot_count or 1)
+
+        trailing_stop_loss_value = strategy_data.get('trailing_stop_loss')
+        if trailing_stop_loss_value is None:
+            trailing_stop_loss_value = 0
+        try:
+            trailing_stop_loss = float(trailing_stop_loss_value)
+        except Exception:
+            trailing_stop_loss = 0.0
+
+        segment = strategy_data.get('segment') or 'OPT'
+        trade_type = strategy_data.get('trade_type') or 'INTRADAY'
+
+        strike_price_value = strategy_data.get('strike_price')
+        try:
+            strike_price = float(strike_price_value) if strike_price_value is not None else 0.0
+        except Exception:
+            strike_price = 0.0
+
+        expiry_type = strategy_data.get('expiry_type') or 'monthly'
+        strategy_name_input = strategy_data.get('strategy_name') or f"Strategy #{strategy_data.get('id') or deployment_id}"
+
+        ema_period_value = strategy_data.get('ema_period')
+        if ema_period_value is None:
+            ema_period_value = config.get('candleIntervalMinutes') or 5
+        try:
+            ema_period = int(ema_period_value)
+        except Exception:
+            ema_period = 5
+
+        strategy_instance = CaptureMountainSignal(
+            kite,
+            instrument,
+            candle_time,
+            start_time,
+            end_time,
+            stop_loss_value,
+            target_profit_value,
+            total_lot,
+            trailing_stop_loss,
+            segment,
+            trade_type,
+            strike_price,
+            expiry_type,
+            strategy_name_input,
+            paper_trade=False,
+            ema_period=ema_period,
+            session_id=None,
+        )
+        try:
+            strategy_instance.run()
+        except Exception:
+            pass
+
+        strategy_instance.status['paper_trade_mode'] = False
+
+        unique_run_id = str(uuid.uuid4())
+        running_strategies[unique_run_id] = {
+            'db_id': strategy_data.get('id'),
+            'name': strategy_data.get('strategy_name'),
+            'instrument': instrument,
+            'status': 'running',
+            'strategy_type': strategy_type,
+            'strategy': strategy_instance,
+            'user_id': user_id,
+            'paper_trade': False,
+            'live_deployment_id': deployment_id,
+        }
+        logging.info("Live strategy monitor registered for deployment %s (strategy %s)", deployment_id, strategy_data.get('strategy_name'))
+    except Exception as exc:
+        logging.error("Failed to initialize live strategy monitor for deployment %s: %s", deployment_id, exc, exc_info=True)
 
 
 def compute_drawdown_metrics(trades: List[Dict[str, Any]], initial_capital: float) -> Tuple[float, float, float]:
@@ -1056,7 +1376,10 @@ def get_spot_quote(kite_client: KiteConnect, instrument_key: str) -> float:
         quote_token = BANKNIFTY_SPOT_SYMBOL
     else:
         quote_token = NIFTY_SPOT_SYMBOL
-    quote = kite_client.quote([quote_token])
+    quote = execute_with_retries(
+        f"fetching spot quote for {quote_token}",
+        lambda: kite_client.quote([quote_token])
+    )
     data = quote.get(quote_token)
     if not data:
         raise RuntimeError(f"Unable to fetch spot quote for {quote_token}")
@@ -1123,7 +1446,10 @@ def preview_option_trade(
     expiry_date = get_next_monthly_expiry(today_ist.date())
     option_symbol = compose_option_symbol(instrument, expiry_date, atm_strike, option_type)
 
-    quote = kite_client.quote([f'NFO:{option_symbol}'])
+    quote = execute_with_retries(
+        f"fetching option quote for {option_symbol}",
+        lambda: kite_client.quote([f'NFO:{option_symbol}'])
+    )
     option_quote = quote.get(f'NFO:{option_symbol}')
     if not option_quote:
         raise RuntimeError(f"Unable to fetch quote for option {option_symbol}")
@@ -1190,6 +1516,25 @@ def _process_single_live_trade_deployment(deployment: Dict[str, Any], now: datet
     scheduled_dt = ensure_datetime(scheduled_raw) if scheduled_raw else None
     state = deployment.get('state') or {}
     state.setdefault('history', [])
+
+    history_entries = list(state.get('history') or [])
+
+    def append_history_entry(
+        message: str,
+        *,
+        level: str = 'info',
+        category: str = 'system',
+        meta: Optional[Dict[str, Any]] = None,
+        timestamp: Optional[str] = None,
+    ) -> None:
+        entry = {
+            'timestamp': timestamp or now.isoformat(),
+            'level': level,
+            'message': message,
+            'category': category,
+            'meta': _simplify_for_json(meta or {}),
+        }
+        history_entries.append(entry)
 
     if scheduled_dt and now < scheduled_dt:
         state.update({
@@ -1272,9 +1617,33 @@ def _process_single_live_trade_deployment(deployment: Dict[str, Any], now: datet
     try:
         kite_client = KiteConnect(api_key=api_key)
         kite_client.set_access_token(access_token)
-        margins = kite_client.margins()
-        orders = kite_client.orders()
-        positions = kite_client.positions()
+        margins = execute_with_retries(
+            f"fetching Kite margins for deployment {deployment_id}",
+            lambda: kite_client.margins()
+        )
+        orders = execute_with_retries(
+            f"fetching Kite orders for deployment {deployment_id}",
+            lambda: kite_client.orders()
+        )
+        positions = execute_with_retries(
+            f"fetching Kite positions for deployment {deployment_id}",
+            lambda: kite_client.positions()
+        )
+    except kite_exceptions.TokenException as exc:
+        logging.error("Live trade worker found invalid Kite session for deployment %s: %s", deployment_id, exc)
+        state.update({
+            'phase': 'error',
+            'message': 'Zerodha session expired. Please re-authenticate from Settings > Zerodha Login.',
+            'lastCheck': now.isoformat(),
+        })
+        live_update_deployment(
+            deployment_id,
+            status=STATUS_ERROR,
+            state=state,
+            last_run_at=now,
+            error_message='Kite session expired'
+        )
+        return
     except Exception as exc:
         logging.exception("Live trade worker failed for deployment %s", deployment_id)
         state.update({
@@ -1294,6 +1663,102 @@ def _process_single_live_trade_deployment(deployment: Dict[str, Any], now: datet
     sanitized_orders = _sanitize_orders(orders if isinstance(orders, list) else [])
     sanitized_positions = _sanitize_positions(positions if isinstance(positions, dict) else {})
     open_positions = [pos for pos in sanitized_positions if pos.get('quantity')]
+
+    strategy_obj = None
+    strategy_id = deployment.get('strategy_id')
+    for info in list(running_strategies.values()):
+        if info.get('live_deployment_id') == deployment_id:
+            strategy_obj = info.get('strategy')
+            break
+    if strategy_obj is None and strategy_id is not None:
+        for info in list(running_strategies.values()):
+            if info.get('db_id') == strategy_id and info.get('user_id') == user_id and not info.get('paper_trade'):
+                strategy_obj = info.get('strategy')
+                break
+    if strategy_obj is None and strategy_id:
+        strategy_row = _get_strategy_record(strategy_id, user_id)
+        if strategy_row and access_token:
+            _ensure_live_strategy_monitor(
+                user_id,
+                deployment_id,
+                strategy_row,
+                access_token=access_token,
+                config=state.get('config'),
+            )
+            for info in list(running_strategies.values()):
+                if info.get('live_deployment_id') == deployment_id:
+                    strategy_obj = info.get('strategy')
+                    break
+
+    if strategy_obj and hasattr(strategy_obj, 'status'):
+        strategy_status = getattr(strategy_obj, 'status', {})
+        audit_trail = strategy_status.get('audit_trail', [])
+        if isinstance(audit_trail, list):
+            audit_cursor = state.get('auditCursor', 0)
+            if not isinstance(audit_cursor, int) or audit_cursor < 0 or audit_cursor > len(audit_trail):
+                audit_cursor = 0
+            for audit_event in audit_trail[audit_cursor:]:
+                formatted = _format_live_audit_event(audit_event)
+                if not formatted:
+                    continue
+                event_timestamp = None
+                if isinstance(audit_event, dict) and isinstance(audit_event.get('timestamp'), str):
+                    event_timestamp = audit_event['timestamp']
+                append_history_entry(
+                    formatted['message'],
+                    level=formatted.get('level', 'info'),
+                    category=formatted.get('category', 'audit'),
+                    meta=formatted.get('meta'),
+                    timestamp=event_timestamp,
+                )
+            state['auditCursor'] = len(audit_trail)
+            counts = Counter(
+                (str(evt.get('event_type') or evt.get('type') or '').lower())
+                for evt in audit_trail
+                if isinstance(evt, dict)
+            )
+            state['eventStats'] = {
+                'signalsIdentified': int(counts.get('signal_identified', 0)),
+                'signalsIgnored': int(counts.get('entry_blocked', 0)),
+                'tradeEntries': int(counts.get('entry', 0)),
+                'tradeExits': int(counts.get('exit', 0) + counts.get('market_close_square_off', 0)),
+                'stopLoss': int(counts.get('stop_loss', 0)),
+                'targetHit': int(counts.get('target_hit', 0)),
+            }
+        signal_status = strategy_status.get('signal_status')
+        previous_signal_status = state.get('lastSignalStatus')
+        if signal_status and signal_status != previous_signal_status:
+            lowered = signal_status.lower()
+            if 'ignored' in lowered or 'blocked' in lowered or 'invalid' in lowered:
+                status_category = 'signal_ignored'
+                status_level = 'warning'
+            elif 'rsi' in lowered:
+                status_category = 'signal_ignored'
+                status_level = 'warning'
+            elif 'waiting' in lowered:
+                status_category = 'signal_waiting'
+                status_level = 'info'
+            else:
+                status_category = 'signal_status'
+                status_level = 'info'
+            append_history_entry(
+                signal_status,
+                level=status_level,
+                category=status_category,
+                meta={'eventType': 'signal_status'}
+            )
+            state['lastSignalStatus'] = signal_status
+        insights = {
+            'signalStatus': signal_status,
+            'currentMessage': strategy_status.get('message'),
+            'position': strategy_status.get('position'),
+            'tradedInstrument': strategy_status.get('traded_instrument'),
+            'entryPrice': strategy_status.get('entry_price'),
+            'stopLossLevel': strategy_status.get('stop_loss_level'),
+            'targetLevel': strategy_status.get('target_profit_level'),
+            'pnl': strategy_status.get('pnl'),
+        }
+        state['strategyInsights'] = _simplify_for_json(insights)
 
     phase = 'monitoring'
     message = 'Monitoring market conditions for entry signals.'
@@ -1358,12 +1823,7 @@ def _process_single_live_trade_deployment(deployment: Dict[str, Any], now: datet
         'lastEvaluationTarget': evaluation_target_ist.isoformat(),
     })
 
-    history_entry = (
-        f"Scheduler run at {ist_now.strftime('%Y-%m-%d %H:%M:%S')} IST "
-        f"(evaluation target {evaluation_target_ist.strftime('%Y-%m-%d %H:%M:%S')} IST) — "
-        f"phase={phase}, open_orders={len(sanitized_orders)}, open_positions={len(open_positions)}, pnl={total_pnl:.2f}"
-    )
-    live_append_state_message(deployment_id, message=history_entry, level='debug')
+    state['history'] = history_entries[-200:]
 
     live_update_deployment(
         deployment_id,
@@ -1716,7 +2176,14 @@ def api_chart_data():
         
         # Fetch historical data from Kite (today's data)
         try:
-            hist_today = kite.historical_data(token, start_dt, end_dt, kite_interval)
+            hist_today = execute_with_retries(
+                f"fetching historical data for {instrument} on {selected_date}",
+                lambda: kite.historical_data(token, start_dt, end_dt, kite_interval)
+            )
+        except kite_exceptions.TokenException as e:
+            logging.error(f"Invalid Kite session while fetching today's data: {e}")
+            session.pop('access_token', None)
+            return jsonify({'candles': [], 'ema': [], 'authExpired': True})
         except Exception as e:
             logging.error(f"Error fetching historical data for today: {e}")
             return jsonify({'candles': [], 'ema': []})
@@ -1724,10 +2191,17 @@ def api_chart_data():
         # Fetch previous day's data for RSI warm-up
         hist_prev = []
         try:
-            hist_prev = kite.historical_data(token, prev_start_dt, prev_end_dt, kite_interval)
+            hist_prev = execute_with_retries(
+                f"fetching previous day data for {instrument} on {prev_date}",
+                lambda: kite.historical_data(token, prev_start_dt, prev_end_dt, kite_interval)
+            )
             # Only take the last portion (last 20 candles)
             if len(hist_prev) > candles_needed:
                 hist_prev = hist_prev[-candles_needed:]
+        except kite_exceptions.TokenException as e:
+            logging.error(f"Invalid Kite session while fetching previous data: {e}")
+            session.pop('access_token', None)
+            return jsonify({'candles': [], 'ema': [], 'authExpired': True})
         except Exception as e:
             logging.warning(f"Could not fetch previous day's data for RSI warm-up: {e}. RSI will start from candle {candles_needed + 1}")
             hist_prev = []
@@ -1848,7 +2322,10 @@ def api_option_ltp():
             ltp_request_tokens.append(token)
             symbol_map[token] = sym
 
-        ltp_response = kite.ltp(ltp_request_tokens)
+        ltp_response = execute_with_retries(
+            f"fetching LTP for {len(ltp_request_tokens)} option symbols",
+            lambda: kite.ltp(ltp_request_tokens)
+        )
 
         result = {}
         for token_key, data in ltp_response.items():
@@ -1856,6 +2333,10 @@ def api_option_ltp():
             result[sym] = data.get('last_price')
 
         return jsonify({'status': 'success', 'ltp': result})
+    except kite_exceptions.TokenException as e:
+        logging.error(f"Error fetching option LTP due to invalid session: {e}")
+        session.pop('access_token', None)
+        return jsonify({'status': 'error', 'message': 'Zerodha session expired. Please login again.'}), 401
     except Exception as e:
         logging.error(f"Error fetching option LTP: {e}", exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
@@ -2247,11 +2728,16 @@ def dashboard():
             return redirect('/welcome')
 
         kite.set_access_token(session['access_token'])
-        profile = kite.profile()
-        margins = kite.margins()
+        profile = execute_with_retries("fetching Kite profile for dashboard", lambda: kite.profile())
+        margins = execute_with_retries("fetching Kite margins for dashboard", lambda: kite.margins())
         user_name = profile.get("user_name")
         balance = margins.get("equity", {}).get("available", {}).get("live_balance")
         return render_template("dashboard.html", user_name=user_name, balance=balance, access_token=session.get('access_token'), strategies=strategies)
+    except kite_exceptions.TokenException as e:
+        logging.error(f"Error fetching data for dashboard: {e}")
+        session.pop('access_token', None)
+        flash('Your Zerodha session is invalid or expired. Please log in again.', 'error')
+        return redirect('/welcome')
     except Exception as e:
         logging.error(f"Error fetching data for dashboard: {e}")
         # If the access token is invalid, redirect to the login page
@@ -2298,8 +2784,8 @@ def api_user_data():
             })
         
         kite.set_access_token(session['access_token'])
-        profile = kite.profile()
-        margins = kite.margins()
+        profile = execute_with_retries("fetching Kite profile", lambda: kite.profile())
+        margins = execute_with_retries("fetching Kite margins", lambda: kite.margins())
         user_name = profile.get("user_name", "Guest")
         balance = margins.get("equity", {}).get("available", {}).get("live_balance", 0)
         
@@ -2310,6 +2796,18 @@ def api_user_data():
             'user_name': user_name,
             'balance': balance,
             'access_token_present': True
+        })
+    except kite_exceptions.TokenException as e:
+        logging.error(f"Error fetching user data: {e}")
+        session.pop('access_token', None)
+        return jsonify({
+            'status': 'success',
+            'authenticated': True,
+            'user_id': session.get('user_id'),
+            'user_name': 'Guest',
+            'balance': 0,
+            'access_token_present': False,
+            'message': 'Zerodha session expired'
         })
     except Exception as e:
         logging.error(f"Error fetching user data: {e}")
@@ -3017,11 +3515,16 @@ def api_backtest_mountain_signal():
             if current_date.weekday() < 5:  # Monday=0, Friday=4
                 start_dt = datetime.datetime.combine(current_date, datetime.time(9, 15))
                 end_dt = datetime.datetime.combine(current_date, datetime.time(15, 30))
-                
+            
                 try:
-                    hist = kite.historical_data(token, start_dt, end_dt, kite_interval)
+                    hist = execute_with_retries(
+                        f"fetching {kite_interval} historical data for token {token} on {current_date}",
+                        lambda: kite.historical_data(token, start_dt, end_dt, kite_interval)
+                    )
                     if hist:
                         all_candles.extend(hist)
+                except kite_exceptions.TokenException:
+                    raise
                 except Exception as e:
                     logging.error(f"Error fetching historical data for {current_date}: {e}")
             
@@ -3914,9 +4417,14 @@ def api_optimizer_mountain_signal():
                 start_dt = datetime.datetime.combine(current_date, datetime.time(9, 15))
                 end_dt = datetime.datetime.combine(current_date, datetime.time(15, 30))
                 try:
-                    hist = kite.historical_data(token, start_dt, end_dt, kite_interval)
+                    hist = execute_with_retries(
+                        f"fetching {kite_interval} historical data for token {token} on {current_date}",
+                        lambda: kite.historical_data(token, start_dt, end_dt, kite_interval)
+                    )
                     if hist:
                         all_candles.extend(hist)
+                except kite_exceptions.TokenException:
+                    raise
                 except Exception as e:
                     logging.error(f"Error fetching historical data for {current_date}: {e}")
             current_date += datetime.timedelta(days=1)
@@ -4952,9 +5460,14 @@ def api_market_replay():
                 end_dt = datetime.datetime.combine(current_date, datetime.time(15, 30))
                 
                 try:
-                    hist = kite.historical_data(instrument_token, start_dt, end_dt, candle_interval)
+                    hist = execute_with_retries(
+                        f"fetching {candle_interval} historical data for token {instrument_token} on {current_date}",
+                        lambda: kite.historical_data(instrument_token, start_dt, end_dt, candle_interval)
+                    )
                     if hist:
                         all_candles.extend(hist)
+                except kite_exceptions.TokenException:
+                    raise
                 except Exception as e:
                     logging.error(f"Error fetching historical data for {current_date}: {e}")
             
@@ -5468,9 +5981,14 @@ def api_aiml_train():
             start_dt = datetime.datetime.combine(current_date, datetime.time(9, 15))
             end_dt = datetime.datetime.combine(current_date, datetime.time(15, 30))
             try:
-                hist = kite.historical_data(instrument_token, start_dt, end_dt, interval)
+                hist = execute_with_retries(
+                    f"fetching {interval} historical data for token {instrument_token} on {current_date}",
+                    lambda: kite.historical_data(instrument_token, start_dt, end_dt, interval)
+                )
                 if hist:
                     all_candles.extend(hist)
+            except kite_exceptions.TokenException:
+                raise
             except Exception as e:
                 logging.warning(f"Historical fetch failed for {current_date}: {e}")
             current_date += datetime.timedelta(days=1)
@@ -5494,6 +6012,9 @@ def api_aiml_train():
         )
         logging.info(f"[AIML] Training complete. Model saved to {result.get('model_path')}")
         return jsonify({'status': 'ok', 'symbol': symbol, 'horizon': horizon, **result})
+    except kite_exceptions.TokenException as e:
+        logging.error(f"Error in api_aiml_train due to invalid session: {e}")
+        return jsonify({'status': 'error', 'message': 'Zerodha session expired. Please login again.'}), 401
     except Exception as e:
         logging.error(f"Error in api_aiml_train: {e}", exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
@@ -5525,9 +6046,14 @@ def api_aiml_predict():
             start_dt = datetime.datetime.combine(current_date, datetime.time(9, 15))
             end_dt = datetime.datetime.combine(current_date, datetime.time(15, 30))
             try:
-                hist = kite.historical_data(instrument_token, start_dt, end_dt, interval)
+                hist = execute_with_retries(
+                    f"fetching {interval} historical data for token {instrument_token} on {current_date}",
+                    lambda: kite.historical_data(instrument_token, start_dt, end_dt, interval)
+                )
                 if hist:
                     all_candles.extend(hist)
+            except kite_exceptions.TokenException:
+                raise
             except Exception as e:
                 logging.warning(f"Historical fetch failed for {current_date}: {e}")
             current_date += datetime.timedelta(days=1)
@@ -5545,6 +6071,9 @@ def api_aiml_predict():
             steps_ahead=steps,
         )
         return jsonify({'status': 'ok', 'symbol': symbol, 'horizon': horizon, **result})
+    except kite_exceptions.TokenException as e:
+        logging.error(f"Error in api_aiml_predict due to invalid session: {e}")
+        return jsonify({'status': 'error', 'message': 'Zerodha session expired. Please login again.'}), 401
     except Exception as e:
         logging.error(f"Error in api_aiml_predict: {e}", exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
@@ -5577,9 +6106,14 @@ def api_aiml_evaluate():
             start_dt = datetime.datetime.combine(current_date, datetime.time(9, 15))
             end_dt = datetime.datetime.combine(current_date, datetime.time(15, 30))
             try:
-                hist = kite.historical_data(instrument_token, start_dt, end_dt, interval)
+                hist = execute_with_retries(
+                    f"fetching {interval} historical data for token {instrument_token} on {current_date}",
+                    lambda: kite.historical_data(instrument_token, start_dt, end_dt, interval)
+                )
                 if hist:
                     all_candles.extend(hist)
+            except kite_exceptions.TokenException:
+                raise
             except Exception as e:
                 logging.warning(f"Historical fetch failed for {current_date}: {e}")
             current_date += datetime.timedelta(days=1)
@@ -5670,6 +6204,9 @@ def api_aiml_evaluate():
             })
 
         return jsonify({'status': 'ok', 'symbol': symbol, 'horizon': horizon, 'lookback': lookback, 'split_index': split_index, 'series': series})
+    except kite_exceptions.TokenException as e:
+        logging.error(f"Error in api_aiml_evaluate due to invalid session: {e}")
+        return jsonify({'status': 'error', 'message': 'Zerodha session expired. Please login again.'}), 401
     except Exception as e:
         logging.error(f"Error in api_aiml_evaluate: {e}", exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
@@ -5728,9 +6265,14 @@ def api_aiml_evaluate_date():
         # Fetch target date candles
         target_candles = []
         try:
-            hist = kite.historical_data(instrument_token, start_dt, end_dt, interval)
+            hist = execute_with_retries(
+                f"fetching {interval} historical data for token {instrument_token} on {target_date}",
+                lambda: kite.historical_data(instrument_token, start_dt, end_dt, interval)
+            )
             if hist:
                 target_candles.extend(hist)
+        except kite_exceptions.TokenException:
+            raise
         except Exception as e:
             logging.warning(f"Historical fetch failed for {target_date}: {e}")
         
@@ -5745,9 +6287,14 @@ def api_aiml_evaluate_date():
             start_d = datetime.datetime.combine(current_date, datetime.time(9, 15))
             end_d = datetime.datetime.combine(current_date, datetime.time(15, 30))
             try:
-                hist = kite.historical_data(instrument_token, start_d, end_d, interval)
+                hist = execute_with_retries(
+                    f"fetching {interval} historical data for token {instrument_token} on {current_date}",
+                    lambda: kite.historical_data(instrument_token, start_d, end_d, interval)
+                )
                 if hist:
                     all_candles.extend(hist)
+            except kite_exceptions.TokenException:
+                raise
             except Exception as e:
                 logging.warning(f"Historical fetch failed for {current_date}: {e}")
             current_date += datetime.timedelta(days=1)
@@ -5832,6 +6379,9 @@ def api_aiml_evaluate_date():
             'horizon': horizon,
             'series': series
         })
+    except kite_exceptions.TokenException as e:
+        logging.error(f"Error in api_aiml_evaluate_date due to invalid session: {e}")
+        return jsonify({'status': 'error', 'message': 'Zerodha session expired. Please login again.'}), 401
     except Exception as e:
         logging.error(f"Error in api_aiml_evaluate_date: {e}", exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
@@ -6035,7 +6585,10 @@ def api_live_trade_deploy():
         kite_client = KiteConnect(api_key=api_key)
         kite_client.set_access_token(access_token)
         preview = preview_option_trade(kite_client, strategy_row, lot_count)
-        margins = kite_client.margins()
+        margins = execute_with_retries(
+            "fetching Kite margins during live deployment",
+            lambda: kite_client.margins()
+        )
         available_cash = None
         available_intraday = None
         total_available = None
@@ -6118,6 +6671,19 @@ def api_live_trade_deploy():
         started_at=None if status != STATUS_ACTIVE else now,
     )
 
+    if deployment and status == STATUS_ACTIVE:
+        try:
+            _ensure_live_strategy_monitor(
+                user_id,
+                deployment['id'],
+                strategy_row,
+                access_token=access_token,
+                config=state.get('config'),
+                lot_count=lot_count,
+            )
+        except Exception:
+            logging.exception("Failed to initialize live strategy monitor for deployment %s", deployment.get('id'))
+
     return jsonify({
         'status': 'success',
         'deployment': _serialize_live_deployment(deployment)
@@ -6184,6 +6750,20 @@ def api_live_trade_resume():
         error_message=None
     )
 
+    try:
+        strategy_row = _get_strategy_record(updated.get('strategy_id'), session['user_id'])
+        access_token = updated.get('kite_access_token') or session.get('access_token')
+        if strategy_row and access_token:
+            _ensure_live_strategy_monitor(
+                session['user_id'],
+                updated['id'],
+                strategy_row,
+                access_token=access_token,
+                config=(updated.get('state') or {}).get('config'),
+            )
+    except Exception:
+        logging.exception("Failed to reinitialize live strategy monitor during resume for deployment %s", updated.get('id'))
+
     return jsonify({'status': 'success', 'deployment': _serialize_live_deployment(updated)})
 
 
@@ -6211,6 +6791,10 @@ def api_live_trade_stop():
         last_run_at=now,
         error_message=None
     )
+
+    for run_id, info in list(running_strategies.items()):
+        if info.get('live_deployment_id') == deployment['id']:
+            del running_strategies[run_id]
 
     return jsonify({'status': 'success', 'deployment': _serialize_live_deployment(updated)})
 
@@ -6240,7 +6824,13 @@ def api_live_trade_square_off():
     try:
         kite_client = KiteConnect(api_key=api_key)
         kite_client.set_access_token(access_token)
-        positions = kite_client.positions()
+        positions = execute_with_retries(
+            "fetching Kite positions during square off",
+            lambda: kite_client.positions()
+        )
+    except kite_exceptions.TokenException as exc:
+        logging.error("Square-off failed due to invalid Kite session: %s", exc)
+        return jsonify({'status': 'error', 'message': 'Zerodha session expired. Please login again.'}), 401
     except Exception as exc:
         logging.exception("Failed to fetch positions during square off")
         return jsonify({'status': 'error', 'message': f'Failed to fetch positions: {exc}'}), 500
@@ -6320,6 +6910,10 @@ def api_live_trade_delete():
     deployment = live_get_deployment_for_user(session['user_id'])
     if not deployment:
         return jsonify({'status': 'success', 'message': 'No deployment to delete.'})
+
+    for run_id, info in list(running_strategies.items()):
+        if info.get('live_deployment_id') == deployment['id']:
+            del running_strategies[run_id]
 
     live_delete_deployment(deployment['id'])
     return jsonify({'status': 'success', 'message': 'Deployment deleted.'})

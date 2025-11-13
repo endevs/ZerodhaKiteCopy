@@ -76,3 +76,4 @@ const PolicyPlaceholder: React.FC<PolicyPlaceholderProps> = ({
 
 export default PolicyPlaceholder;
 
+

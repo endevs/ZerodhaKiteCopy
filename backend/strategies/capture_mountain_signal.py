@@ -2,12 +2,14 @@ from .base_strategy import BaseStrategy
 from utils.kite_utils import get_option_symbols
 from utils.indicators import calculate_rsi
 from rules import load_mountain_signal_pe_rules
+from kiteconnect import KiteConnect
 import logging
 import datetime
 import re
 import pandas as pd
 import numpy as np
 import uuid
+from typing import Optional, Dict, Any
 
 
 def round_to_multiple(value, multiple):
@@ -27,6 +29,9 @@ def extract_strike_from_symbol(symbol):
     return None
 
 class CaptureMountainSignal(BaseStrategy):
+    _GLOBAL_NFO_INSTRUMENTS: Optional[list] = None
+    _GLOBAL_NFO_LAST_FETCH: Optional[datetime.datetime] = None
+
     description = """
     ## Capture Mountain Signal Strategy
 
@@ -46,12 +51,34 @@ class CaptureMountainSignal(BaseStrategy):
     - **Stop Loss:** Price closes below signal candle's LOW
     - **Target:** Wait for at least 1 candle where LOW > 5 EMA, then if 2 consecutive candles CLOSE < 5 EMA -> Exit CE trade
     """
-    def __init__(self, kite, instrument, candle_time, start_time, end_time, stop_loss, target_profit, total_lot, trailing_stop_loss, segment, trade_type, strike_price, expiry_type, strategy_name_input, paper_trade=False, ema_period=5, session_id=None):
+    def __init__(
+        self,
+        kite,
+        instrument,
+        candle_time,
+        start_time,
+        end_time,
+        stop_loss,
+        target_profit,
+        total_lot,
+        trailing_stop_loss,
+        segment,
+        trade_type,
+        strike_price,
+        expiry_type,
+        strategy_name_input,
+        paper_trade=False,
+        ema_period=5,
+        session_id=None,
+        live_order_context: Optional[Dict[str, Any]] = None,
+    ):
         super().__init__(kite, instrument, candle_time, start_time, end_time, stop_loss, target_profit, total_lot, trailing_stop_loss, segment, trade_type, strike_price, expiry_type, strategy_name_input)
         self.strategy_name_input = strategy_name_input
         self.paper_trade = paper_trade
         self.ema_period = ema_period
         self.paper_trade_session_id = session_id  # Store session_id for DB logging
+        self.live_order_context: Dict[str, Any] = live_order_context.copy() if isinstance(live_order_context, dict) else {}
+        self._live_kite_client: Optional[KiteConnect] = self.live_order_context.get('kite_client')
         self.instrument_token = self._get_instrument_token()
         self.historical_data = [] # Stores 5-minute candles
         self.pe_signal_candle = None
@@ -61,6 +88,23 @@ class CaptureMountainSignal(BaseStrategy):
         self.entry_price = 0
         self.exit_price = 0
         self.trade_history = []
+        lot_size_context = self.live_order_context.get('lot_size')
+        try:
+            option_lot_size = int(lot_size_context)
+        except Exception:
+            option_lot_size = None
+        if not option_lot_size or option_lot_size <= 0:
+            if 'BANK' in (self.instrument or '').upper():
+                option_lot_size = 25
+            elif 'NIFTY' in (self.instrument or '').upper():
+                option_lot_size = 50
+            else:
+                option_lot_size = 50
+        self.option_lot_size = int(max(1, option_lot_size))
+        self.live_order_context['lot_size'] = self.option_lot_size
+        self.live_order_context.setdefault('product', 'MIS')
+        self.live_order_context.setdefault('tag', 'AIML-LIVE')
+
         self.status = {
             'state': 'initializing',
             'message': 'Strategy is initializing.',
@@ -102,7 +146,9 @@ class CaptureMountainSignal(BaseStrategy):
             },
             'traded_instrument_token': None,
             # Audit trail
-            'audit_trail': []
+            'audit_trail': [],
+            'lot_size': self.option_lot_size,
+            'last_live_order_error': None,
         }
         self.last_candle_timestamp = None
         self.current_candle_data = None
@@ -121,6 +167,9 @@ class CaptureMountainSignal(BaseStrategy):
         # Track option contract trades (realistic simulation)
         self.option_trade_history = []
         self.active_option_trade = None
+
+        self._instruments_cache = CaptureMountainSignal._GLOBAL_NFO_INSTRUMENTS
+        self._last_instruments_fetch = CaptureMountainSignal._GLOBAL_NFO_LAST_FETCH
 
         # Load business rules for PE trades from DSL
         try:
@@ -188,7 +237,21 @@ class CaptureMountainSignal(BaseStrategy):
             return {}
         
         try:
-            instruments = self.kite.instruments('NFO')
+            now = datetime.datetime.now()
+            cache_ttl = datetime.timedelta(minutes=15)
+            reuse_cache = (
+                self._instruments_cache is not None and
+                self._last_instruments_fetch is not None and
+                (now - self._last_instruments_fetch) < cache_ttl
+            )
+            if reuse_cache:
+                instruments = self._instruments_cache
+            else:
+                instruments = self.kite.instruments('NFO')
+                self._instruments_cache = instruments
+                self._last_instruments_fetch = now
+                CaptureMountainSignal._GLOBAL_NFO_INSTRUMENTS = instruments
+                CaptureMountainSignal._GLOBAL_NFO_LAST_FETCH = now
             
             # Find expiry date
             all_expiries = sorted(list(set([
@@ -261,6 +324,14 @@ class CaptureMountainSignal(BaseStrategy):
                         option_data['atm_plus2_pe'] = {'token': inst['instrument_token'], 'symbol': inst['tradingsymbol'], 'strike': strike}
             
             return option_data
+        except kite_exceptions.TokenException as exc:
+            logging.error(f"Token error while fetching option instruments: {exc}")
+            return {}
+        except kite_exceptions.NetworkException as exc:
+            wait_seconds = getattr(exc, 'retry_after', None)
+            logging.warning(f"Rate limited while fetching option instruments: {exc}. "
+                            f"{'Retrying after ' + str(wait_seconds) + 's' if wait_seconds else 'Will retry later.'}")
+            return self._instruments_cache or {}
         except Exception as e:
             logging.error(f"Error getting option instruments for monitoring: {e}", exc_info=True)
             return {}
@@ -544,17 +615,74 @@ class CaptureMountainSignal(BaseStrategy):
             logging.error(f"Could not get trading symbol for {option_type} at LTP {ltp}")
             return None, None, None
         
-        quantity = self.total_lot * 50 # Assuming 1 lot = 50 shares
-        order_id = str(uuid.uuid4())[:8]
+        try:
+            quantity = int(max(1, int(self.total_lot)) * max(1, int(self.option_lot_size)))
+        except Exception:
+            quantity = max(1, int(self.total_lot)) * self.option_lot_size
 
-        if self.paper_trade:
-            logging.info(f"[PAPER TRADE] Simulating {transaction_type} order for {trading_symbol} (token: {instrument_token}) with quantity {quantity}")
+        if self.paper_trade or not self.live_order_context.get('api_key') or not self.live_order_context.get('access_token'):
+            order_id = str(uuid.uuid4())[:8]
+            logging.info(
+                f"[PAPER TRADE] Simulating {transaction_type} order for {trading_symbol} (token: {instrument_token}) with quantity {quantity}"
+            )
             return order_id, trading_symbol, instrument_token
-        else:
-            logging.info(f"Placing LIVE {transaction_type} order for {trading_symbol} (token: {instrument_token}) with quantity {quantity}")
-            # Actual KiteConnect order placement would go here
-            # order_id = self.kite.place_order(...)
+
+        try:
+            if self._live_kite_client is None:
+                api_key = self.live_order_context.get('api_key')
+                access_token = self.live_order_context.get('access_token')
+                kite_live = KiteConnect(api_key=api_key)
+                kite_live.set_access_token(access_token)
+                self._live_kite_client = kite_live
+                self.live_order_context['kite_client'] = kite_live
+                logging.info("[LIVE TRADE] Kite client initialized for live orders.")
+            else:
+                kite_live = self._live_kite_client
+
+            txn_type = transaction_type.upper()
+            txn_constant = kite_live.TRANSACTION_TYPE_BUY if txn_type == 'BUY' else kite_live.TRANSACTION_TYPE_SELL
+            product_setting = self.live_order_context.get('product') or 'MIS'
+            if product_setting.upper() == 'MIS':
+                product_constant = kite_live.PRODUCT_MIS
+            elif product_setting.upper() == 'NRML':
+                product_constant = kite_live.PRODUCT_NRML
+            else:
+                product_constant = product_setting.upper()
+
+            params = {
+                'variety': kite_live.VARIETY_REGULAR,
+                'exchange': kite_live.EXCHANGE_NFO,
+                'tradingsymbol': trading_symbol,
+                'transaction_type': txn_constant,
+                'quantity': quantity,
+                'product': product_constant,
+                'order_type': kite_live.ORDER_TYPE_MARKET,
+                'validity': kite_live.VALIDITY_DAY,
+            }
+            if self.live_order_context.get('tag'):
+                params['tag'] = str(self.live_order_context['tag'])
+
+            order_id = kite_live.place_order(**params)
+            logging.info(
+                f"[LIVE TRADE] Order {order_id} placed: {txn_type} {trading_symbol} qty={quantity} (deployment={self.live_order_context.get('deployment_id')})"
+            )
+            self.status['last_live_order_error'] = None
             return order_id, trading_symbol, instrument_token
+        except kite_exceptions.TokenException as exc:
+            logging.error(f"[LIVE TRADE] Token error while placing {transaction_type} order for {trading_symbol}: {exc}")
+            self.status['last_live_order_error'] = str(exc)
+            return None, trading_symbol, instrument_token
+        except kite_exceptions.NetworkException as exc:
+            logging.warning(f"[LIVE TRADE] Network error while placing {transaction_type} order for {trading_symbol}: {exc}")
+            self.status['last_live_order_error'] = str(exc)
+            return None, trading_symbol, instrument_token
+        except Exception as exc:
+            logging.error(
+                f"[LIVE TRADE] Failed to place {transaction_type} order for {trading_symbol}: {exc}",
+                exc_info=True,
+            )
+            self.status['last_live_order_error'] = str(exc)
+            return None, trading_symbol, instrument_token
 
     def run(self):
         logging.info(f"Running Capture Mountain Signal strategy for {self.instrument}")
@@ -609,7 +737,7 @@ class CaptureMountainSignal(BaseStrategy):
             if market_close_square_off_time <= tick_time < market_close_time:
                 # Square off the trade using current LTP
                 self.exit_price = current_ltp
-                current_pnl = (self.exit_price - self.entry_price) * self.total_lot * 50 * self.position
+                current_pnl = (self.exit_price - self.entry_price) * self.total_lot * self.option_lot_size * self.position
                 self.status['pnl'] = current_pnl
                 
                 self._add_audit_trail('market_close_square_off', f"Market close square off at {self.exit_price:.2f} (15 min before close)", {
@@ -883,59 +1011,82 @@ class CaptureMountainSignal(BaseStrategy):
                                 })
                     
                     if entry_allowed:
-                        self.position = -1  # Short position (Buy PE)
-                        self.entry_price = current_candle['close']
-                        self.trade_placed = True
-                        self.status['state'] = 'position_open'
-                        trading_symbol, instrument_token = self._get_atm_option_symbol(self.entry_price, 'PE')
-                        if trading_symbol and instrument_token:
-                            self.status['traded_instrument'] = trading_symbol
-                            self.status['traded_instrument_token'] = instrument_token
-                            self.status['stop_loss_level'] = self.pe_signal_candle['high'] # SL for PE is signal candle high
-                            self.status['target_profit_level'] = np.nan # Target calculated dynamically
-                            order_id, _, _ = self._place_order(self.entry_price, 'PE', 'BUY')
-                            signal_time = self.pe_signal_candle['date'].strftime('%Y-%m-%d %H:%M:%S') if 'date' in self.pe_signal_candle else datetime.datetime.now().isoformat()
-                            entry_timestamp = current_candle.get('date', datetime.datetime.now())
-                            if isinstance(entry_timestamp, (pd.Timestamp, datetime.datetime)):
-                                entry_time = entry_timestamp.strftime('%Y-%m-%d %H:%M:%S')
-                            else:
-                                entry_time = str(entry_timestamp)
-                            self._record_option_entry(
-                                option_type='PE',
-                                signal_time=signal_time,
-                                signal_high=self.pe_signal_candle['high'],
-                                signal_low=self.pe_signal_candle['low'],
-                                index_price=self.entry_price,
-                                instrument_token=instrument_token,
-                                option_symbol=trading_symbol,
-                                entry_time=entry_time
-                            )
-                            self.status['entry_order_id'] = order_id
-                            self.status['message'] = f"PE trade initiated at {self.entry_price:.2f}. SL: {self.status['stop_loss_level']:.2f}"
-                            self.trade_history.append({
-                                'time': current_candle['date'].strftime('%H:%M:%S'),
-                                'action': 'BUY PE',
-                                'price': self.entry_price,
-                                'instrument': self.status['traded_instrument'],
-                                'order_id': order_id
-                            })
-                            self._add_audit_trail('entry', self.status['message'], {
-                                'option_type': 'PE',
-                                'entry_price': self.entry_price,
-                                'stop_loss': self.status['stop_loss_level'],
-                                'signal_candle_high': self.pe_signal_candle['high'],
-                                'signal_candle_low': self.pe_signal_candle['low'],
-                                'instrument': trading_symbol,
-                                'order_id': order_id
-                            })
-                            logging.info(self.status['message'])
-                            # Mark this signal candle as having had an entry
-                            self.signal_candles_with_entry.add(signal_candle_id)
-                            # Reset price action validation after entry (for next exit/entry cycle)
-                            self.pe_signal_price_above_low = False
-                        else:
+                        trading_symbol, instrument_token = self._get_atm_option_symbol(current_candle['close'], 'PE')
+                        if not trading_symbol or not instrument_token:
                             logging.error("Could not get trading symbol for PE trade")
                             return
+                        proposed_entry_price = current_candle['close']
+                        order_id, _, _ = self._place_order(proposed_entry_price, 'PE', 'BUY')
+                        if order_id is None:
+                            failure_msg = f"PE entry order failed at {proposed_entry_price:.2f}"
+                            self.status['state'] = 'error'
+                            self.status['entry_order_id'] = 'FAILED'
+                            self.status['message'] = failure_msg
+                            self._add_audit_trail(
+                                'entry_failed',
+                                failure_msg,
+                                {
+                                    'option_type': 'PE',
+                                    'entry_price': proposed_entry_price,
+                                    'signal_candle_high': self.pe_signal_candle['high'],
+                                    'signal_candle_low': self.pe_signal_candle['low'],
+                                    'reason': self.status.get('last_live_order_error'),
+                                },
+                            )
+                            logging.error(failure_msg)
+                            return
+
+                        self.position = -1  # Short position (Buy PE)
+                        self.entry_price = proposed_entry_price
+                        self.trade_placed = True
+                        self.status['state'] = 'position_open'
+                        self.status['traded_instrument'] = trading_symbol
+                        self.status['traded_instrument_token'] = instrument_token
+                        self.status['stop_loss_level'] = self.pe_signal_candle['high']  # SL for PE is signal candle high
+                        self.status['target_profit_level'] = np.nan  # Target calculated dynamically
+                        signal_time = (
+                            self.pe_signal_candle['date'].strftime('%Y-%m-%d %H:%M:%S')
+                            if 'date' in self.pe_signal_candle
+                            else datetime.datetime.now().isoformat()
+                        )
+                        entry_timestamp = current_candle.get('date', datetime.datetime.now())
+                        if isinstance(entry_timestamp, (pd.Timestamp, datetime.datetime)):
+                            entry_time = entry_timestamp.strftime('%Y-%m-%d %H:%M:%S')
+                        else:
+                            entry_time = str(entry_timestamp)
+                        self._record_option_entry(
+                            option_type='PE',
+                            signal_time=signal_time,
+                            signal_high=self.pe_signal_candle['high'],
+                            signal_low=self.pe_signal_candle['low'],
+                            index_price=self.entry_price,
+                            instrument_token=instrument_token,
+                            option_symbol=trading_symbol,
+                            entry_time=entry_time
+                        )
+                        self.status['entry_order_id'] = order_id
+                        self.status['message'] = f"PE trade initiated at {self.entry_price:.2f}. SL: {self.status['stop_loss_level']:.2f}"
+                        self.trade_history.append({
+                            'time': current_candle['date'].strftime('%H:%M:%S'),
+                            'action': 'BUY PE',
+                            'price': self.entry_price,
+                            'instrument': self.status['traded_instrument'],
+                            'order_id': order_id
+                        })
+                        self._add_audit_trail('entry', self.status['message'], {
+                            'option_type': 'PE',
+                            'entry_price': self.entry_price,
+                            'stop_loss': self.status['stop_loss_level'],
+                            'signal_candle_high': self.pe_signal_candle['high'],
+                            'signal_candle_low': self.pe_signal_candle['low'],
+                            'instrument': trading_symbol,
+                            'order_id': order_id
+                        })
+                        logging.info(self.status['message'])
+                        # Mark this signal candle as having had an entry
+                        self.signal_candles_with_entry.add(signal_candle_id)
+                        # Reset price action validation after entry (for next exit/entry cycle)
+                        self.pe_signal_price_above_low = False
 
             # CE Entry: After exit, require price action validation
             elif self.ce_signal_candle is not None:
@@ -968,63 +1119,86 @@ class CaptureMountainSignal(BaseStrategy):
                                 })
                     
                     if entry_allowed:
-                        self.position = 1  # Long position (Buy CE)
-                        self.entry_price = current_candle['close']
-                        self.trade_placed = True
-                        self.status['state'] = 'position_open'
-                        trading_symbol, instrument_token = self._get_atm_option_symbol(self.entry_price, 'CE')
-                        if trading_symbol and instrument_token:
-                            self.status['traded_instrument'] = trading_symbol
-                            self.status['traded_instrument_token'] = instrument_token
-                            self.status['stop_loss_level'] = self.ce_signal_candle['low'] # SL for CE is signal candle low
-                            self.status['target_profit_level'] = np.nan # Target calculated dynamically
-                            order_id, _, _ = self._place_order(self.entry_price, 'CE', 'BUY')
-                            signal_time = self.ce_signal_candle['date'].strftime('%Y-%m-%d %H:%M:%S') if 'date' in self.ce_signal_candle else datetime.datetime.now().isoformat()
-                            entry_timestamp = current_candle.get('date', datetime.datetime.now())
-                            if isinstance(entry_timestamp, (pd.Timestamp, datetime.datetime)):
-                                entry_time = entry_timestamp.strftime('%Y-%m-%d %H:%M:%S')
-                            else:
-                                entry_time = str(entry_timestamp)
-                            self._record_option_entry(
-                                option_type='CE',
-                                signal_time=signal_time,
-                                signal_high=self.ce_signal_candle['high'],
-                                signal_low=self.ce_signal_candle['low'],
-                                index_price=self.entry_price,
-                                instrument_token=instrument_token,
-                                option_symbol=trading_symbol,
-                                entry_time=entry_time
-                            )
-                            self.status['entry_order_id'] = order_id
-                            self.status['message'] = f"CE trade initiated at {self.entry_price:.2f}. SL: {self.status['stop_loss_level']:.2f}"
-                            self.trade_history.append({
-                                'time': current_candle['date'].strftime('%H:%M:%S'),
-                                'action': 'BUY CE',
-                                'price': self.entry_price,
-                                'instrument': self.status['traded_instrument'],
-                                'order_id': order_id
-                            })
-                            self._add_audit_trail('entry', self.status['message'], {
-                                'option_type': 'CE',
-                                'entry_price': self.entry_price,
-                                'stop_loss': self.status['stop_loss_level'],
-                                'signal_candle_high': self.ce_signal_candle['high'],
-                                'signal_candle_low': self.ce_signal_candle['low'],
-                                'instrument': trading_symbol,
-                                'order_id': order_id
-                            })
-                            logging.info(self.status['message'])
-                            # Mark this signal candle as having had an entry
-                            self.signal_candles_with_entry.add(signal_candle_id)
-                            # Reset price action validation after entry (for next exit/entry cycle)
-                            self.ce_signal_price_below_high = False
-                        else:
+                        trading_symbol, instrument_token = self._get_atm_option_symbol(current_candle['close'], 'CE')
+                        if not trading_symbol or not instrument_token:
                             logging.error("Could not get trading symbol for CE trade")
                             return
+                        proposed_entry_price = current_candle['close']
+                        order_id, _, _ = self._place_order(proposed_entry_price, 'CE', 'BUY')
+                        if order_id is None:
+                            failure_msg = f"CE entry order failed at {proposed_entry_price:.2f}"
+                            self.status['state'] = 'error'
+                            self.status['entry_order_id'] = 'FAILED'
+                            self.status['message'] = failure_msg
+                            self._add_audit_trail(
+                                'entry_failed',
+                                failure_msg,
+                                {
+                                    'option_type': 'CE',
+                                    'entry_price': proposed_entry_price,
+                                    'signal_candle_high': self.ce_signal_candle['high'],
+                                    'signal_candle_low': self.ce_signal_candle['low'],
+                                    'reason': self.status.get('last_live_order_error'),
+                                },
+                            )
+                            logging.error(failure_msg)
+                            return
+
+                        self.position = 1  # Long position (Buy CE)
+                        self.entry_price = proposed_entry_price
+                        self.trade_placed = True
+                        self.status['state'] = 'position_open'
+                        self.status['traded_instrument'] = trading_symbol
+                        self.status['traded_instrument_token'] = instrument_token
+                        self.status['stop_loss_level'] = self.ce_signal_candle['low']  # SL for CE is signal candle low
+                        self.status['target_profit_level'] = np.nan  # Target calculated dynamically
+                        signal_time = (
+                            self.ce_signal_candle['date'].strftime('%Y-%m-%d %H:%M:%S')
+                            if 'date' in self.ce_signal_candle
+                            else datetime.datetime.now().isoformat()
+                        )
+                        entry_timestamp = current_candle.get('date', datetime.datetime.now())
+                        if isinstance(entry_timestamp, (pd.Timestamp, datetime.datetime)):
+                            entry_time = entry_timestamp.strftime('%Y-%m-%d %H:%M:%S')
+                        else:
+                            entry_time = str(entry_timestamp)
+                        self._record_option_entry(
+                            option_type='CE',
+                            signal_time=signal_time,
+                            signal_high=self.ce_signal_candle['high'],
+                            signal_low=self.ce_signal_candle['low'],
+                            index_price=self.entry_price,
+                            instrument_token=instrument_token,
+                            option_symbol=trading_symbol,
+                            entry_time=entry_time
+                        )
+                        self.status['entry_order_id'] = order_id
+                        self.status['message'] = f"CE trade initiated at {self.entry_price:.2f}. SL: {self.status['stop_loss_level']:.2f}"
+                        self.trade_history.append({
+                            'time': current_candle['date'].strftime('%H:%M:%S'),
+                            'action': 'BUY CE',
+                            'price': self.entry_price,
+                            'instrument': self.status['traded_instrument'],
+                            'order_id': order_id
+                        })
+                        self._add_audit_trail('entry', self.status['message'], {
+                            'option_type': 'CE',
+                            'entry_price': self.entry_price,
+                            'stop_loss': self.status['stop_loss_level'],
+                            'signal_candle_high': self.ce_signal_candle['high'],
+                            'signal_candle_low': self.ce_signal_candle['low'],
+                            'instrument': trading_symbol,
+                            'order_id': order_id
+                        })
+                        logging.info(self.status['message'])
+                        # Mark this signal candle as having had an entry
+                        self.signal_candles_with_entry.add(signal_candle_id)
+                        # Reset price action validation after entry (for next exit/entry cycle)
+                        self.ce_signal_price_below_high = False
 
         # --- Position Management (SL/Target) ---
         elif self.position != 0: # If a position is open
-            current_pnl = (current_candle['close'] - self.entry_price) * self.total_lot * 50 * self.position
+            current_pnl = (current_candle['close'] - self.entry_price) * self.total_lot * self.option_lot_size * self.position
             self.status['pnl'] = current_pnl
             self.status['message'] = f"Position open. Entry: {self.entry_price:.2f}, Current: {current_candle['close']:.2f}, P&L: {current_pnl:.2f}"
 
@@ -1119,11 +1293,24 @@ class CaptureMountainSignal(BaseStrategy):
                         logging.info(self.status['message'])
 
     def _close_trade(self, exit_type, timestamp):
+        order_id, _, _ = self._place_order(self.exit_price, 'PE' if self.position == -1 else 'CE', 'SELL')
+        if order_id is None and not self.paper_trade:
+            failure_msg = f"Exit order failed at {self.exit_price:.2f}. Manual intervention required."
+            self.status['state'] = 'error'
+            self.status['message'] = failure_msg
+            self._add_audit_trail('exit_failed', failure_msg, {
+                'exit_type': exit_type,
+                'exit_price': self.exit_price,
+                'entry_price': self.entry_price,
+                'position': 'PE' if self.position == -1 else 'CE',
+                'reason': self.status.get('last_live_order_error'),
+            })
+            logging.error(failure_msg)
+            return
+
         self.status['state'] = 'position_closed'
         exit_type_display = 'Market Close' if exit_type == 'MKT_CLOSE' else exit_type
         self.status['message'] = f"Position closed by {exit_type_display} at {self.exit_price:.2f}. P&L: {self.status['pnl']:.2f}"
-        
-        order_id, _, _ = self._place_order(self.exit_price, 'PE' if self.position == -1 else 'CE', 'SELL')
         if exit_type == 'SL':
             self.status['sl_order_id'] = order_id
         elif exit_type == 'TP':
