@@ -6,11 +6,12 @@ from pathlib import Path
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
 from kiteconnect import KiteConnect
+from kiteconnect import exceptions as kite_exceptions
 import logging
 import random
 import time
 from threading import Thread, Lock
-from typing import Dict, List, Tuple, Any, Optional
+from typing import Dict, List, Tuple, Any, Optional, Callable
 from strategies.orb import ORB
 from strategies.capture_mountain_signal import CaptureMountainSignal
 from rules import load_mountain_signal_pe_rules
@@ -18,12 +19,19 @@ from ticker import Ticker
 import uuid
 import sqlite3
 import smtplib, ssl
+import socket
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 import datetime
 import calendar
 import secrets
 import config
+import requests
+from requests.exceptions import (
+    RequestException,
+    ConnectionError as RequestsConnectionError,
+    Timeout as RequestsTimeout,
+)
 from database import get_db_connection
 from live_trade import (
     ensure_live_trade_tables,
