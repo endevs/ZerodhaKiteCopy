@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { apiUrl } from '../config/api';
+import { useNavigate } from 'react-router-dom';
 import LoaderOverlay from './LoaderOverlay';
 import SupportChat from './SupportChat';
 import PolicyLinks from './PolicyLinks';
@@ -172,6 +173,44 @@ const WelcomeContent: React.FC<{ message: { type: string; text: string } | null;
 
 const Welcome: React.FC = () => {
   const [message, setMessage] = useState<{ type: string; text: string } | null>(null);
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    const checkZerodhaSession = async () => {
+      try {
+        const response = await fetch(apiUrl('/api/user-data'), {
+          credentials: 'include',
+        });
+
+        if (!response.ok) {
+          return;
+        }
+
+        const data = await response.json();
+
+        if (data?.token_valid) {
+          navigate('/dashboard', { replace: true });
+          return;
+        }
+
+        if (!data?.zerodha_credentials_present) {
+          setMessage({
+            type: 'warning',
+            text: 'Add your Zerodha API key and secret to continue.',
+          });
+        } else if (data?.message) {
+          setMessage({
+            type: data?.access_token_present ? 'info' : 'warning',
+            text: data.message,
+          });
+        }
+      } catch (error) {
+        console.error('Unable to validate Zerodha session:', error);
+      }
+    };
+
+    checkZerodhaSession();
+  }, [navigate]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);

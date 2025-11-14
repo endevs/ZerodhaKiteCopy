@@ -73,10 +73,22 @@ def migrate_strategies_table():
                 )
             """)
         
+        cursor.execute("PRAGMA table_info(users)")
+        user_columns = [row[1] for row in cursor.fetchall()]
+
+        if 'zerodha_access_token' not in user_columns:
+            logging.info("Adding 'zerodha_access_token' column to users table")
+            cursor.execute("ALTER TABLE users ADD COLUMN zerodha_access_token TEXT")
+
+        if 'zerodha_token_created_at' not in user_columns:
+            logging.info("Adding 'zerodha_token_created_at' column to users table")
+            cursor.execute("ALTER TABLE users ADD COLUMN zerodha_token_created_at DATETIME")
+
         conn.commit()
         logging.info("Database migration completed successfully")
         print("SUCCESS: Database migration completed successfully!")
         print("   Added columns: indicators, entry_rules, exit_rules, visibility, blueprint, created_at, updated_at")
+        print("   Ensured users table has zerodha_access_token, zerodha_token_created_at")
         
     except Exception as e:
         conn.rollback()

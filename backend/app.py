@@ -1268,6 +1268,106 @@ def _get_user_record(user_id: int) -> Optional[sqlite3.Row]:
         conn.close()
 
 
+def _update_user_access_token(user_id: int, token: Optional[str]) -> None:
+    conn = get_db_connection()
+    try:
+        if token:
+            conn.execute(
+                'UPDATE users SET zerodha_access_token = ?, zerodha_token_created_at = ? WHERE id = ?',
+                (token, datetime.datetime.utcnow().isoformat(), user_id)
+            )
+        else:
+            conn.execute(
+                'UPDATE users SET zerodha_access_token = NULL, zerodha_token_created_at = NULL WHERE id = ?',
+                (user_id,)
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _validate_kite_token(app_key: str, token: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    kite_client = KiteConnect(api_key=app_key)
+    kite_client.set_access_token(token)
+    profile = execute_with_retries(
+        "validating Zerodha access token",
+        lambda: kite_client.profile()
+    )
+    margins = execute_with_retries(
+        "fetching Zerodha margins during validation",
+        lambda: kite_client.margins()
+    )
+    return profile, margins
+
+
+def _collect_candidate_tokens(user: Dict[str, Any]) -> Tuple[List[str], Optional[str], Optional[str]]:
+    session_token = session.get('access_token')
+    stored_token = user.get('zerodha_access_token')
+    candidates: List[str] = []
+    if session_token:
+        candidates.append(session_token)
+    if stored_token and stored_token not in candidates:
+        candidates.append(stored_token)
+    return candidates, session_token, stored_token
+
+
+def _with_valid_kite_client(user_id: int, description: str, action: Callable[[KiteConnect], Any]) -> Any:
+    user_row = _get_user_record(user_id)
+    if not user_row:
+        raise RuntimeError("User not found")
+    user = dict(user_row)
+    app_key = user.get('app_key')
+    if not app_key:
+        raise RuntimeError("Zerodha credentials not configured")
+
+    tokens, session_token, stored_token = _collect_candidate_tokens(user)
+    if not tokens:
+        raise kite_exceptions.TokenException("No Zerodha session available")
+
+    last_error: Optional[Exception] = None
+    for token in tokens:
+        client = KiteConnect(api_key=app_key)
+        try:
+            client.set_access_token(token)
+            result = action(client)
+
+            session['access_token'] = token
+            if stored_token != token:
+                _update_user_access_token(user_id, token)
+                stored_token = token
+
+            kite.api_key = app_key
+            kite.set_access_token(token)
+            return result
+        except kite_exceptions.TokenException as exc:
+            logging.warning("%s token invalid for user %s: %s", description, user_id, exc)
+            last_error = exc
+            if token == session_token:
+                session.pop('access_token', None)
+                session_token = None
+            if token == stored_token:
+                _update_user_access_token(user_id, None)
+                stored_token = None
+            continue
+        except Exception as exc:
+            message = str(exc)
+            if "Invalid `api_key` or `access_token`" in message or "Incorrect `api_key` or `access_token`" in message:
+                logging.warning("%s encountered invalid access token for user %s: %s", description, user_id, exc)
+                last_error = kite_exceptions.TokenException(message)
+                if token == session_token:
+                    session.pop('access_token', None)
+                    session_token = None
+                if token == stored_token:
+                    _update_user_access_token(user_id, None)
+                    stored_token = None
+                continue
+            raise
+
+    if last_error:
+        raise last_error
+    raise kite_exceptions.TokenException("No Zerodha session available")
+
+
 def _get_strategy_record(strategy_id: int, user_id: int) -> Optional[sqlite3.Row]:
     conn = get_db_connection()
     try:
@@ -2174,38 +2274,54 @@ def api_chart_data():
         prev_start_dt = datetime.datetime.combine(prev_date, datetime.time(15, 30)) - datetime.timedelta(minutes=minutes_needed)
         prev_end_dt = datetime.datetime.combine(prev_date, datetime.time(15, 30))
         
-        # Fetch historical data from Kite (today's data)
+        def _fetch_history(client: KiteConnect) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+            try:
+                hist_today_local = execute_with_retries(
+                    f"fetching historical data for {instrument} on {selected_date}",
+                    lambda: client.historical_data(token, start_dt, end_dt, kite_interval)
+                )
+            except kite_exceptions.TokenException as err:
+                logging.error(f"Invalid Kite session while fetching today's data: {err}")
+                raise
+            except Exception as err:
+                logging.error(f"Error fetching historical data for today: {err}")
+                raise
+
+            hist_prev_local: List[Dict[str, Any]] = []
+            try:
+                hist_prev_local = execute_with_retries(
+                    f"fetching previous day data for {instrument} on {prev_date}",
+                    lambda: client.historical_data(token, prev_start_dt, prev_end_dt, kite_interval)
+                )
+                if len(hist_prev_local) > candles_needed:
+                    hist_prev_local = hist_prev_local[-candles_needed:]
+            except kite_exceptions.TokenException as err:
+                logging.error(f"Invalid Kite session while fetching previous data: {err}")
+                raise
+            except Exception as err:
+                logging.warning(
+                    f"Could not fetch previous day's data for RSI warm-up: {err}. "
+                    f"RSI will start from candle {candles_needed + 1}"
+                )
+                hist_prev_local = []
+
+            return hist_today_local, hist_prev_local
+
         try:
-            hist_today = execute_with_retries(
-                f"fetching historical data for {instrument} on {selected_date}",
-                lambda: kite.historical_data(token, start_dt, end_dt, kite_interval)
+            hist_today, hist_prev = _with_valid_kite_client(
+                session['user_id'],
+                f"historical data fetch for {instrument}",
+                _fetch_history
             )
-        except kite_exceptions.TokenException as e:
-            logging.error(f"Invalid Kite session while fetching today's data: {e}")
-            session.pop('access_token', None)
+        except kite_exceptions.TokenException:
             return jsonify({'candles': [], 'ema': [], 'authExpired': True})
-        except Exception as e:
-            logging.error(f"Error fetching historical data for today: {e}")
-            return jsonify({'candles': [], 'ema': []})
-        
-        # Fetch previous day's data for RSI warm-up
-        hist_prev = []
-        try:
-            hist_prev = execute_with_retries(
-                f"fetching previous day data for {instrument} on {prev_date}",
-                lambda: kite.historical_data(token, prev_start_dt, prev_end_dt, kite_interval)
-            )
-            # Only take the last portion (last 20 candles)
-            if len(hist_prev) > candles_needed:
-                hist_prev = hist_prev[-candles_needed:]
-        except kite_exceptions.TokenException as e:
-            logging.error(f"Invalid Kite session while fetching previous data: {e}")
-            session.pop('access_token', None)
-            return jsonify({'candles': [], 'ema': [], 'authExpired': True})
-        except Exception as e:
-            logging.warning(f"Could not fetch previous day's data for RSI warm-up: {e}. RSI will start from candle {candles_needed + 1}")
-            hist_prev = []
-        
+        except RuntimeError as err:
+            logging.error(f"Error preparing Zerodha session for historical data: {err}")
+            return jsonify({'candles': [], 'ema': [], 'message': str(err)}), 400
+        except Exception as err:
+            logging.error(f"Unexpected error fetching historical data: {err}")
+            return jsonify({'candles': [], 'ema': []}), 500
+
         # Combine: previous day's data first, then today's data
         # This ensures RSI calculation has enough historical data
         hist = hist_prev + hist_today
@@ -2702,8 +2818,10 @@ def callback():
 
     try:
         data = kite.generate_session(request_token, api_secret=user['app_secret'])
-        session['access_token'] = data["access_token"]
-        kite.set_access_token(data["access_token"])
+        access_token = data["access_token"]
+        session['access_token'] = access_token
+        kite.set_access_token(access_token)
+        _update_user_access_token(session['user_id'], access_token)
         return redirect(f"{config.FRONTEND_URL}/dashboard")
     except Exception as e:
         logging.error(f"Error generating session: {e}")
@@ -2773,63 +2891,100 @@ def api_user_data():
     
     try:
         user_id = session['user_id']
-        if 'access_token' not in session:
+        user_row = _get_user_record(user_id)
+        if not user_row:
             return jsonify({
-                'status': 'success',
-                'authenticated': True,
-                'user_id': user_id,
-                'user_name': 'Guest',
-                'balance': 0,
-                'access_token_present': False
-            })
-        
-        kite.set_access_token(session['access_token'])
-        profile = execute_with_retries("fetching Kite profile", lambda: kite.profile())
-        margins = execute_with_retries("fetching Kite margins", lambda: kite.margins())
-        user_name = profile.get("user_name", "Guest")
-        balance = margins.get("equity", {}).get("available", {}).get("live_balance", 0)
-        
-        return jsonify({
+                'status': 'error',
+                'authenticated': False,
+                'user_id': None,
+                'message': 'User record not found'
+            }), 400
+
+        user = dict(user_row)
+        app_key = user.get('app_key')
+        stored_token = user.get('zerodha_access_token')
+        session_token = session.get('access_token')
+
+        default_response = {
             'status': 'success',
             'authenticated': True,
             'user_id': user_id,
-            'user_name': user_name,
-            'balance': balance,
-            'access_token_present': True
-        })
-    except kite_exceptions.TokenException as e:
+            'user_name': 'Guest',
+            'balance': 0,
+            'access_token_present': False,
+            'token_valid': False,
+            'zerodha_credentials_present': bool(app_key)
+        }
+
+        tokens_to_try: List[str] = []
+        if session_token:
+            tokens_to_try.append(session_token)
+        if stored_token and stored_token not in tokens_to_try:
+            tokens_to_try.append(stored_token)
+
+        if app_key:
+            for token in tokens_to_try:
+                if not token:
+                    continue
+                try:
+                    profile, margins = _validate_kite_token(app_key, token)
+                    session['access_token'] = token
+                    if stored_token != token:
+                        _update_user_access_token(user_id, token)
+                        stored_token = token
+
+                    user_name = profile.get("user_name", "Guest")
+                    balance = margins.get("equity", {}).get("available", {}).get("live_balance", 0)
+                    default_response.update({
+                        'user_name': user_name,
+                        'balance': balance,
+                        'access_token_present': True,
+                        'token_valid': True,
+                        'message': 'Zerodha session active'
+                    })
+                    return jsonify(default_response)
+                except kite_exceptions.TokenException as exc:
+                    logging.warning("Zerodha token invalid for user %s: %s", user_id, exc)
+                    if token == session_token:
+                        session.pop('access_token', None)
+                        session_token = None
+                    if token == stored_token:
+                        _update_user_access_token(user_id, None)
+                        stored_token = None
+                    continue
+                except Exception as exc:
+                    logging.error("Error validating Zerodha token for user %s: %s", user_id, exc)
+                    if "Invalid `api_key` or `access_token`" in str(exc) or "Incorrect `api_key` or `access_token`" in str(exc):
+                        if token == session_token:
+                            session.pop('access_token', None)
+                            session_token = None
+                        if token == stored_token:
+                            _update_user_access_token(user_id, None)
+                            stored_token = None
+                        continue
+                    default_response['message'] = 'Error validating Zerodha session'
+                    return jsonify(default_response), 500
+        else:
+            default_response['message'] = 'Zerodha credentials not configured'
+            return jsonify(default_response)
+
+        if stored_token:
+            _update_user_access_token(user_id, None)
+
+        default_response['message'] = 'Zerodha session expired'
+        return jsonify(default_response)
+    except Exception as e:
         logging.error(f"Error fetching user data: {e}")
-        session.pop('access_token', None)
         return jsonify({
-            'status': 'success',
+            'status': 'error',
             'authenticated': True,
             'user_id': session.get('user_id'),
             'user_name': 'Guest',
             'balance': 0,
             'access_token_present': False,
-            'message': 'Zerodha session expired'
-        })
-    except Exception as e:
-        logging.error(f"Error fetching user data: {e}")
-        if "Invalid `api_key` or `access_token`" in str(e) or "Incorrect `api_key` or `access_token`" in str(e):
-            session.pop('access_token', None)
-            return jsonify({
-                'status': 'success',
-                'authenticated': True,
-                'user_id': session.get('user_id'),
-                'user_name': 'Guest',
-                'balance': 0,
-                'access_token_present': False,
-                'message': 'Zerodha session expired'
-            })
-        return jsonify({
-            'status': 'success',
-            'authenticated': True,
-            'user_id': session.get('user_id'),
-            'user_name': 'Guest',
-            'balance': 0,
-            'access_token_present': False
-        })
+            'token_valid': False,
+            'message': 'Unexpected error while retrieving user data'
+        }), 500
 
 def _insert_contact_message(name: str, email: str, mobile: str, message: str, user_id: Optional[int] = None) -> None:
     conn = get_db_connection()
@@ -4734,6 +4889,7 @@ def connect(auth=None):
                                     logging.error(f"SocketIO: Error starting ticker: {e}", exc_info=True)
                                 except:
                                     pass  # Don't let logging errors break connection
+                                ticker = None
                                 try:
                                     emit('error', {'message': 'Failed to start market data feed'})
                                 except:
@@ -4837,11 +4993,13 @@ def handle_start_ticker(data=None):
             emit('info', {'message': 'Market data feed started successfully'})
         except Exception as e:
             logging.error(f"SocketIO: Error starting ticker via start_ticker event: {e}", exc_info=True)
+            ticker = None
             emit('error', {'message': f'Failed to start market data feed: {str(e)}'})
         finally:
             conn.close()
     except Exception as e:
         logging.error(f"Error in start_ticker handler: {e}", exc_info=True)
+        ticker = None
         try:
             emit('error', {'message': f'Error starting ticker: {str(e)}'})
         except:
@@ -5035,11 +5193,13 @@ def api_start_ticker():
             return jsonify({'status': 'success', 'message': 'Market data feed started successfully'})
         except Exception as e:
             logging.error(f"Error starting ticker via /api/ticker/start: {e}", exc_info=True)
+            ticker = None
             return jsonify({'status': 'error', 'message': f'Failed to start market data feed: {str(e)}'}), 500
         finally:
             conn.close()
     except Exception as e:
         logging.error(f"Error in api_start_ticker: {e}", exc_info=True)
+        ticker = None
         return jsonify({'status': 'error', 'message': f'Error starting ticker: {str(e)}'}), 500
 
 @app.route("/api/market_snapshot", methods=['GET'])
@@ -5048,16 +5208,26 @@ def api_market_snapshot():
     if 'user_id' not in session:
         return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
 
-    if 'access_token' not in session:
-        return jsonify({'status': 'error', 'message': 'Zerodha not connected'}), 401
-
     try:
-        kite.set_access_token(session['access_token'])
         instruments = {
             'NIFTY': 'NSE:NIFTY 50',
             'BANKNIFTY': 'NSE:NIFTY BANK'
         }
-        resp = kite.ltp(list(instruments.values()))
+
+        try:
+            resp = _with_valid_kite_client(
+                session['user_id'],
+                "market snapshot",
+                lambda client: execute_with_retries(
+                    "fetching quick market snapshot",
+                    lambda: client.ltp(list(instruments.values()))
+                )
+            )
+        except kite_exceptions.TokenException:
+            return jsonify({'status': 'error', 'message': 'Zerodha session expired', 'authExpired': True}), 401
+        except RuntimeError as err:
+            return jsonify({'status': 'error', 'message': str(err)}), 400
+
         nifty = resp.get(instruments['NIFTY'], {}).get('last_price')
         banknifty = resp.get(instruments['BANKNIFTY'], {}).get('last_price')
         data = {
