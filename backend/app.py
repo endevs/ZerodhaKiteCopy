@@ -2877,12 +2877,21 @@ def login():
 
     return render_template("login.html")
 
-@app.route("/api/login", methods=['POST', 'OPTIONS'])
+@app.route("/api/login", methods=['GET', 'POST', 'OPTIONS'])
 def api_login():
     """API endpoint for login that accepts JSON"""
     if request.method == 'OPTIONS':
         # Handle CORS preflight
         return '', 200
+    
+    if request.method == 'GET':
+        # GET request - return endpoint information
+        return jsonify({
+            'status': 'success',
+            'message': 'Login endpoint is available',
+            'methods': ['POST'],
+            'description': 'Send POST request with JSON body containing "email" field'
+        }), 200
     
     try:
         # Log request details for debugging
