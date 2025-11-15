@@ -1316,7 +1316,8 @@ app.secret_key = config.SECRET_KEY
 CORS(app, 
      origins=config.CORS_ORIGINS,
      supports_credentials=True,
-     allow_headers=['Content-Type', 'Authorization'])
+     allow_headers=['Content-Type', 'Authorization'],
+     methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'])
 
 # Configure SocketIO with CORS - allow both frontend and backend origins for development
 # Also include production domain if not already in CORS_ORIGINS
@@ -1358,6 +1359,13 @@ socketio = SocketIO(app,
 
 # Ensure live trade tables exist on startup
 ensure_live_trade_tables()
+
+# Run admin migration on startup
+try:
+    from migrate_admin import migrate_admin_field
+    migrate_admin_field()
+except Exception as e:
+    logging.warning(f"Admin migration failed (may already be done): {e}")
 
 # Helper utilities for live trade feature
 
@@ -1405,6 +1413,58 @@ def _get_user_record(user_id: int) -> Optional[sqlite3.Row]:
     conn = get_db_connection()
     try:
         return conn.execute('SELECT * FROM users WHERE id = ?', (user_id,)).fetchone()
+    finally:
+        conn.close()
+
+def _is_admin(user_id: Optional[int] = None, email: Optional[str] = None) -> bool:
+    """
+    Check if a user is an admin.
+    
+    Args:
+        user_id: User ID to check (if provided)
+        email: User email to check (if provided, takes precedence)
+    
+    Returns:
+        True if user is admin, False otherwise
+    """
+    if not user_id and not email:
+        return False
+    
+    conn = get_db_connection()
+    try:
+        if email:
+            user = conn.execute('SELECT is_admin FROM users WHERE email = ?', (email,)).fetchone()
+        else:
+            user = conn.execute('SELECT is_admin FROM users WHERE id = ?', (user_id,)).fetchone()
+        
+        if user:
+            # Handle both boolean and integer (SQLite stores booleans as integers)
+            is_admin = user['is_admin']
+            return bool(is_admin) if is_admin is not None else False
+        return False
+    finally:
+        conn.close()
+
+def _require_admin():
+    """
+    Decorator helper to check if current user is admin.
+    Raises 403 if not admin.
+    """
+    if 'user_id' not in session:
+        return False
+    
+    # Get user email from session or database
+    user_id = session.get('user_id')
+    conn = get_db_connection()
+    try:
+        user = conn.execute('SELECT email, is_admin FROM users WHERE id = ?', (user_id,)).fetchone()
+        if user:
+            is_admin = bool(user['is_admin']) if user['is_admin'] is not None else False
+            # Also check if email is raj.bapa@gmail.com (backup check)
+            if user['email'] == 'raj.bapa@gmail.com':
+                is_admin = True
+            return is_admin
+        return False
     finally:
         conn.close()
 
@@ -2208,7 +2268,7 @@ def add_cors_headers(response):
             response.headers['Access-Control-Allow-Origin'] = allowed_origins[0]
         response.headers['Access-Control-Allow-Credentials'] = 'true'
         response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
-        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS, DELETE'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
     except Exception as cors_err:
         logging.debug(f"CORS header injection failed: {cors_err}")
     return response
@@ -3201,6 +3261,128 @@ def api_logout():
     session.pop('user_id', None)
     return jsonify({'status': 'success', 'message': 'Logged out successfully'})
 
+@app.route("/api/admin/check")
+def api_admin_check():
+    """Check if current user is admin"""
+    if 'user_id' not in session:
+        return jsonify({'is_admin': False}), 200
+    
+    is_admin = _require_admin()
+    return jsonify({'is_admin': is_admin}), 200
+
+@app.route("/api/admin/users", methods=['GET'])
+def api_admin_get_users():
+    """Get all users (admin only)"""
+    if not _require_admin():
+        return jsonify({'status': 'error', 'message': 'Admin access required'}), 403
+    
+    try:
+        conn = get_db_connection()
+        try:
+            users = conn.execute('''
+                SELECT id, email, mobile, email_verified, app_key, app_secret, 
+                       is_admin, zerodha_access_token, zerodha_token_created_at
+                FROM users
+                ORDER BY id DESC
+            ''').fetchall()
+            
+            users_list = []
+            for user in users:
+                users_list.append({
+                    'id': user['id'],
+                    'email': user['email'],
+                    'mobile': user['mobile'],
+                    'email_verified': bool(user['email_verified']),
+                    'app_key': user['app_key'] if user['app_key'] else '',
+                    'app_secret': user['app_secret'] if user['app_secret'] else '',
+                    'is_admin': bool(user['is_admin']) if user['is_admin'] is not None else False,
+                    'has_token': bool(user['zerodha_access_token']),
+                    'token_created_at': user['zerodha_token_created_at']
+                })
+            return jsonify({'status': 'success', 'users': users_list}), 200
+        finally:
+            conn.close()
+    except Exception as e:
+        logging.error(f"Error fetching users: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route("/api/admin/users/<int:user_id>", methods=['PUT', 'DELETE', 'OPTIONS'])
+def api_admin_manage_user(user_id):
+    """Update or delete a user (admin only)"""
+    if request.method == 'OPTIONS':
+        # Handle CORS preflight
+        return '', 200
+    
+    if not _require_admin():
+        return jsonify({'status': 'error', 'message': 'Admin access required'}), 403
+    
+    if request.method == 'DELETE':
+        # Delete user
+        try:
+            conn = get_db_connection()
+            try:
+                # Check if user exists
+                user = conn.execute('SELECT id FROM users WHERE id = ?', (user_id,)).fetchone()
+                if not user:
+                    return jsonify({'status': 'error', 'message': 'User not found'}), 404
+                
+                # Prevent deleting yourself
+                if user_id == session.get('user_id'):
+                    return jsonify({'status': 'error', 'message': 'Cannot delete your own account'}), 400
+                
+                conn.execute('DELETE FROM users WHERE id = ?', (user_id,))
+                conn.commit()
+                return jsonify({'status': 'success', 'message': 'User deleted successfully'}), 200
+            finally:
+                conn.close()
+        except Exception as e:
+            logging.error(f"Error deleting user: {e}")
+            return jsonify({'status': 'error', 'message': str(e)}), 500
+    
+    elif request.method == 'PUT':
+        # Update user
+        try:
+            data = request.get_json()
+            if not data:
+                return jsonify({'status': 'error', 'message': 'No data provided'}), 400
+            
+            conn = get_db_connection()
+            try:
+                # Check if user exists
+                user = conn.execute('SELECT id FROM users WHERE id = ?', (user_id,)).fetchone()
+                if not user:
+                    return jsonify({'status': 'error', 'message': 'User not found'}), 404
+                
+                updates = []
+                values = []
+                
+                # Update is_admin
+                if 'is_admin' in data:
+                    is_admin = bool(data['is_admin'])
+                    updates.append('is_admin = ?')
+                    values.append(1 if is_admin else 0)
+                
+                # Update email_verified (for inactive/active)
+                if 'email_verified' in data:
+                    email_verified = bool(data['email_verified'])
+                    updates.append('email_verified = ?')
+                    values.append(1 if email_verified else 0)
+                
+                if not updates:
+                    return jsonify({'status': 'error', 'message': 'No valid fields to update'}), 400
+                
+                values.append(user_id)
+                query = f"UPDATE users SET {', '.join(updates)} WHERE id = ?"
+                conn.execute(query, values)
+                conn.commit()
+                
+                return jsonify({'status': 'success', 'message': 'User updated successfully'}), 200
+            finally:
+                conn.close()
+        except Exception as e:
+            logging.error(f"Error updating user: {e}")
+            return jsonify({'status': 'error', 'message': str(e)}), 500
+
 @app.route("/api/user-data")
 def api_user_data():
     if 'user_id' not in session:
@@ -3982,30 +4164,55 @@ def api_backtest_mountain_signal():
         else:
             return jsonify({'status': 'error', 'message': 'Invalid instrument'}), 400
 
-        # Fetch historical data for all dates in range
-        all_candles = []
-        current_date = from_date
-        kite_interval = f"{candle_time}minute"
+        # Fetch historical data for all dates in range using user's Kite client
+        user_id = session['user_id']
+        
+        def _fetch_historical_data(kite_client):
+            all_candles = []
+            current_date = from_date
+            kite_interval = f"{candle_time}minute"
 
-        while current_date <= to_date:
-            # Skip weekends
-            if current_date.weekday() < 5:  # Monday=0, Friday=4
-                start_dt = datetime.datetime.combine(current_date, datetime.time(9, 15))
-                end_dt = datetime.datetime.combine(current_date, datetime.time(15, 30))
+            while current_date <= to_date:
+                # Skip weekends
+                if current_date.weekday() < 5:  # Monday=0, Friday=4
+                    start_dt = datetime.datetime.combine(current_date, datetime.time(9, 15))
+                    end_dt = datetime.datetime.combine(current_date, datetime.time(15, 30))
+                
+                    try:
+                        # Capture loop variables for lambda using default parameters
+                        hist = execute_with_retries(
+                            f"fetching {kite_interval} historical data for token {token} on {current_date}",
+                            lambda t=token, sd=start_dt, ed=end_dt, ki=kite_interval: kite_client.historical_data(t, sd, ed, ki)
+                        )
+                        if hist:
+                            all_candles.extend(hist)
+                    except kite_exceptions.TokenException:
+                        raise
+                    except Exception as e:
+                        logging.error(f"Error fetching historical data for {current_date}: {e}")
+                
+                current_date += datetime.timedelta(days=1)
             
-                try:
-                    hist = execute_with_retries(
-                        f"fetching {kite_interval} historical data for token {token} on {current_date}",
-                        lambda: kite.historical_data(token, start_dt, end_dt, kite_interval)
-                    )
-                    if hist:
-                        all_candles.extend(hist)
-                except kite_exceptions.TokenException:
-                    raise
-                except Exception as e:
-                    logging.error(f"Error fetching historical data for {current_date}: {e}")
-            
-            current_date += datetime.timedelta(days=1)
+            return all_candles
+        
+        try:
+            all_candles = _with_valid_kite_client(
+                user_id,
+                f"backtest mountain signal for {instrument}",
+                _fetch_historical_data
+            )
+        except kite_exceptions.TokenException:
+            return jsonify({
+                'status': 'error',
+                'message': 'Zerodha session expired. Please log in again.',
+                'authExpired': True
+            }), 401
+        except RuntimeError as err:
+            logging.error(f"Error preparing Zerodha session for backtest: {err}")
+            return jsonify({
+                'status': 'error',
+                'message': str(err)
+            }), 400
 
         if not all_candles:
             return jsonify({'status': 'error', 'message': 'No historical data found for the selected date range'}), 404
@@ -4152,8 +4359,8 @@ def api_backtest_mountain_signal():
 
                         trade_index = len(trades) - 1
                         trade_date_value = trades[trade_index]['date']
-                        atm_strike = round_to_atm(entry_price)
-                        option_symbol = get_option_symbol(atm_strike, 'PE', current_candle['date'])
+                        atm_strike = round_to_atm_price(entry_price, strike_step)
+                        option_symbol = get_option_symbol_from_components(instrument_key, atm_strike, 'PE', current_candle['date'])
                         option_entry_price = simulate_option_premium(entry_price, atm_strike, 'PE')
                         stop_loss_price_abs = round(option_entry_price * (1 + stop_loss_percent), 2)
                         target_price_abs = round(option_entry_price * (1 + target_percent), 2)
@@ -4234,8 +4441,8 @@ def api_backtest_mountain_signal():
 
                         trade_index = len(trades) - 1
                         trade_date_value = trades[trade_index]['date']
-                        atm_strike = round_to_atm(entry_price)
-                        option_symbol = get_option_symbol(atm_strike, 'CE', current_candle['date'])
+                        atm_strike = round_to_atm_price(entry_price, strike_step)
+                        option_symbol = get_option_symbol_from_components(instrument_key, atm_strike, 'CE', current_candle['date'])
                         option_entry_price = simulate_option_premium(entry_price, atm_strike, 'CE')
                         stop_loss_price_abs = round(option_entry_price * (1 + stop_loss_percent), 2)
                         target_price_abs = round(option_entry_price * (1 + target_percent), 2)

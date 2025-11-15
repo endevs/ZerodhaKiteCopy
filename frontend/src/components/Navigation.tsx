@@ -7,6 +7,7 @@ interface NavigationProps {
   onLogout: () => void;
   niftyPrice: string;
   bankNiftyPrice: string;
+  isAdmin?: boolean;
 }
 
 const Navigation: React.FC<NavigationProps> = ({
@@ -16,12 +17,14 @@ const Navigation: React.FC<NavigationProps> = ({
   onLogout,
   niftyPrice,
   bankNiftyPrice,
+  isAdmin = false,
 }) => {
   const navItems = [
     { id: 'dashboard', label: 'Dashboard', icon: '📊' },
     { id: 'algo-visualization', label: 'Algo Visualization', icon: '🎯' },
     { id: 'live-trade', label: 'Live Trade', icon: '⚡' },
     { id: 'ai-ml', label: 'AI / ML', icon: '🤖' },
+    ...(isAdmin ? [{ id: 'admin', label: 'Admin', icon: '🛡️' }] : []),
   ];
 
   return (
