@@ -1,3 +1,18 @@
+# CRITICAL: Monkey patch must be done BEFORE importing Flask or any other modules
+# Try eventlet first, fallback to gevent, then threading
+try:
+    import eventlet
+    eventlet.monkey_patch()
+    ASYNC_MODE = 'eventlet'
+except ImportError:
+    try:
+        import gevent
+        from gevent import monkey
+        monkey.patch_all()
+        ASYNC_MODE = 'gevent'
+    except ImportError:
+        ASYNC_MODE = 'threading'
+
 from flask import Flask, request, redirect, render_template, jsonify, session, flash, has_request_context
 import os
 import re
@@ -1303,12 +1318,35 @@ CORS(app,
      allow_headers=['Content-Type', 'Authorization'])
 
 # Configure SocketIO with CORS - allow both frontend and backend origins for development
-socketio_cors_origins = config.CORS_ORIGINS + ['http://localhost:8000', 'http://127.0.0.1:8000']
+# Also include production domain if not already in CORS_ORIGINS
+socketio_cors_origins = list(config.CORS_ORIGINS) + ['http://localhost:8000', 'http://127.0.0.1:8000']
+# Add production domain if FRONTEND_URL is set and not localhost
+if config.FRONTEND_URL and 'localhost' not in config.FRONTEND_URL:
+    production_origin = config.FRONTEND_URL.rstrip('/')
+    if production_origin not in socketio_cors_origins:
+        socketio_cors_origins.append(production_origin)
+        logging.info(f"SocketIO: Added production origin to CORS: {production_origin}")
+
+# Use the async mode determined at the top of the file (before imports)
+if ASYNC_MODE == 'eventlet':
+    logging.info("SocketIO: Using eventlet async mode")
+elif ASYNC_MODE == 'gevent':
+    logging.info("SocketIO: Using gevent async mode")
+else:
+    logging.warning("SocketIO: Using threading mode (eventlet/gevent not available - install for better performance)")
+
 socketio = SocketIO(app, 
                     cors_allowed_origins=socketio_cors_origins,
-                    async_mode='threading',
-                    logger=False,  # Disable SocketIO verbose logging to reduce noise
-                    engineio_logger=False)  # Disable EngineIO verbose logging to reduce noise
+                    async_mode=ASYNC_MODE,
+                    logger=True,  # Enable logging for debugging connection issues
+                    engineio_logger=True,  # Enable engineio logging for debugging
+                    ping_timeout=60,
+                    ping_interval=25,
+                    allow_upgrades=True,
+                    transports=['polling', 'websocket'],
+                    always_connect=True,
+                    cookie=None)  # Disable cookie to avoid session issues
+                    # Note: path defaults to '/socket.io/' - don't override unless needed
 
 # Ensure live trade tables exist on startup
 ensure_live_trade_tables()
@@ -2129,10 +2167,18 @@ def add_cors_headers(response):
 @app.errorhandler(404)
 def not_found(error):
     """Handle 404 errors with JSON response for API routes"""
+    # Don't interfere with Socket.IO paths
+    if request.path.startswith('/socket.io/'):
+        # Let Socket.IO handle it
+        return error
     if request.path.startswith('/api/'):
         return jsonify({'status': 'error', 'message': 'Route not found'}), 404
     # For non-API routes, return a simple text response
     return 'Not Found', 404
+
+# Note: 405 errors for /socket.io/ should be handled by Flask-SocketIO automatically
+# Don't add a 405 handler - let Flask-SocketIO handle Socket.IO paths
+# Flask-SocketIO registers its own middleware to handle /socket.io/ paths
 
 # Initialize KiteConnect
 kite = KiteConnect(api_key="default_api_key") # The API key will be set dynamically
@@ -5042,8 +5088,12 @@ def connect(auth=None):
         user_id_from_session = session.get('user_id')
         access_token_from_session = session.get('access_token')
         access_token_present = bool(access_token_from_session)
-    except:
-        pass  # Silently handle session access errors during handshake
+    except Exception as session_error:
+        # Log session access errors for debugging
+        try:
+            logging.warning(f"SocketIO: Session access error during connect: {session_error}")
+        except:
+            pass  # Silently handle logging errors during handshake
     
     # Always accept connection to avoid WebSocket errors - handle invalid tokens gracefully
     try:
@@ -5157,11 +5207,21 @@ def connect(auth=None):
         
         return True  # Always accept connection to avoid WebSocket errors
     except Exception as e:
-        # Don't log with exc_info during handshake - it might cause write() errors
+        # Log the full error for debugging
         try:
-            logging.error(f"SocketIO connect error: {e}")
+            import traceback
+            error_trace = traceback.format_exc()
+            logging.error(f"SocketIO connect error: {e}\n{error_trace}")
         except:
-            pass  # Silently handle logging errors during handshake
+            try:
+                logging.error(f"SocketIO connect error: {e}")
+            except:
+                pass  # Silently handle logging errors during handshake
+        # Try to emit error to client
+        try:
+            emit('error', {'message': f'Connection error: {str(e)}'})
+        except:
+            pass
         # Always return True to avoid "write() before start_response" - errors are handled via emits
         return True  # Accept connection even on error
 
@@ -7629,12 +7689,15 @@ if __name__ == "__main__":
     logging.info(f"RL module available: {RL_AVAILABLE}")
     logging.info("=" * 60)
     try:
+        # Use socketio.run() which properly handles Socket.IO paths
+        # This is critical - don't use app.run() when using Socket.IO
         socketio.run(
             app,
             debug=config.DEBUG,
             host=config.SERVER_HOST,
             port=config.SERVER_PORT,
-            allow_unsafe_werkzeug=True
+            allow_unsafe_werkzeug=True,
+            use_reloader=False  # Disable reloader to avoid issues with eventlet
         )
     except Exception as e:
         logging.error(f"Failed to start server: {e}", exc_info=True)

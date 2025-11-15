@@ -1,6 +1,7 @@
 Flask
 kiteconnect
 Flask-SocketIO
+eventlet
 APScheduler
 flask-cors
 pandas
