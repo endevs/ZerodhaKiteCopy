@@ -738,7 +738,8 @@ const TrainModelPanel: React.FC = () => {
     const fetchSavedStrategies = async () => {
       setStrategiesLoading(true);
       try {
-        const res = await fetch(apiUrl('/api/strategies'), { credentials: 'include' });
+        // Only fetch approved strategies for dropdowns
+        const res = await fetch(apiUrl('/api/strategies?only_approved=true'), { credentials: 'include' });
         const ct = res.headers.get('content-type') || '';
         const data = ct.includes('application/json') ? await res.json() : { status: 'error', message: await res.text() };
         if (res.ok && data.status === 'success') {

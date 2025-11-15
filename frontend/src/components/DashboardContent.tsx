@@ -83,6 +83,11 @@ interface Strategy {
   updated_at?: string;
   can_edit?: boolean;
   user_id?: number;
+  approval_status?: string;
+  submitted_for_approval_at?: string;
+  approved_at?: string;
+  rejected_at?: string;
+  rejection_reason?: string;
 }
 
 interface StrategyConfigurationProps {
@@ -602,6 +607,9 @@ const SavedStrategies: React.FC<SavedStrategiesProps> = ({
       const response = await fetch(url, {
         method: 'POST',
         credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+        },
       });
       const data =
         response.headers.get('content-type')?.includes('application/json')
@@ -620,6 +628,27 @@ const SavedStrategies: React.FC<SavedStrategiesProps> = ({
       console.error('Saved strategies action failed:', error);
       alert(error.message || 'An unexpected error occurred.');
     }
+  };
+
+  const handleSubmitForApproval = async (strategyId: string) => {
+    await handleAction(
+      apiUrl(`/api/strategy/${strategyId}/submit-for-approval`),
+      'Submit this strategy for admin approval?',
+    );
+  };
+
+  const handleRevokeApproval = async (strategyId: string) => {
+    await handleAction(
+      apiUrl(`/api/strategy/${strategyId}/revoke-approval`),
+      'Revoke approval request and return to draft?',
+    );
+  };
+
+  const handleResubmit = async (strategyId: string) => {
+    await handleAction(
+      apiUrl(`/api/strategy/${strategyId}/resubmit`),
+      'Resubmit this strategy for approval?',
+    );
   };
 
   return (
@@ -642,6 +671,17 @@ const SavedStrategies: React.FC<SavedStrategiesProps> = ({
         data-bs-parent="#dashboardAccordion"
       >
         <div className="accordion-body">
+          <div className="d-flex justify-content-between align-items-center mb-3">
+            <h5 className="mb-0">All Strategies ({strategies.length})</h5>
+            <button
+              className="btn btn-sm btn-outline-primary"
+              onClick={fetchStrategies}
+              title="Refresh strategies list"
+            >
+              <i className="bi bi-arrow-clockwise me-1"></i>
+              Refresh
+            </button>
+          </div>
           <div className="table-responsive">
             <table className="table table-striped align-middle">
               <thead>
@@ -652,6 +692,7 @@ const SavedStrategies: React.FC<SavedStrategiesProps> = ({
                   <th>Lots</th>
                   <th>SL / TP</th>
                   <th>Status</th>
+                  <th>Approval</th>
                   <th>Visibility</th>
                   <th className="text-end">Actions</th>
                 </tr>
@@ -659,7 +700,7 @@ const SavedStrategies: React.FC<SavedStrategiesProps> = ({
               <tbody>
                 {strategies.length === 0 ? (
                   <tr>
-                    <td colSpan={8} className="text-center text-muted py-4">
+                    <td colSpan={9} className="text-center text-muted py-4">
                       <i className="bi bi-inbox fs-1 d-block mb-2" />
                       No strategies saved yet. Build one using the Strategy Builder.
                     </td>
@@ -716,6 +757,31 @@ const SavedStrategies: React.FC<SavedStrategiesProps> = ({
                           </span>
                         </td>
                         <td>
+                          {(() => {
+                            const approvalStatus = strategy.approval_status || 'draft';
+                            const badgeClass = 
+                              approvalStatus === 'approved' ? 'bg-success' :
+                              approvalStatus === 'pending' ? 'bg-warning' :
+                              approvalStatus === 'rejected' ? 'bg-danger' :
+                              'bg-secondary';
+                            const statusLabel = 
+                              approvalStatus === 'approved' ? 'Approved' :
+                              approvalStatus === 'pending' ? 'Pending' :
+                              approvalStatus === 'rejected' ? 'Rejected' :
+                              'Draft';
+                            return (
+                              <span className={`badge ${badgeClass}`}>
+                                {statusLabel}
+                              </span>
+                            );
+                          })()}
+                          {strategy.rejection_reason && (
+                            <div className="small text-danger mt-1" title={strategy.rejection_reason}>
+                              <i className="bi bi-exclamation-triangle" /> Rejected
+                            </div>
+                          )}
+                        </td>
+                        <td>
                           <span className={`badge ${visibilityBadgeClass(visibility)}`}>
                             {visibility === 'public' ? 'Public' : 'Private'}
                           </span>
@@ -740,22 +806,79 @@ const SavedStrategies: React.FC<SavedStrategiesProps> = ({
                               >
                                 <i className="bi bi-pencil" />
                               </button>
-                              {(strategy.status === 'saved' ||
-                                strategy.status === 'paused' ||
-                                strategy.status === 'error' ||
-                                strategy.status === 'sq_off') && (
-                                <button
-                                  className="btn btn-outline-success"
-                                  title="Deploy"
-                                  onClick={() =>
-                                    handleAction(
-                                    apiUrl(`/api/strategy/deploy/${strategy.id}`),
-                                    )
-                                  }
-                                >
-                                  <i className="bi bi-play-fill" />
-                                </button>
-                              )}
+                              {(() => {
+                                const approvalStatus = strategy.approval_status || 'draft';
+                                const canDeploy = approvalStatus === 'approved' && 
+                                  (strategy.status === 'saved' ||
+                                   strategy.status === 'paused' ||
+                                   strategy.status === 'error' ||
+                                   strategy.status === 'sq_off');
+                                
+                                if (canDeploy) {
+                                  return (
+                                    <button
+                                      className="btn btn-outline-success"
+                                      title="Deploy"
+                                      onClick={() =>
+                                        handleAction(
+                                        apiUrl(`/api/strategy/deploy/${strategy.id}`),
+                                        )
+                                      }
+                                    >
+                                      <i className="bi bi-play-fill" />
+                                    </button>
+                                  );
+                                }
+                                return null;
+                              })()}
+                              {(() => {
+                                const approvalStatus = strategy.approval_status || 'draft';
+                                if (approvalStatus === 'draft' && canEdit) {
+                                  return (
+                                    <button
+                                      className="btn btn-outline-primary"
+                                      title="Send for Approval"
+                                      onClick={() => handleSubmitForApproval(strategy.id)}
+                                    >
+                                      <i className="bi bi-send" />
+                                    </button>
+                                  );
+                                }
+                                if (approvalStatus === 'pending' && canEdit) {
+                                  return (
+                                    <button
+                                      className="btn btn-outline-warning"
+                                      title="Revoke Approval"
+                                      onClick={() => handleRevokeApproval(strategy.id)}
+                                    >
+                                      <i className="bi bi-arrow-counterclockwise" />
+                                    </button>
+                                  );
+                                }
+                                if (approvalStatus === 'approved' && canEdit) {
+                                  return (
+                                    <button
+                                      className="btn btn-outline-warning"
+                                      title="Revoke Approval (reset to draft)"
+                                      onClick={() => handleRevokeApproval(strategy.id)}
+                                    >
+                                      <i className="bi bi-arrow-counterclockwise" />
+                                    </button>
+                                  );
+                                }
+                                if (approvalStatus === 'rejected' && canEdit) {
+                                  return (
+                                    <button
+                                      className="btn btn-outline-primary"
+                                      title="Resubmit for Approval"
+                                      onClick={() => handleResubmit(strategy.id)}
+                                    >
+                                      <i className="bi bi-arrow-repeat" />
+                                    </button>
+                                  );
+                                }
+                                return null;
+                              })()}
                               {strategy.status === 'running' && (
                                 <button
                                   className="btn btn-outline-warning"
@@ -769,18 +892,27 @@ const SavedStrategies: React.FC<SavedStrategiesProps> = ({
                                   <i className="bi bi-pause-fill" />
                                 </button>
                               )}
-                              <button
-                                className="btn btn-outline-danger"
-                                title="Delete"
-                                onClick={() =>
-                                  handleAction(
-                                    apiUrl(`/api/strategy/delete/${strategy.id}`),
-                                    'Delete this strategy permanently?',
-                                  )
+                              {(() => {
+                                const approvalStatus = strategy.approval_status || 'draft';
+                                const canDelete = ['draft', 'rejected'].includes(approvalStatus);
+                                if (canDelete) {
+                                  return (
+                                    <button
+                                      className="btn btn-outline-danger"
+                                      title="Delete"
+                                      onClick={() =>
+                                        handleAction(
+                                          apiUrl(`/api/strategy/delete/${strategy.id}`),
+                                          'Delete this strategy permanently?',
+                                        )
+                                      }
+                                    >
+                                      <i className="bi bi-trash" />
+                                    </button>
+                                  );
                                 }
-                              >
-                                <i className="bi bi-trash" />
-                              </button>
+                                return null;
+                              })()}
                             </div>
                           ) : (
                             <span className="badge bg-light text-muted">View only</span>

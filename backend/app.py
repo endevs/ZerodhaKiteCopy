@@ -1367,6 +1367,13 @@ try:
 except Exception as e:
     logging.warning(f"Admin migration failed (may already be done): {e}")
 
+# Run strategy approval migration on startup
+try:
+    from migrate_strategy_approval import migrate_strategy_approval
+    migrate_strategy_approval()
+except Exception as e:
+    logging.warning(f"Strategy approval migration failed (may already be done): {e}")
+
 # Helper utilities for live trade feature
 
 def _get_frontend_url(default: str = 'http://localhost:3000') -> str:
@@ -3383,6 +3390,124 @@ def api_admin_manage_user(user_id):
             logging.error(f"Error updating user: {e}")
             return jsonify({'status': 'error', 'message': str(e)}), 500
 
+@app.route("/api/admin/strategies/pending", methods=['GET'])
+def api_admin_get_pending_strategies():
+    """Get all strategies pending approval (admin only)"""
+    if not _require_admin():
+        return jsonify({'status': 'error', 'message': 'Admin access required'}), 403
+    
+    try:
+        conn = get_db_connection()
+        try:
+            strategies = conn.execute('''
+                SELECT s.*, u.email as user_email, u.mobile as user_mobile
+                FROM strategies s
+                JOIN users u ON s.user_id = u.id
+                WHERE s.approval_status = 'pending'
+                ORDER BY s.submitted_for_approval_at DESC
+            ''').fetchall()
+            
+            strategies_list = []
+            for strategy in strategies:
+                strategy_dict = dict(strategy)
+                strategies_list.append({
+                    'id': strategy_dict.get('id'),
+                    'strategy_name': strategy_dict.get('strategy_name', ''),
+                    'strategy_type': strategy_dict.get('strategy_type', ''),
+                    'instrument': strategy_dict.get('instrument', ''),
+                    'user_id': strategy_dict.get('user_id'),
+                    'user_email': strategy_dict.get('user_email', ''),
+                    'user_mobile': strategy_dict.get('user_mobile', ''),
+                    'created_at': strategy_dict.get('created_at', ''),
+                    'submitted_for_approval_at': strategy_dict.get('submitted_for_approval_at', ''),
+                    'approval_status': strategy_dict.get('approval_status', 'pending')
+                })
+            return jsonify({'status': 'success', 'strategies': strategies_list}), 200
+        finally:
+            conn.close()
+    except Exception as e:
+        logging.error(f"Error fetching pending strategies: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route("/api/admin/strategies/<int:strategy_id>/approve", methods=['POST'])
+def api_admin_approve_strategy(strategy_id):
+    """Approve a strategy (admin only)"""
+    if not _require_admin():
+        return jsonify({'status': 'error', 'message': 'Admin access required'}), 403
+    
+    try:
+        conn = get_db_connection()
+        try:
+            strategy = conn.execute(
+                'SELECT id, approval_status FROM strategies WHERE id = ?', 
+                (strategy_id,)
+            ).fetchone()
+            
+            if not strategy:
+                return jsonify({'status': 'error', 'message': 'Strategy not found'}), 404
+            
+            if strategy['approval_status'] != 'pending':
+                return jsonify({
+                    'status': 'error', 
+                    'message': f'Can only approve pending strategies. Current status: {strategy["approval_status"]}'
+                }), 400
+            
+            admin_id = session.get('user_id')
+            conn.execute(
+                '''UPDATE strategies SET approval_status = 'approved', 
+                   approved_at = CURRENT_TIMESTAMP, approved_by = ?
+                   WHERE id = ?''',
+                (admin_id, strategy_id)
+            )
+            conn.commit()
+            return jsonify({'status': 'success', 'message': 'Strategy approved successfully'}), 200
+        finally:
+            conn.close()
+    except Exception as e:
+        logging.error(f"Error approving strategy: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route("/api/admin/strategies/<int:strategy_id>/reject", methods=['POST'])
+def api_admin_reject_strategy(strategy_id):
+    """Reject a strategy (admin only)"""
+    if not _require_admin():
+        return jsonify({'status': 'error', 'message': 'Admin access required'}), 403
+    
+    try:
+        data = request.get_json() or {}
+        rejection_reason = data.get('rejection_reason', '').strip()
+        
+        conn = get_db_connection()
+        try:
+            strategy = conn.execute(
+                'SELECT id, approval_status FROM strategies WHERE id = ?', 
+                (strategy_id,)
+            ).fetchone()
+            
+            if not strategy:
+                return jsonify({'status': 'error', 'message': 'Strategy not found'}), 404
+            
+            if strategy['approval_status'] != 'pending':
+                return jsonify({
+                    'status': 'error', 
+                    'message': f'Can only reject pending strategies. Current status: {strategy["approval_status"]}'
+                }), 400
+            
+            admin_id = session.get('user_id')
+            conn.execute(
+                '''UPDATE strategies SET approval_status = 'rejected', 
+                   rejected_at = CURRENT_TIMESTAMP, rejected_by = ?, rejection_reason = ?
+                   WHERE id = ?''',
+                (admin_id, rejection_reason if rejection_reason else None, strategy_id)
+            )
+            conn.commit()
+            return jsonify({'status': 'success', 'message': 'Strategy rejected successfully'}), 200
+        finally:
+            conn.close()
+    except Exception as e:
+        logging.error(f"Error rejecting strategy: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
 @app.route("/api/user-data")
 def api_user_data():
     if 'user_id' not in session:
@@ -3584,7 +3709,14 @@ def save_strategy():
     # Handle both JSON and form data
     if request.is_json:
         data = request.get_json()
-        strategy_id = data.get('strategy_id')
+        strategy_id_raw = data.get('strategy_id')
+        # Convert to int if it's a string or number, None if null/empty
+        strategy_id = None
+        if strategy_id_raw is not None and strategy_id_raw != '':
+            try:
+                strategy_id = int(strategy_id_raw)
+            except (ValueError, TypeError):
+                strategy_id = None
         strategy_name_input = data.get('strategy-name') or data.get('strategy_name')
         strategy_type = data.get('strategy') or data.get('strategy_type')
         instrument = data.get('instrument')
@@ -3668,19 +3800,51 @@ def save_strategy():
             if blueprint_text == '':
                 blueprint_text = None
         
+        # Validate required fields
+        if not strategy_name_input or not strategy_name_input.strip():
+            conn.close()
+            return jsonify({'status': 'error', 'message': 'Strategy name is required'}), 400
+        
+        if not strategy_type:
+            strategy_type = 'custom'
+        
+        if not instrument:
+            instrument = 'NIFTY'
+        
+        if not segment:
+            segment = 'Option'
+        
         if strategy_id:
-            # Update existing strategy
+            # Check if strategy exists and belongs to user
+            try:
+                existing = conn.execute('SELECT approval_status FROM strategies WHERE id = ? AND user_id = ?', 
+                                       (strategy_id, user_id)).fetchone()
+                if not existing:
+                    conn.close()
+                    logging.error(f"Strategy {strategy_id} not found for user {user_id}")
+                    return jsonify({'status': 'error', 'message': 'Strategy not found or access denied'}), 404
+            except Exception as e:
+                conn.close()
+                logging.error(f"Error checking strategy {strategy_id}: {e}")
+                return jsonify({'status': 'error', 'message': f'Error validating strategy: {str(e)}'}), 500
+            
+            # Allow editing for any status, but reset approval status to draft when edited
+            # Convert Row to dict for safe access
+            existing_dict = dict(existing) if existing else {}
+            current_status = existing_dict.get('approval_status') or 'draft'
+            # When a strategy is edited, reset it to draft so it needs re-approval
+            new_status = 'draft'
             conn.execute(
                 '''UPDATE strategies SET strategy_name = ?, strategy_type = ?, instrument = ?, candle_time = ?, 
                    start_time = ?, end_time = ?, stop_loss = ?, target_profit = ?, total_lot = ?, 
                    trailing_stop_loss = ?, segment = ?, trade_type = ?, strike_price = ?, expiry_type = ?, 
                    ema_period = ?, visibility = ?, indicators = ?, entry_rules = ?, exit_rules = ?, blueprint = ?, 
-                   updated_at = CURRENT_TIMESTAMP 
+                   approval_status = ?, updated_at = CURRENT_TIMESTAMP 
                    WHERE id = ? AND user_id = ?''',
                 (strategy_name_input, strategy_type, instrument, candle_time, execution_start, execution_end, 
                  stop_loss, target_profit, total_lot, trailing_stop_loss, segment, trade_type, strike_price, 
                  expiry_type, ema_period, visibility_value, indicators_json, entry_rules_json, exit_rules_json, 
-                 blueprint_text, strategy_id, user_id)
+                 blueprint_text, new_status, strategy_id, user_id)
             )
             message = 'Strategy updated successfully!'
         else:
@@ -3688,8 +3852,8 @@ def save_strategy():
             conn.execute(
                 '''INSERT INTO strategies (user_id, strategy_name, strategy_type, instrument, candle_time, start_time, 
                    end_time, stop_loss, target_profit, total_lot, trailing_stop_loss, segment, trade_type, 
-                   strike_price, expiry_type, ema_period, visibility, indicators, entry_rules, exit_rules, blueprint) 
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                   strike_price, expiry_type, ema_period, visibility, indicators, entry_rules, exit_rules, blueprint, approval_status) 
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft')''',
                 (user_id, strategy_name_input, strategy_type, instrument, candle_time, execution_start, 
                  execution_end, stop_loss, target_profit, total_lot, trailing_stop_loss, segment, trade_type, 
                  strike_price, expiry_type, ema_period, visibility_value, indicators_json, entry_rules_json, 
@@ -3700,8 +3864,8 @@ def save_strategy():
         return jsonify({'status': 'success', 'message': message})
     except Exception as e:
         conn.rollback()
-        logging.error(f"Error saving strategy: {e}")
-        return jsonify({'status': 'error', 'message': f'Error saving strategy: {e}'}), 500
+        logging.error(f"Error saving strategy: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': f'Error saving strategy: {str(e)}'}), 500
     finally:
         conn.close()
 
@@ -3718,6 +3882,124 @@ def edit_strategy(strategy_id):
         return jsonify({'status': 'success', 'strategy': dict(strategy)})
     else:
         return jsonify({'status': 'error', 'message': 'Strategy not found'}), 404
+
+@app.route("/api/strategy/<int:strategy_id>/submit-for-approval", methods=['POST'])
+def submit_strategy_for_approval(strategy_id):
+    """Submit strategy for admin approval"""
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+    
+    user_id = session['user_id']
+    conn = get_db_connection()
+    try:
+        strategy = conn.execute(
+            'SELECT id, approval_status, user_id FROM strategies WHERE id = ?', 
+            (strategy_id,)
+        ).fetchone()
+        
+        if not strategy:
+            return jsonify({'status': 'error', 'message': 'Strategy not found'}), 404
+        
+        if strategy['user_id'] != user_id:
+            return jsonify({'status': 'error', 'message': 'Access denied'}), 403
+        
+        current_status = strategy['approval_status'] or 'draft'
+        if current_status != 'draft':
+            return jsonify({
+                'status': 'error', 
+                'message': f'Strategy must be in draft status. Current status: {current_status}'
+            }), 400
+        
+        conn.execute(
+            '''UPDATE strategies SET approval_status = 'pending', 
+               submitted_for_approval_at = CURRENT_TIMESTAMP 
+               WHERE id = ?''',
+            (strategy_id,)
+        )
+        conn.commit()
+        return jsonify({'status': 'success', 'message': 'Strategy submitted for approval'}), 200
+    finally:
+        conn.close()
+
+@app.route("/api/strategy/<int:strategy_id>/revoke-approval", methods=['POST'])
+def revoke_strategy_approval(strategy_id):
+    """Revoke strategy from approval (back to draft) - works for both pending and approved"""
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+    
+    user_id = session['user_id']
+    conn = get_db_connection()
+    try:
+        strategy = conn.execute(
+            'SELECT id, approval_status, user_id FROM strategies WHERE id = ?', 
+            (strategy_id,)
+        ).fetchone()
+        
+        if not strategy:
+            return jsonify({'status': 'error', 'message': 'Strategy not found'}), 404
+        
+        if strategy['user_id'] != user_id:
+            return jsonify({'status': 'error', 'message': 'Access denied'}), 403
+        
+        current_status = strategy['approval_status'] or 'draft'
+        if current_status not in ('pending', 'approved'):
+            return jsonify({
+                'status': 'error', 
+                'message': f'Can only revoke pending or approved strategies. Current status: {current_status}'
+            }), 400
+        
+        # Reset to draft and clear approval-related fields
+        conn.execute(
+            '''UPDATE strategies SET approval_status = 'draft', 
+               submitted_for_approval_at = NULL,
+               approved_at = NULL, approved_by = NULL,
+               rejected_at = NULL, rejected_by = NULL, rejection_reason = NULL
+               WHERE id = ?''',
+            (strategy_id,)
+        )
+        conn.commit()
+        return jsonify({'status': 'success', 'message': 'Strategy approval revoked and reset to draft'}), 200
+    finally:
+        conn.close()
+
+@app.route("/api/strategy/<int:strategy_id>/resubmit", methods=['POST'])
+def resubmit_strategy(strategy_id):
+    """Resubmit rejected strategy for approval"""
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+    
+    user_id = session['user_id']
+    conn = get_db_connection()
+    try:
+        strategy = conn.execute(
+            'SELECT id, approval_status, user_id FROM strategies WHERE id = ?', 
+            (strategy_id,)
+        ).fetchone()
+        
+        if not strategy:
+            return jsonify({'status': 'error', 'message': 'Strategy not found'}), 404
+        
+        if strategy['user_id'] != user_id:
+            return jsonify({'status': 'error', 'message': 'Access denied'}), 403
+        
+        current_status = strategy['approval_status'] or 'draft'
+        if current_status != 'rejected':
+            return jsonify({
+                'status': 'error', 
+                'message': f'Can only resubmit rejected strategies. Current status: {current_status}'
+            }), 400
+        
+        conn.execute(
+            '''UPDATE strategies SET approval_status = 'pending', 
+               submitted_for_approval_at = CURRENT_TIMESTAMP,
+               rejected_at = NULL, rejected_by = NULL, rejection_reason = NULL
+               WHERE id = ?''',
+            (strategy_id,)
+        )
+        conn.commit()
+        return jsonify({'status': 'success', 'message': 'Strategy resubmitted for approval'}), 200
+    finally:
+        conn.close()
 
 @app.route("/strategy/delete/<int:strategy_id>", methods=['POST'])
 @app.route("/api/strategy/delete/<int:strategy_id>", methods=['POST'])
@@ -3737,6 +4019,26 @@ def delete_strategy(strategy_id):
 
     conn = get_db_connection()
     try:
+        # Check strategy exists and belongs to user
+        strategy = conn.execute(
+            'SELECT id, approval_status, user_id FROM strategies WHERE id = ?', 
+            (strategy_id,)
+        ).fetchone()
+        
+        if not strategy:
+            return jsonify({'status': 'error', 'message': 'Strategy not found'}), 404
+        
+        if strategy['user_id'] != session['user_id']:
+            return jsonify({'status': 'error', 'message': 'Access denied'}), 403
+        
+        # Only allow deletion if status is draft or rejected
+        approval_status = strategy['approval_status'] or 'draft'
+        if approval_status not in ('draft', 'rejected'):
+            return jsonify({
+                'status': 'error', 
+                'message': f'Cannot delete strategy with status: {approval_status}. Please revoke approval first.'
+            }), 400
+        
         conn.execute('DELETE FROM strategies WHERE id = ? AND user_id = ?', (strategy_id, session['user_id']))
         conn.commit()
         return jsonify({'status': 'success', 'message': 'Strategy deleted successfully!'})
@@ -3766,6 +4068,14 @@ def deploy_strategy(strategy_id):
 
     if not strategy_data:
         return jsonify({'status': 'error', 'message': 'Strategy not found'}), 404
+    
+    # Check if strategy is approved
+    approval_status = strategy_data.get('approval_status') if strategy_data else None
+    if approval_status != 'approved':
+        return jsonify({
+            'status': 'error', 
+            'message': f'Strategy must be approved before deployment. Current status: {approval_status or "draft"}'
+        }), 400
 
     # Handle both form and JSON requests - be lenient with parsing
     paper_trade = False
@@ -3965,17 +4275,31 @@ def api_get_strategies():
 
     conn = get_db_connection()
     user_id = session['user_id']
-    strategies = conn.execute(
-        '''
+    
+    # Get filter parameter
+    approval_filter = request.args.get('approval_status')
+    only_approved = request.args.get('only_approved', 'false').lower() == 'true'
+    
+    # Build query
+    query = '''
         SELECT 
             s.*,
             CASE WHEN s.user_id = ? THEN 1 ELSE 0 END AS can_edit
         FROM strategies s
-        WHERE s.user_id = ? OR s.visibility = 'public'
-        ORDER BY can_edit DESC, datetime(s.updated_at) DESC
-        ''',
-        (user_id, user_id)
-    ).fetchall()
+        WHERE (s.user_id = ? OR s.visibility = 'public')
+    '''
+    params = [user_id, user_id]
+    
+    # Add approval status filter
+    if only_approved:
+        query += " AND (s.approval_status = 'approved' OR s.approval_status IS NULL)"
+    elif approval_filter:
+        query += " AND s.approval_status = ?"
+        params.append(approval_filter)
+    
+    query += " ORDER BY can_edit DESC, datetime(s.updated_at) DESC"
+    
+    strategies = conn.execute(query, params).fetchall()
     conn.close()
 
     # Convert Row objects to dictionaries for JSON serialization
