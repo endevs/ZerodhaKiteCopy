@@ -36,11 +36,26 @@ const resolvedApiBase =
   sanitizeBase(process.env.REACT_APP_API_BASE) || inferBaseFromWindow();
 
 // Socket.IO should use the same base as API, but ensure it uses the correct protocol
-const resolvedSocketBase =
+// Remove any port 3000 that might be inferred incorrectly
+let resolvedSocketBase =
   sanitizeBase(process.env.REACT_APP_SOCKET_BASE) || resolvedApiBase;
+
+// Ensure we don't append port 3000 for production
+if (resolvedSocketBase && !resolvedSocketBase.includes('localhost') && !resolvedSocketBase.includes('127.0.0.1')) {
+  // For production, remove any port 3000
+  resolvedSocketBase = resolvedSocketBase.replace(/:3000(\/|$)/, '$1');
+}
 
 export const API_BASE_URL = resolvedApiBase;
 export const SOCKET_BASE_URL = resolvedSocketBase;
+
+// Debug logging (only in development)
+if (process.env.NODE_ENV === 'development') {
+  console.log('API_BASE_URL:', API_BASE_URL);
+  console.log('SOCKET_BASE_URL:', SOCKET_BASE_URL);
+  console.log('REACT_APP_API_BASE:', process.env.REACT_APP_API_BASE);
+  console.log('REACT_APP_SOCKET_BASE:', process.env.REACT_APP_SOCKET_BASE);
+}
 
 export const apiUrl = (path: string): string => {
   if (!path.startsWith('/')) {
