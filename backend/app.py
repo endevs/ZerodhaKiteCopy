@@ -2733,21 +2733,51 @@ def verify_otp():
 
     return render_template('verify_otp.html', email=email)
 
-@app.route('/api/verify_otp', methods=['POST'])
-@app.route('/api/verify-otp', methods=['POST'])
+@app.route('/api/verify_otp', methods=['POST', 'OPTIONS'])
+@app.route('/api/verify-otp', methods=['POST', 'OPTIONS'])
 def api_verify_otp():
     """API endpoint for OTP verification that accepts JSON"""
+    if request.method == 'OPTIONS':
+        # Handle CORS preflight
+        return '', 200
+    
     try:
+        # Log request details for debugging
+        logging.info(f"Verify OTP request - Content-Type: {request.content_type}, Method: {request.method}")
+        
+        # Try to get JSON data
+        data = None
         if request.is_json:
-            data = request.get_json()
+            data = request.get_json(silent=True)
+            logging.info(f"Verify OTP request - Parsed JSON: {data}")
+        elif request.content_type and 'application/json' in request.content_type:
+            try:
+                data = request.get_json(force=True)
+                logging.info(f"Verify OTP request - Force parsed JSON: {data}")
+            except Exception as e:
+                logging.error(f"Verify OTP request - Failed to parse JSON: {e}")
+                logging.info(f"Verify OTP request - Raw data: {request.data}")
+        
+        if data:
             otp_entered = data.get('otp')
             email = data.get('email')
         else:
+            # Fallback to form data
             otp_entered = request.form.get('otp')
             email = request.form.get('email')
+            logging.info(f"Verify OTP request - Using form data, email: {email}, otp: {'*' * len(otp_entered) if otp_entered else 'None'}")
         
         if not all([otp_entered, email]):
-            return jsonify({'status': 'error', 'message': 'OTP and email are required'}), 400
+            logging.warning("Verify OTP request - Missing OTP or email")
+            return jsonify({
+                'status': 'error', 
+                'message': 'OTP and email are required',
+                'debug': {
+                    'has_otp': bool(otp_entered),
+                    'has_email': bool(email),
+                    'content_type': request.content_type
+                }
+            }), 400
 
         conn = get_db_connection()
         user = conn.execute('SELECT * FROM users WHERE email = ?', (email,)).fetchone()

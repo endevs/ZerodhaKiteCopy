@@ -104,12 +104,14 @@ const EnhancedRealTimeStrategyMonitor: React.FC<EnhancedRealTimeStrategyMonitorP
   useEffect(() => {
     // Initialize Socket connection
     const newSocket = io(SOCKET_BASE_URL, {
-      transports: ['polling'],
+      path: '/socket.io/',
+      transports: ['polling', 'websocket'],
       reconnection: true,
       reconnectionDelay: 1000,
       reconnectionDelayMax: 5000,
       reconnectionAttempts: Infinity,
-      timeout: 20000
+      timeout: 20000,
+      autoConnect: true
     });
     setSocket(newSocket);
 

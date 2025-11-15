@@ -36,7 +36,11 @@ const RealTimeStrategyMonitor: React.FC<RealTimeStrategyMonitorProps> = ({ strat
 
   useEffect(() => {
     // Initialize Socket connection
-  const newSocket = io(SOCKET_BASE_URL, { transports: ['polling'] });
+  const newSocket = io(SOCKET_BASE_URL, { 
+    path: '/socket.io/',
+    transports: ['polling', 'websocket'],
+    autoConnect: true
+  });
     setSocket(newSocket);
 
     newSocket.on('connect', () => {

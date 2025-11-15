@@ -147,8 +147,10 @@ const PaperTradeContent: React.FC<PaperTradeContentProps> = () => {
     if (!isRunning || !selectedStrategy) return;
 
     const socket = io(SOCKET_BASE_URL, {
+      path: '/socket.io/',
       transports: ['polling', 'websocket'],
-      withCredentials: true
+      withCredentials: true,
+      autoConnect: true
     });
     
     socket.on('connect', () => {
