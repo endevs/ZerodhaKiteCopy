@@ -2733,13 +2733,22 @@ def verify_otp():
 
     return render_template('verify_otp.html', email=email)
 
-@app.route('/api/verify_otp', methods=['POST', 'OPTIONS'])
-@app.route('/api/verify-otp', methods=['POST', 'OPTIONS'])
+@app.route('/api/verify_otp', methods=['GET', 'POST', 'OPTIONS'])
+@app.route('/api/verify-otp', methods=['GET', 'POST', 'OPTIONS'])
 def api_verify_otp():
     """API endpoint for OTP verification that accepts JSON"""
     if request.method == 'OPTIONS':
         # Handle CORS preflight
         return '', 200
+    
+    if request.method == 'GET':
+        # GET request - return endpoint information
+        return jsonify({
+            'status': 'success',
+            'message': 'OTP verification endpoint is available',
+            'methods': ['POST'],
+            'description': 'Send POST request with JSON body containing "email" and "otp" fields'
+        }), 200
     
     try:
         # Log request details for debugging
