@@ -8,6 +8,7 @@ import ChartModal from './ChartModal';
 import EnhancedRealTimeStrategyMonitor from './EnhancedRealTimeStrategyMonitor';
 import AIMLContent from './AIMLContent';
 import LiveTradeContent from './LiveTradeContent';
+import AdminContent from './AdminContent';
 import { apiUrl, SOCKET_BASE_URL } from '../config/api';
 
 const Dashboard: React.FC = () => {
@@ -15,6 +16,7 @@ const Dashboard: React.FC = () => {
   const [userName, setUserName] = useState<string>('Guest');
   const [niftyPrice, setNiftyPrice] = useState<string>('Loading...');
   const [bankNiftyPrice, setBankNiftyPrice] = useState<string>('Loading...');
+  const [isAdmin, setIsAdmin] = useState<boolean>(false);
 
   const [showChartModal, setShowChartModal] = useState<boolean>(false);
   const [chartInstrumentToken, setChartInstrumentToken] = useState<string | undefined>(undefined);
@@ -51,6 +53,16 @@ const Dashboard: React.FC = () => {
         if (response.ok) {
           setUserName(data.user_name || 'User');
           const hasAccessToken = data.access_token_present || false;
+          
+          // Check admin status
+          try {
+            const adminResponse = await fetch(apiUrl('/api/admin/check'), { credentials: 'include' });
+            const adminData = await adminResponse.json();
+            setIsAdmin(adminData.is_admin || false);
+          } catch (err) {
+            console.error('Error checking admin status:', err);
+            setIsAdmin(false);
+          }
           
           // If access token was just set (user just logged in), request ticker startup via HTTP
           if (hasAccessToken) {
@@ -258,6 +270,8 @@ const Dashboard: React.FC = () => {
         return <LiveTradeContent />;
       case 'ai-ml':
         return <AIMLContent />;
+      case 'admin':
+        return <AdminContent />;
       default:
         return <DashboardContent onViewLiveStrategy={handleViewLiveStrategy} />;
     }
@@ -272,6 +286,7 @@ const Dashboard: React.FC = () => {
         onLogout={handleLogout}
         niftyPrice={niftyPrice}
         bankNiftyPrice={bankNiftyPrice}
+        isAdmin={isAdmin}
       />
     }>
       {renderContent()}
