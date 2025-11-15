@@ -2847,14 +2847,28 @@ def login():
 
     return render_template("login.html")
 
-@app.route("/api/login", methods=['POST'])
+@app.route("/api/login", methods=['POST', 'OPTIONS'])
 def api_login():
     """API endpoint for login that accepts JSON"""
+    if request.method == 'OPTIONS':
+        # Handle CORS preflight
+        return '', 200
+    
     try:
+        # Try to get JSON data
+        data = None
         if request.is_json:
-            data = request.get_json()
+            data = request.get_json(silent=True)
+        elif request.content_type and 'application/json' in request.content_type:
+            try:
+                data = request.get_json(force=True)
+            except Exception:
+                pass
+        
+        if data:
             email = data.get('email')
         else:
+            # Fallback to form data
             email = request.form.get('email')
         
         if not email:
@@ -2913,7 +2927,16 @@ def zerodha_login():
 @app.route("/callback")
 def callback():
     if 'user_id' not in session:
-        return redirect('/')
+        # Try to infer frontend URL from request if session is missing
+        frontend_url = config.FRONTEND_URL
+        if not frontend_url or frontend_url == 'http://localhost:3000':
+            # Infer from request origin for production
+            origin = request.headers.get('Origin', '')
+            if origin and 'localhost' not in origin:
+                frontend_url = origin
+            else:
+                frontend_url = 'http://localhost:3000'
+        return redirect(f"{frontend_url}/")
 
     request_token = request.args.get("request_token")
     if not request_token:
@@ -2933,8 +2956,28 @@ def callback():
         access_token = data["access_token"]
         session['access_token'] = access_token
         kite.set_access_token(access_token)
+        
+        # Update stored token in database
         _update_user_access_token(session['user_id'], access_token)
-        return redirect(f"{config.FRONTEND_URL}/dashboard")
+        
+        # Determine frontend URL (support both localhost and production)
+        frontend_url = config.FRONTEND_URL
+        if not frontend_url or frontend_url == 'http://localhost:3000':
+            # Infer from request origin for production
+            origin = request.headers.get('Origin', '')
+            referer = request.headers.get('Referer', '')
+            if origin and 'localhost' not in origin:
+                frontend_url = origin
+            elif referer:
+                try:
+                    from urllib.parse import urlparse
+                    parsed = urlparse(referer)
+                    if parsed.hostname and 'localhost' not in parsed.hostname:
+                        frontend_url = f"{parsed.scheme}://{parsed.netloc}"
+                except Exception:
+                    pass
+        
+        return redirect(f"{frontend_url}/dashboard")
     except Exception as e:
         logging.error(f"Error generating session: {e}")
         return "Error generating session", 500
