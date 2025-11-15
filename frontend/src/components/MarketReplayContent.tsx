@@ -68,7 +68,11 @@ const MarketReplayContent: React.FC = () => {
 
   useEffect(() => {
     // Initialize socket connection
-    socketRef.current = io(SOCKET_BASE_URL, { transports: ['polling'] });
+    socketRef.current = io(SOCKET_BASE_URL, { 
+      path: '/socket.io/',
+      transports: ['polling', 'websocket'],
+      autoConnect: true
+    });
     
     const socket = socketRef.current;
 

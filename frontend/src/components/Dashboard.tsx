@@ -96,13 +96,16 @@ const Dashboard: React.FC = () => {
     }, 5000); // Check every 5 seconds
 
     const socket: Socket = io(SOCKET_BASE_URL, {
-      transports: ['polling'],
+      path: '/socket.io/',
+      transports: ['polling', 'websocket'],
       reconnection: true,
       reconnectionDelay: 1000,
       reconnectionDelayMax: 5000,
       reconnectionAttempts: Infinity,
       timeout: 20000,
-      forceNew: false
+      forceNew: false,
+      // Explicitly set autoConnect to prevent premature connections
+      autoConnect: true
     });
     
     socketRef.current = socket;

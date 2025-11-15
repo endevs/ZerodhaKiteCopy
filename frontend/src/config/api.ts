@@ -32,29 +32,64 @@ const inferBaseFromWindow = (): string => {
 };
 
 // For production, prefer explicit env vars, otherwise infer from window location
-const resolvedApiBase =
+// React appends REACT_APP_ prefix to env vars during build
+// IMPORTANT: Environment variables are embedded at BUILD TIME, not runtime
+let resolvedApiBase =
   sanitizeBase(process.env.REACT_APP_API_BASE) || inferBaseFromWindow();
+
+// Runtime override: If we're in production (not localhost) but API_BASE_URL is localhost,
+// override it to use the current domain (for cases where build didn't use .env.production)
+if (typeof window !== 'undefined') {
+  const { protocol, hostname } = window.location;
+  const isProduction = hostname !== 'localhost' && hostname !== '127.0.0.1';
+  const isLocalhostUrl = resolvedApiBase && (resolvedApiBase.includes('localhost') || resolvedApiBase.includes('127.0.0.1'));
+  
+  if (isProduction && isLocalhostUrl) {
+    // Override: use current domain for production
+    resolvedApiBase = `${protocol}//${hostname}`;
+  }
+}
 
 // Socket.IO should use the same base as API, but ensure it uses the correct protocol
 // Remove any port 3000 that might be inferred incorrectly
 let resolvedSocketBase =
   sanitizeBase(process.env.REACT_APP_SOCKET_BASE) || resolvedApiBase;
 
+// Runtime override for Socket.IO as well
+if (typeof window !== 'undefined') {
+  const { protocol, hostname } = window.location;
+  const isProduction = hostname !== 'localhost' && hostname !== '127.0.0.1';
+  const isLocalhostUrl = resolvedSocketBase && (resolvedSocketBase.includes('localhost') || resolvedSocketBase.includes('127.0.0.1'));
+  
+  if (isProduction && isLocalhostUrl) {
+    // Override: use current domain for production
+    resolvedSocketBase = `${protocol}//${hostname}`;
+  }
+}
+
 // Ensure we don't append port 3000 for production
 if (resolvedSocketBase && !resolvedSocketBase.includes('localhost') && !resolvedSocketBase.includes('127.0.0.1')) {
-  // For production, remove any port 3000
+  // For production, remove any port 3000 or other ports
   resolvedSocketBase = resolvedSocketBase.replace(/:3000(\/|$)/, '$1');
+  resolvedSocketBase = resolvedSocketBase.replace(/:(\d+)(\/|$)/, '$2'); // Remove any port number in production
+}
+
+// Final cleanup: ensure no trailing slashes and proper format
+if (resolvedSocketBase) {
+  resolvedSocketBase = resolvedSocketBase.replace(/\/+$/, '');
 }
 
 export const API_BASE_URL = resolvedApiBase;
 export const SOCKET_BASE_URL = resolvedSocketBase;
 
-// Debug logging (only in development)
-if (process.env.NODE_ENV === 'development') {
+// Debug logging - only show if explicitly enabled or in development
+// Note: In production builds, NODE_ENV is replaced at build time
+if (typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')) {
   console.log('API_BASE_URL:', API_BASE_URL);
   console.log('SOCKET_BASE_URL:', SOCKET_BASE_URL);
   console.log('REACT_APP_API_BASE:', process.env.REACT_APP_API_BASE);
   console.log('REACT_APP_SOCKET_BASE:', process.env.REACT_APP_SOCKET_BASE);
+  console.log('Window location:', window.location.href);
 }
 
 export const apiUrl = (path: string): string => {
