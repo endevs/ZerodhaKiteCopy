@@ -34,6 +34,7 @@ from rules import load_mountain_signal_pe_rules
 from ticker import Ticker
 import uuid
 import sqlite3
+from sqlite3 import OperationalError as SqliteOperationalError
 import smtplib, ssl
 import socket
 import math
@@ -1319,7 +1320,14 @@ CORS(app,
 
 # Configure SocketIO with CORS - allow both frontend and backend origins for development
 # Also include production domain if not already in CORS_ORIGINS
-socketio_cors_origins = list(config.CORS_ORIGINS) + ['http://localhost:8000', 'http://127.0.0.1:8000']
+# Build CORS origins list - include backend origin for development
+# In production, CORS_ORIGINS should include production domain
+socketio_cors_origins = list(config.CORS_ORIGINS)
+# Add localhost origins for development (safe to include even in production)
+if 'http://localhost:8000' not in socketio_cors_origins:
+    socketio_cors_origins.append('http://localhost:8000')
+if 'http://127.0.0.1:8000' not in socketio_cors_origins:
+    socketio_cors_origins.append('http://127.0.0.1:8000')
 # Add production domain if FRONTEND_URL is set and not localhost
 if config.FRONTEND_URL and 'localhost' not in config.FRONTEND_URL:
     production_origin = config.FRONTEND_URL.rstrip('/')
@@ -1352,6 +1360,47 @@ socketio = SocketIO(app,
 ensure_live_trade_tables()
 
 # Helper utilities for live trade feature
+
+def _get_frontend_url(default: str = 'http://localhost:3000') -> str:
+    """
+    Get frontend URL that works in both local and production environments.
+    
+    Priority:
+    1. config.FRONTEND_URL (if set and not localhost default)
+    2. Request Origin header (if available and not localhost)
+    3. Request Referer header (if available and not localhost)
+    4. Default fallback (usually localhost:3000)
+    
+    Args:
+        default: Default URL to use if none can be determined
+        
+    Returns:
+        Frontend URL string
+    """
+    # Check config first
+    frontend_url = config.FRONTEND_URL
+    if frontend_url and frontend_url != 'http://localhost:3000':
+        return frontend_url
+    
+    # Try to infer from request headers (only if in request context)
+    if has_request_context():
+        origin = request.headers.get('Origin', '')
+        if origin and 'localhost' not in origin and '127.0.0.1' not in origin:
+            return origin
+        
+        referer = request.headers.get('Referer', '')
+        if referer:
+            try:
+                from urllib.parse import urlparse
+                parsed = urlparse(referer)
+                if parsed.hostname and 'localhost' not in parsed.hostname and '127.0.0.1' not in parsed.hostname:
+                    return f"{parsed.scheme}://{parsed.netloc}"
+            except Exception:
+                pass
+    
+    # Fallback to default
+    return default
+
 def _get_user_record(user_id: int) -> Optional[sqlite3.Row]:
     conn = get_db_connection()
     try:
@@ -2985,19 +3034,43 @@ def api_login():
                 }
             }), 400
         
-        conn = get_db_connection()
-        user = conn.execute('SELECT * FROM users WHERE email = ?', (email,)).fetchone()
-        conn.close()
+        # Use try-finally to ensure connection is always closed
+        try:
+            conn = get_db_connection()
+            try:
+                user = conn.execute('SELECT * FROM users WHERE email = ?', (email,)).fetchone()
+            finally:
+                conn.close()
+        except SqliteOperationalError as db_err:
+            if 'locked' in str(db_err).lower():
+                logging.error(f"Database locked in api_login (SELECT): {db_err}")
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Database is temporarily busy. Please try again in a moment.'
+                }), 503  # Service Unavailable
+            raise
 
         if user:
             otp = secrets.token_hex(3).upper()
             otp_expiry = datetime.datetime.now() + datetime.timedelta(minutes=10)
 
-            conn = get_db_connection()
-            conn.execute('UPDATE users SET otp = ?, otp_expiry = ? WHERE id = ?',
-                         (otp, otp_expiry.strftime('%Y-%m-%d %H:%M:%S'), user['id']))
-            conn.commit()
-            conn.close()
+            # Use try-finally to ensure connection is always closed
+            try:
+                conn = get_db_connection()
+                try:
+                    conn.execute('UPDATE users SET otp = ?, otp_expiry = ? WHERE id = ?',
+                                 (otp, otp_expiry.strftime('%Y-%m-%d %H:%M:%S'), user['id']))
+                    conn.commit()
+                finally:
+                    conn.close()
+            except SqliteOperationalError as db_err:
+                if 'locked' in str(db_err).lower():
+                    logging.error(f"Database locked in api_login (UPDATE): {db_err}")
+                    return jsonify({
+                        'status': 'error',
+                        'message': 'Database is temporarily busy. Please try again in a moment.'
+                    }), 503  # Service Unavailable
+                raise
 
             send_email(email, otp)
             return jsonify({
@@ -3022,14 +3095,8 @@ def api_login():
 @app.route("/api/zerodha_login")  # API alias for consistency
 def zerodha_login():
     if 'user_id' not in session:
-        # Try to infer frontend URL from request
-        frontend_url = config.FRONTEND_URL
-        if not frontend_url or frontend_url == 'http://localhost:3000':
-            origin = request.headers.get('Origin', '')
-            if origin and 'localhost' not in origin:
-                frontend_url = origin
-            else:
-                frontend_url = 'http://localhost:3000'
+        # Use helper function that works in both local and production
+        frontend_url = _get_frontend_url()
         return redirect(f"{frontend_url}/")
 
     conn = get_db_connection()
@@ -3037,14 +3104,8 @@ def zerodha_login():
     conn.close()
 
     if not user or not user['app_key'] or not user['app_secret']:
-        # Determine frontend URL for redirect
-        frontend_url = config.FRONTEND_URL
-        if not frontend_url or frontend_url == 'http://localhost:3000':
-            origin = request.headers.get('Origin', '')
-            if origin and 'localhost' not in origin:
-                frontend_url = origin
-            else:
-                frontend_url = 'http://localhost:3000'
+        # Use helper function that works in both local and production
+        frontend_url = _get_frontend_url()
         return redirect(f"{frontend_url}/welcome?credentials=missing")
 
     kite.api_key = user['app_key']
@@ -3055,15 +3116,8 @@ def zerodha_login():
 @app.route("/callback")
 def callback():
     if 'user_id' not in session:
-        # Try to infer frontend URL from request if session is missing
-        frontend_url = config.FRONTEND_URL
-        if not frontend_url or frontend_url == 'http://localhost:3000':
-            # Infer from request origin for production
-            origin = request.headers.get('Origin', '')
-            if origin and 'localhost' not in origin:
-                frontend_url = origin
-            else:
-                frontend_url = 'http://localhost:3000'
+        # Use helper function that works in both local and production
+        frontend_url = _get_frontend_url()
         return redirect(f"{frontend_url}/")
 
     request_token = request.args.get("request_token")
@@ -3088,23 +3142,8 @@ def callback():
         # Update stored token in database
         _update_user_access_token(session['user_id'], access_token)
         
-        # Determine frontend URL (support both localhost and production)
-        frontend_url = config.FRONTEND_URL
-        if not frontend_url or frontend_url == 'http://localhost:3000':
-            # Infer from request origin for production
-            origin = request.headers.get('Origin', '')
-            referer = request.headers.get('Referer', '')
-            if origin and 'localhost' not in origin:
-                frontend_url = origin
-            elif referer:
-                try:
-                    from urllib.parse import urlparse
-                    parsed = urlparse(referer)
-                    if parsed.hostname and 'localhost' not in parsed.hostname:
-                        frontend_url = f"{parsed.scheme}://{parsed.netloc}"
-                except Exception:
-                    pass
-        
+        # Use helper function that works in both local and production
+        frontend_url = _get_frontend_url()
         return redirect(f"{frontend_url}/dashboard")
     except Exception as e:
         logging.error(f"Error generating session: {e}")
