@@ -1,11 +1,43 @@
 
 import sqlite3
 import config
+import time
+import logging
 
-def get_db_connection():
-    conn = sqlite3.connect(config.DATABASE_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+def get_db_connection(timeout=30.0, retries=3):
+    """
+    Get a database connection with proper timeout and retry logic.
+    
+    Args:
+        timeout: Timeout in seconds for database operations (default: 30)
+        retries: Number of retries if database is locked (default: 3)
+    
+    Returns:
+        sqlite3.Connection with row_factory set
+    """
+    for attempt in range(retries):
+        try:
+            conn = sqlite3.connect(
+                config.DATABASE_PATH,
+                timeout=timeout,
+                check_same_thread=False  # Allow use from multiple threads/eventlet
+            )
+            conn.row_factory = sqlite3.Row
+            # Enable WAL mode for better concurrency
+            conn.execute('PRAGMA journal_mode=WAL')
+            return conn
+        except sqlite3.OperationalError as e:
+            if 'locked' in str(e).lower() and attempt < retries - 1:
+                wait_time = (attempt + 1) * 0.1  # Exponential backoff: 0.1s, 0.2s, 0.3s
+                logging.warning(f"Database locked, retrying in {wait_time}s (attempt {attempt + 1}/{retries})")
+                time.sleep(wait_time)
+                continue
+            else:
+                logging.error(f"Database connection failed after {retries} attempts: {e}")
+                raise
+        except Exception as e:
+            logging.error(f"Unexpected error connecting to database: {e}")
+            raise
 
 def create_tables():
     conn = get_db_connection()

@@ -1,0 +1,17 @@
+call nssm.exe install DRP_Infotech_backend "C:\RAJ\PythonWorkSpace\ZerodhaKiteCopy\start_backend.bat"
+call nssm.exe set DRP_Infotech_backend AppStdout "C:\RAJ\Logs\DRP_Infotech_backend\backendStdOut.log"
+call nssm.exe set DRP_Infotech_backend AppStderr "C:\RAJ\Logs\DRP_Infotech_backend\backendStdErr.log"
+call nssm set DRP_Infotech_backend AppRotateFiles 1
+call nssm set DRP_Infotech_backend AppRotateOnline 1
+call nssm set DRP_Infotech_backend AppRotateSeconds 86400
+call nssm set DRP_Infotech_backend AppRotateBytes 1048576
+call sc start DRP_Infotech_backend
+
+call nssm.exe install DRP_Infotech_frontend "C:\RAJ\PythonWorkSpace\ZerodhaKiteCopy\frontend\start_frontend.bat"
+call nssm.exe set DRP_Infotech_frontend AppStdout "C:\RAJ\Logs\DRP_Infotech_frontend\frontendStdOut.log"
+call nssm.exe set DRP_Infotech_frontend AppStderr "C:\RAJ\Logs\DRP_Infotech_frontend\frontendStdErr.log"
+call nssm set DRP_Infotech_frontend AppRotateFiles 1
+call nssm set DRP_Infotech_frontend AppRotateOnline 1
+call nssm set DRP_Infotech_frontend AppRotateSeconds 86400
+call nssm set DRP_Infotech_frontend AppRotateBytes 1048576
+call sc start DRP_Infotech_frontend
