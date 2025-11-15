@@ -2855,24 +2855,41 @@ def api_login():
         return '', 200
     
     try:
+        # Log request details for debugging
+        logging.info(f"Login request - Content-Type: {request.content_type}, Method: {request.method}")
+        logging.info(f"Login request - Headers: {dict(request.headers)}")
+        
         # Try to get JSON data
         data = None
         if request.is_json:
             data = request.get_json(silent=True)
+            logging.info(f"Login request - Parsed JSON: {data}")
         elif request.content_type and 'application/json' in request.content_type:
             try:
                 data = request.get_json(force=True)
-            except Exception:
-                pass
+                logging.info(f"Login request - Force parsed JSON: {data}")
+            except Exception as e:
+                logging.error(f"Login request - Failed to parse JSON: {e}")
+                logging.info(f"Login request - Raw data: {request.data}")
         
         if data:
             email = data.get('email')
         else:
             # Fallback to form data
             email = request.form.get('email')
+            logging.info(f"Login request - Using form data, email: {email}")
         
         if not email:
-            return jsonify({'status': 'error', 'message': 'Email is required'}), 400
+            logging.warning("Login request - Email is missing")
+            return jsonify({
+                'status': 'error', 
+                'message': 'Email is required',
+                'debug': {
+                    'content_type': request.content_type,
+                    'has_json': request.is_json,
+                    'form_data': dict(request.form) if request.form else None
+                }
+            }), 400
         
         conn = get_db_connection()
         user = conn.execute('SELECT * FROM users WHERE email = ?', (email,)).fetchone()
@@ -2908,16 +2925,33 @@ def api_login():
 
 
 @app.route("/zerodha_login")
+@app.route("/api/zerodha_login")  # API alias for consistency
 def zerodha_login():
     if 'user_id' not in session:
-        return redirect('/')
+        # Try to infer frontend URL from request
+        frontend_url = config.FRONTEND_URL
+        if not frontend_url or frontend_url == 'http://localhost:3000':
+            origin = request.headers.get('Origin', '')
+            if origin and 'localhost' not in origin:
+                frontend_url = origin
+            else:
+                frontend_url = 'http://localhost:3000'
+        return redirect(f"{frontend_url}/")
 
     conn = get_db_connection()
     user = conn.execute('SELECT * FROM users WHERE id = ?', (session['user_id'],)).fetchone()
     conn.close()
 
     if not user or not user['app_key'] or not user['app_secret']:
-        return redirect(f"{config.FRONTEND_URL}/welcome?credentials=missing")
+        # Determine frontend URL for redirect
+        frontend_url = config.FRONTEND_URL
+        if not frontend_url or frontend_url == 'http://localhost:3000':
+            origin = request.headers.get('Origin', '')
+            if origin and 'localhost' not in origin:
+                frontend_url = origin
+            else:
+                frontend_url = 'http://localhost:3000'
+        return redirect(f"{frontend_url}/welcome?credentials=missing")
 
     kite.api_key = user['app_key']
     login_url = kite.login_url()
