@@ -19,7 +19,9 @@ def create_tables():
             app_key TEXT,
             app_secret TEXT,
             otp TEXT,
-            otp_expiry DATETIME
+            otp_expiry DATETIME,
+            zerodha_access_token TEXT,
+            zerodha_token_created_at DATETIME
         )
     """)
     conn.execute('DROP TABLE IF EXISTS user_contact_messages')
