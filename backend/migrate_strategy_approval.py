@@ -57,3 +57,4 @@ def migrate_strategy_approval():
 if __name__ == '__main__':
     migrate_strategy_approval()
 
+

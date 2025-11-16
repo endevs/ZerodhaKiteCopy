@@ -47,3 +47,4 @@ def migrate_admin_field():
 if __name__ == '__main__':
     migrate_admin_field()
 
+

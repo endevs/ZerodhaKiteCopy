@@ -141,3 +141,4 @@ location /socket.io {
 4. Verify Nginx is proxying correctly
 5. Test connection from browser and check console/network tabs
 
+

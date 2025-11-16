@@ -96,3 +96,4 @@ After installing eventlet and restarting:
 2. Test endpoint: `curl -I "http://localhost:8000/socket.io/?EIO=4&transport=polling"`
 3. Should return `200 OK` with proper Socket.IO response
 
+
