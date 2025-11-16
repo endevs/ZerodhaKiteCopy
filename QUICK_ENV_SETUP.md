@@ -168,3 +168,4 @@ cp .env.example .env
 4. **GitHub**: Only check in `.env.example` files
 5. **Security**: All files with secrets are in `.gitignore`
 
+

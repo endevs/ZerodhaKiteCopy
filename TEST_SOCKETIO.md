@@ -63,3 +63,4 @@ If you see connection errors, check:
 - CORS configuration
 - Socket.IO path matches between frontend and backend
 
+

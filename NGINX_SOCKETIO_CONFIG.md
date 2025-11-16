@@ -173,3 +173,4 @@ After updating Nginx configuration:
 - [ ] No errors in Nginx error logs
 - [ ] Backend logs show Socket.IO connection attempts
 
+

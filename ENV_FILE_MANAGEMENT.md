@@ -233,3 +233,4 @@ npm run build
 4. **GitHub**: Check in `.env.example` files, never check in `.env` with secrets
 5. **Security**: All files with actual secrets go in `.gitignore`
 
+
