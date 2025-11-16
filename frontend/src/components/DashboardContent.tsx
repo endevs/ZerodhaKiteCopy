@@ -5,7 +5,6 @@ import React, {
   useRef,
   useState,
 } from 'react';
-import EnhancedAdvancedStrategyBuilder from './EnhancedAdvancedStrategyBuilder';
 import { apiUrl } from '../config/api';
 
 type VisibilityOption = 'private' | 'public';
@@ -90,15 +89,6 @@ interface Strategy {
   rejection_reason?: string;
 }
 
-interface StrategyConfigurationProps {
-  onStrategySaved: () => void;
-  editingStrategy: Strategy | null;
-  isOpen: boolean;
-  onToggle: (open: boolean) => void;
-  incomingBlueprint: string | null;
-  onBlueprintAccepted: () => void;
-}
-
 interface SavedStrategiesProps {
   onViewLive: (strategyId: string) => void;
   onStrategyUpdated: number;
@@ -127,31 +117,14 @@ interface FlowNode {
   details: string[];
 }
 
-const StrategyConfiguration: React.FC<StrategyConfigurationProps> = ({
-  onStrategySaved,
-  editingStrategy,
-  isOpen,
-  onToggle,
-  incomingBlueprint,
-  onBlueprintAccepted,
-}) => (
-  <div className="mb-4" id="dashboard-builder">
-    <EnhancedAdvancedStrategyBuilder
-      onStrategySaved={onStrategySaved}
-      editingStrategy={editingStrategy}
-      isOpen={isOpen}
-      onToggle={onToggle}
-      incomingBlueprint={incomingBlueprint}
-      onBlueprintAccepted={onBlueprintAccepted}
-    />
-  </div>
-);
+// Advanced builder removed from dashboard per new UX
 
 const REQUIRED_BLUEPRINT_SECTIONS = ['STRATEGY', 'DESCRIPTION', 'EVALUATION', 'RULE', 'ENTRY', 'EXIT'];
 
 interface StrategyInfoContentProps {
   strategy: Strategy;
   onStrategyUpdated: (updatedStrategy: Strategy) => void;
+  onClose: () => void;
 }
 
 const validateBlueprintFormat = (strategyText: string) => {
@@ -173,7 +146,7 @@ const extractStrategyName = (strategyText: string): string | null => {
   return match ? match[1].trim() : null;
 };
 
-const StrategyInfoContent: React.FC<StrategyInfoContentProps> = ({ strategy, onStrategyUpdated }) => {
+const StrategyInfoContent: React.FC<StrategyInfoContentProps> = ({ strategy, onStrategyUpdated, onClose }) => {
   const parseJson = (raw?: string) => {
     if (!raw) return [];
     try {
@@ -206,8 +179,8 @@ const StrategyInfoContent: React.FC<StrategyInfoContentProps> = ({ strategy, onS
     [strategy.visibility],
   );
   const lastEdited = useMemo(
-    () => formatDateTime(strategy.updated_at),
-    [strategy.updated_at],
+    () => formatDateTime(strategy.updated_at || strategy.created_at),
+    [strategy.updated_at, strategy.created_at],
   );
   const createdAt = useMemo(
     () => formatDateTime(strategy.created_at),
@@ -319,6 +292,8 @@ const StrategyInfoContent: React.FC<StrategyInfoContentProps> = ({ strategy, onS
       onStrategyUpdated(updatedStrategy);
       setSaveFeedback(data.message || 'Blueprint updated successfully.');
       setIsEditingBlueprint(false);
+      // Close/minimize the popup after successful save
+      onClose();
     } catch (error: any) {
       setSaveError(error.message || 'Failed to update blueprint. Please try again.');
     } finally {
@@ -709,7 +684,7 @@ const SavedStrategies: React.FC<SavedStrategiesProps> = ({
                   strategies.map((strategy) => {
                     const canEdit = strategy.can_edit !== false;
                     const visibility = normalizeVisibility(strategy.visibility);
-                    const lastEditedLabel = formatTimestamp(strategy.updated_at);
+                    const lastEditedLabel = formatTimestamp(strategy.updated_at || strategy.created_at);
 
                     return (
                       <tr key={strategy.id}>
@@ -953,6 +928,7 @@ const SavedStrategies: React.FC<SavedStrategiesProps> = ({
                     setSelectedStrategy(updated);
                     fetchStrategies();
                   }}
+                  onClose={() => setSelectedStrategy(null)}
                 />
               </div>
               <div className="modal-footer">
@@ -1086,7 +1062,7 @@ const buildFlowNodes = (strategyText: string): FlowNode[] => {
       }
 
       const isHeading =
-        /^[A-Z0-9][A-Z0-9\s\-:&()]*$/.test(trimmed) &&
+        /^[A-Z0-9][A-Z0-9\s:&()]*$/.test(trimmed) &&
         !trimmed.startsWith('-') &&
         !trimmed.startsWith('•');
 
@@ -1125,10 +1101,22 @@ const buildFlowNodes = (strategyText: string): FlowNode[] => {
 };
 
 interface AIEnabledStrategyChatProps {
-  onSendToBuilder?: (blueprint: string) => void;
+  // Load a blueprint into the editor (from Saved Strategies edit)
+  incomingBlueprint?: string | null;
+  // Strategy being edited (when editing existing)
+  editingStrategy?: Strategy | null;
+  // Notify parent after a successful save to refresh lists
+  onStrategySaved?: () => void;
+  // When incoming blueprint has been consumed
+  onBlueprintConsumed?: () => void;
 }
 
-const AIEnabledStrategyChat: React.FC<AIEnabledStrategyChatProps> = ({ onSendToBuilder }) => {
+const AIEnabledStrategyChat: React.FC<AIEnabledStrategyChatProps> = ({
+  incomingBlueprint,
+  editingStrategy,
+  onStrategySaved,
+  onBlueprintConsumed,
+}) => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputValue, setInputValue] = useState('');
   const [loading, setLoading] = useState(false);
@@ -1136,7 +1124,25 @@ const AIEnabledStrategyChat: React.FC<AIEnabledStrategyChatProps> = ({ onSendToB
   const [latestStrategy, setLatestStrategy] = useState('');
   const [latestValidation, setLatestValidation] = useState<StrategyValidation | null>(null);
   const [lastSavedPath, setLastSavedPath] = useState<string | null>(null);
+  const [isEditingBlueprint, setIsEditingBlueprint] = useState(false);
+  const [draftBlueprint, setDraftBlueprint] = useState('');
+  const [strategyName, setStrategyName] = useState<string>('');
+  const [blueprintMaximized, setBlueprintMaximized] = useState(false);
   const chatBodyRef = useRef<HTMLDivElement | null>(null);
+
+  // Consume incoming blueprint (from Saved Strategies Edit)
+  useEffect(() => {
+    if (incomingBlueprint && incomingBlueprint.trim()) {
+      setLatestStrategy(incomingBlueprint);
+      setDraftBlueprint(incomingBlueprint);
+      setIsEditingBlueprint(true);
+      setError(null);
+      setLastSavedPath(null);
+      setStrategyName(extractStrategyName(incomingBlueprint) || (editingStrategy?.strategy_name ?? ''));
+      onBlueprintConsumed && onBlueprintConsumed();
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  }, [incomingBlueprint, onBlueprintConsumed]);
 
   useEffect(() => {
     if (chatBodyRef.current) {
@@ -1151,6 +1157,36 @@ const AIEnabledStrategyChat: React.FC<AIEnabledStrategyChatProps> = ({ onSendToB
   );
 
   const flowNodes = useMemo(() => buildFlowNodes(latestStrategy), [latestStrategy]);
+
+  // Keep strategyName in sync with latestStrategy content or selected strategy
+  useEffect(() => {
+    const nameFromBlueprint = extractStrategyName(latestStrategy || '');
+    if (nameFromBlueprint) {
+      setStrategyName(nameFromBlueprint);
+    } else if (editingStrategy?.strategy_name) {
+      setStrategyName(editingStrategy.strategy_name);
+    }
+  }, [latestStrategy, editingStrategy?.strategy_name]);
+
+  const ensureStrategyNameInBlueprint = (text: string): string => {
+    const hasName = /STRATEGY\s+"[^"]+"/i.test(text);
+    if (hasName) return text;
+    const suggested = (strategyName || '').trim() || window.prompt('Enter a strategy name to save:', 'My Strategy');
+    if (!suggested) {
+      throw new Error('Strategy name is required to save.');
+    }
+    setStrategyName(suggested);
+    return `STRATEGY "${suggested}" VERSION 1.0\n` + text;
+  };
+
+  const applyStrategyNameToBlueprint = (text: string, name: string): string => {
+    if (!name?.trim()) return text;
+    const hasLine = /STRATEGY\s+"[^"]+"\s+VERSION\s+[^\n]+/i.test(text);
+    if (hasLine) {
+      return text.replace(/STRATEGY\s+"[^"]+"\s+VERSION\s+([^\n]+)/i, `STRATEGY "${name.trim()}" VERSION $1`);
+    }
+    return `STRATEGY "${name.trim()}" VERSION 1.0\n` + text;
+  };
 
   const handleSend = async () => {
     const trimmed = inputValue.trim();
@@ -1205,6 +1241,10 @@ const AIEnabledStrategyChat: React.FC<AIEnabledStrategyChatProps> = ({ onSendToB
       ]);
 
       setLatestStrategy(typeof data.strategy === 'string' ? data.strategy : '');
+      setDraftBlueprint(typeof data.strategy === 'string' ? data.strategy : '');
+      if (typeof data.strategy === 'string') {
+        setStrategyName(extractStrategyName(data.strategy) || strategyName || '');
+      }
       setLatestValidation(data.validation ?? null);
       if (data.savedPath) {
         setLastSavedPath(data.savedPath);
@@ -1228,32 +1268,159 @@ const AIEnabledStrategyChat: React.FC<AIEnabledStrategyChatProps> = ({ onSendToB
   };
 
   const handleSaveStrategy = async () => {
-    if (!latestStrategy || loading) {
-      return;
-    }
+    const blueprintToSave = (isEditingBlueprint ? draftBlueprint : latestStrategy).trim();
+    if (!blueprintToSave || loading) return;
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch(apiUrl('/api/ai/strategy_chat/save'), {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        credentials: 'include',
-        body: JSON.stringify({ strategy_text: latestStrategy }),
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.message || 'Failed to save strategy');
+      // If editing existing strategy, use /api/strategy/save with strategy fields preserved
+      if (editingStrategy) {
+        const validationLocal = validateBlueprintFormat(blueprintToSave);
+        if (!validationLocal.isValid) {
+          setLatestValidation({
+            is_valid: false,
+            missing_sections: validationLocal.missingSections,
+            warnings: validationLocal.warnings,
+          });
+          throw new Error('Blueprint format incomplete. Please fill required sections.');
+        }
+        // Build payload based on existing strategy, only replacing blueprint and name if present
+        const desiredName =
+          (strategyName && strategyName.trim()) ||
+          extractStrategyName(blueprintToSave) ||
+          editingStrategy.strategy_name;
+        const blueprintWithName = applyStrategyNameToBlueprint(blueprintToSave, desiredName || 'My Strategy');
+        const indicatorsPayload = parseJsonField<Record<string, any>[]>(editingStrategy.indicators) || [];
+        const entryRulesPayload = parseJsonField<Record<string, any>[]>(editingStrategy.entry_rules) || [];
+        const exitRulesPayload = parseJsonField<Record<string, any>[]>(editingStrategy.exit_rules) || [];
+        const payload = {
+          strategy_id: editingStrategy.id,
+          strategy: editingStrategy.strategy_type || 'custom',
+          'strategy-name': desiredName || editingStrategy.strategy_name,
+          instrument: editingStrategy.instrument || 'NIFTY',
+          segment: editingStrategy.segment || 'Option',
+          visibility: normalizeVisibility(editingStrategy.visibility),
+          'candle-time': editingStrategy.candle_time || '5',
+          'candle_time': editingStrategy.candle_time || '5',
+          'execution-start': editingStrategy.start_time || '09:15',
+          'execution_start': editingStrategy.start_time || '09:15',
+          'execution-end': editingStrategy.end_time || '15:00',
+          'execution_end': editingStrategy.end_time || '15:00',
+          'stop-loss': Number(editingStrategy.stop_loss ?? 0),
+          'stop_loss': Number(editingStrategy.stop_loss ?? 0),
+          'target-profit': Number(editingStrategy.target_profit ?? 0),
+          'target_profit': Number(editingStrategy.target_profit ?? 0),
+          'trailing-stop-loss': Number(editingStrategy.trailing_stop_loss ?? 0),
+          'trailing_stop_loss': Number(editingStrategy.trailing_stop_loss ?? 0),
+          'total-lot': Number(editingStrategy.total_lot ?? 1),
+          'total_lot': Number(editingStrategy.total_lot ?? 1),
+          'trade-type': editingStrategy.trade_type || 'Buy',
+          'trade_type': editingStrategy.trade_type || 'Buy',
+          'strike-price': editingStrategy.strike_price || 'ATM',
+          'strike_price': editingStrategy.strike_price || 'ATM',
+          'expiry-type': editingStrategy.expiry_type || 'Weekly',
+          'expiry_type': editingStrategy.expiry_type || 'Weekly',
+          indicators: indicatorsPayload,
+          entry_rules: entryRulesPayload,
+          exit_rules: exitRulesPayload,
+          blueprint: blueprintWithName,
+        };
+        const response = await fetch(apiUrl('/api/strategy/save'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify(payload),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(typeof data === 'string' ? data : data.message || 'Failed to save strategy');
+        }
+        setLastSavedPath(data.message || 'Strategy updated.');
+        setLatestStrategy('');
+        setDraftBlueprint('');
+        setStrategyName('');
+        setLatestValidation(null);
+        setMessages([]);
+        setIsEditingBlueprint(false);
+        onStrategySaved && onStrategySaved();
+        return;
       }
 
+      // Creating a new strategy from AI blueprint
+      let blueprintText = blueprintToSave;
+      try {
+        blueprintText = ensureStrategyNameInBlueprint(blueprintToSave);
+      } catch (namingError: any) {
+        setError(namingError.message);
+        return;
+      }
+      const validationLocal = validateBlueprintFormat(blueprintText);
+      if (!validationLocal.isValid) {
+        setLatestValidation({
+          is_valid: false,
+          missing_sections: validationLocal.missingSections,
+          warnings: validationLocal.warnings,
+        });
+        throw new Error('Blueprint format incomplete. Please fill required sections.');
+      }
+      // Build minimal payload for new strategy with sensible defaults
+      const createdName =
+        (strategyName && strategyName.trim()) ||
+        extractStrategyName(blueprintText) ||
+        'New Strategy';
+      const blueprintWithName = applyStrategyNameToBlueprint(blueprintText, createdName);
+      const payloadNew = {
+        strategy: 'custom',
+        'strategy-name': createdName,
+        instrument: 'NIFTY',
+        segment: 'Option',
+        visibility: 'private',
+        'candle-time': '5',
+        'candle_time': '5',
+        'execution-start': '09:15',
+        'execution_start': '09:15',
+        'execution-end': '15:00',
+        'execution_end': '15:00',
+        'stop-loss': 0,
+        'stop_loss': 0,
+        'target-profit': 0,
+        'target_profit': 0,
+        'trailing-stop-loss': 0,
+        'trailing_stop_loss': 0,
+        'total-lot': 1,
+        'total_lot': 1,
+        'trade-type': 'Buy',
+        'trade_type': 'Buy',
+        'strike-price': 'ATM',
+        'strike_price': 'ATM',
+        'expiry-type': 'Weekly',
+        'expiry_type': 'Weekly',
+        indicators: [],
+        entry_rules: [],
+        exit_rules: [],
+        blueprint: blueprintWithName,
+      };
+      const response = await fetch(apiUrl('/api/strategy/save'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify(payloadNew),
+      });
       const data = await response.json();
-      setLastSavedPath(data.savedPath || 'Strategy saved.');
-      setLatestValidation(data.validation ?? null);
-    } catch (error: any) {
-      console.error('Error saving strategy:', error);
-      setError(error.message || 'An error occurred while saving the strategy');
+      if (!response.ok) {
+        throw new Error(typeof data === 'string' ? data : data.message || 'Failed to save strategy');
+      }
+      setLastSavedPath(data.message || 'Strategy saved.');
+      setLatestValidation(null);
+      setLatestStrategy('');
+      setDraftBlueprint('');
+      setStrategyName('');
+      setMessages([]);
+      setIsEditingBlueprint(false);
+      onStrategySaved && onStrategySaved();
+    } catch (saveError: any) {
+      console.error('Error saving strategy:', saveError);
+      setError(saveError.message || 'An error occurred while saving the strategy');
     } finally {
       setLoading(false);
     }
@@ -1270,22 +1437,34 @@ const AIEnabledStrategyChat: React.FC<AIEnabledStrategyChatProps> = ({ onSendToB
     }
   };
 
-  const handleSendToBuilder = useCallback(() => {
-    if (!latestStrategy || !onSendToBuilder) {
+  const startEditing = () => {
+    setIsEditingBlueprint(true);
+    setDraftBlueprint(latestStrategy);
+    setError(null);
+    setLastSavedPath(null);
+  };
+
+  const handleApplyEditsOnly = () => {
+    const trimmed = (draftBlueprint || '').trim();
+    if (!trimmed) {
+      setError('Blueprint cannot be empty.');
       return;
     }
-    onSendToBuilder(latestStrategy);
-    setLastSavedPath('Loaded in Strategy Builder');
-    setMessages((prev) => [
-      ...prev,
-      {
-        id: `assistant-transfer-${Date.now()}`,
-        role: 'assistant',
-        content: 'Blueprint moved to the Strategy Builder. Review and save when ready.',
-        timestamp: new Date().toISOString(),
-      },
-    ]);
-  }, [latestStrategy, onSendToBuilder]);
+    // Apply edits locally without saving to DB
+    setLatestStrategy(trimmed);
+    const extracted = extractStrategyName(trimmed);
+    if (extracted) {
+      setStrategyName(extracted);
+    }
+    const validationLocal = validateBlueprintFormat(trimmed);
+    setLatestValidation({
+      is_valid: validationLocal.isValid,
+      missing_sections: validationLocal.missingSections,
+      warnings: validationLocal.warnings,
+    });
+    setIsEditingBlueprint(false);
+    setLastSavedPath('Edits applied (not saved)');
+  };
 
   const handleKeyDown: React.KeyboardEventHandler<HTMLTextAreaElement> = (event) => {
     if (event.key === 'Enter' && !event.shiftKey) {
@@ -1342,6 +1521,11 @@ const AIEnabledStrategyChat: React.FC<AIEnabledStrategyChatProps> = ({ onSendToB
             Describe trading ideas in natural language and receive production-ready blueprints.
           </small>
         </div>
+        {editingStrategy && (
+          <span className="badge bg-primary">
+            Editing: {editingStrategy.strategy_name || 'Selected Strategy'}
+          </span>
+        )}
         {loading && (
           <span className="badge bg-secondary">
             <span className="spinner-border spinner-border-sm me-2" role="status" />
@@ -1446,7 +1630,29 @@ const AIEnabledStrategyChat: React.FC<AIEnabledStrategyChatProps> = ({ onSendToB
             </div>
           </div>
           <div className="col-xl-4 col-lg-6 col-12">
-            <div className="border rounded p-3 h-100 d-flex flex-column bg-light">
+            {/* Backdrop when maximized */}
+            {blueprintMaximized && (
+              <div
+                className="position-fixed top-0 start-0 end-0 bottom-0 bg-dark"
+                style={{ opacity: 0.5, zIndex: 1050 }}
+              />
+            )}
+            <div
+              className="border rounded p-3 d-flex flex-column bg-light"
+              style={
+                blueprintMaximized
+                  ? {
+                      position: 'fixed',
+                      zIndex: 1060,
+                      top: '4%',
+                      left: '4%',
+                      right: '4%',
+                      bottom: '4%',
+                      maxHeight: 'none',
+                    }
+                  : { height: '100%' }
+              }
+            >
               <div className="d-flex justify-content-between align-items-center mb-3">
                 <h6 className="mb-0">
                   <i className="bi bi-file-code-fill me-2 text-success" />
@@ -1462,31 +1668,82 @@ const AIEnabledStrategyChat: React.FC<AIEnabledStrategyChatProps> = ({ onSendToB
                     <i className="bi bi-clipboard me-2" />
                     Copy
                   </button>
-                  <button
-                    type="button"
-                    className="btn btn-success"
-                    onClick={handleSaveStrategy}
-                    disabled={!latestStrategy || loading}
-                  >
-                    <i className="bi bi-save me-2" />
-                    Save
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-primary"
-                    onClick={handleSendToBuilder}
-                    disabled={!latestStrategy || !onSendToBuilder}
-                  >
-                    <i className="bi bi-box-arrow-in-right me-2" />
-                    Send to Builder
-                  </button>
+                  {isEditingBlueprint ? (
+                    <button
+                      type="button"
+                      className="btn btn-success"
+                      onClick={handleApplyEditsOnly}
+                      disabled={!draftBlueprint}
+                      title="Apply edits to the blueprint preview (does not save to database)"
+                    >
+                      <i className="bi bi-check2 me-2" />
+                      Apply Edits
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      onClick={startEditing}
+                      disabled={!latestStrategy}
+                    >
+                      <i className="bi bi-pencil-square me-2" />
+                      Edit
+                    </button>
+                  )}
+                  {isEditingBlueprint && (
+                    <button
+                      type="button"
+                      className="btn btn-outline-dark"
+                      onClick={() => setBlueprintMaximized((v) => !v)}
+                      title={blueprintMaximized ? 'Exit full screen' : 'Full screen editor'}
+                    >
+                      <i className={`bi ${blueprintMaximized ? 'bi-fullscreen-exit' : 'bi-arrows-fullscreen'} me-2`} />
+                      {blueprintMaximized ? 'Exit' : 'Maximize'}
+                    </button>
+                  )}
                 </div>
+              </div>
+              <div className="mb-2">
+                <label htmlFor="strategy-name-input" className="form-label small mb-1">
+                  Strategy Name
+                </label>
+                <input
+                  id="strategy-name-input"
+                  type="text"
+                  className="form-control form-control-sm"
+                  placeholder="Enter a strategy name"
+                  value={strategyName}
+                  onChange={(e) => setStrategyName(e.target.value)}
+                />
               </div>
               <div
                 className="bg-white border rounded p-3 flex-grow-1 overflow-auto"
-                style={{ maxHeight: '420px' }}
+                style={
+                  blueprintMaximized
+                    ? { maxHeight: 'none' }
+                    : { maxHeight: '420px' }
+                }
               >
-                {latestStrategy ? (
+                {isEditingBlueprint ? (
+                  <textarea
+                    className="form-control"
+                    style={
+                      blueprintMaximized
+                        ? {
+                            fontFamily: 'monospace',
+                            fontSize: '0.9rem',
+                            height: 'calc(100vh - 280px)',
+                          }
+                        : {
+                            fontFamily: 'monospace',
+                            fontSize: '0.85rem',
+                            height: '100%',
+                          }
+                    }
+                    value={draftBlueprint}
+                    onChange={(e) => setDraftBlueprint(e.target.value)}
+                  />
+                ) : latestStrategy ? (
                   <pre
                     className="mb-0"
                     style={{ whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: '0.85rem' }}
@@ -1501,6 +1758,20 @@ const AIEnabledStrategyChat: React.FC<AIEnabledStrategyChatProps> = ({ onSendToB
                 )}
               </div>
               {renderValidation()}
+              {!isEditingBlueprint && latestStrategy && (
+                <div className="mt-2 d-flex justify-content-end">
+                  <button
+                    type="button"
+                    className="btn btn-success"
+                    onClick={handleSaveStrategy}
+                    disabled={!latestStrategy || loading}
+                    title="Save this blueprint directly without editing"
+                  >
+                    <i className="bi bi-save me-2" />
+                    Save Blueprint
+                  </button>
+                </div>
+              )}
             </div>
           </div>
           <div className="col-xl-4 col-12">
@@ -1518,53 +1789,32 @@ interface DashboardContentProps {
 
 const DashboardContent: React.FC<DashboardContentProps> = ({ onViewLiveStrategy }) => {
   const [refreshStrategies, setRefreshStrategies] = useState(0);
-  const [editingStrategy, setEditingStrategy] = useState<Strategy | null>(null);
-  const [builderOpen, setBuilderOpen] = useState(true);
+  const [aiEditingStrategy, setAiEditingStrategy] = useState<Strategy | null>(null);
   const [savedOpen, setSavedOpen] = useState(true);
   const [incomingBlueprint, setIncomingBlueprint] = useState<string | null>(null);
 
   const handleStrategySaved = () => {
     setRefreshStrategies((prev) => prev + 1);
-    setEditingStrategy(null);
+    setAiEditingStrategy(null);
     setSavedOpen(true);
     setIncomingBlueprint(null);
   };
 
   const handleEditStrategy = (strategy: Strategy) => {
-    setEditingStrategy(strategy);
-    setBuilderOpen(true);
+    setAiEditingStrategy(strategy);
+    setIncomingBlueprint(strategy.blueprint || '');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   };
-
-  const handleBlueprintFromAI = useCallback(
-    (blueprint: string) => {
-      const trimmed = blueprint?.trim();
-      if (!trimmed) {
-        return;
-      }
-      setEditingStrategy(null);
-      setBuilderOpen(true);
-      setIncomingBlueprint(trimmed);
-      window.scrollTo({ top: 0, behavior: 'smooth' });
-    },
-    [],
-  );
-
-  const handleBlueprintAccepted = useCallback(() => {
-    setIncomingBlueprint(null);
-  }, []);
 
   return (
     <div className="pb-4" id="dashboard-content">
-      <AIEnabledStrategyChat onSendToBuilder={handleBlueprintFromAI} />
+      <AIEnabledStrategyChat
+        incomingBlueprint={incomingBlueprint}
+        editingStrategy={aiEditingStrategy}
+        onStrategySaved={handleStrategySaved}
+        onBlueprintConsumed={() => setIncomingBlueprint(null)}
+      />
       <div className="accordion mt-4" id="dashboardAccordion">
-        <StrategyConfiguration
-          onStrategySaved={handleStrategySaved}
-          editingStrategy={editingStrategy}
-          isOpen={builderOpen}
-          onToggle={setBuilderOpen}
-          incomingBlueprint={incomingBlueprint}
-          onBlueprintAccepted={handleBlueprintAccepted}
-        />
         <SavedStrategies
           onViewLive={onViewLiveStrategy}
           onStrategyUpdated={refreshStrategies}
