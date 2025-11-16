@@ -1660,6 +1660,28 @@ def _get_strategy_record_for_preview(strategy_id: int, user_id: int) -> Optional
     finally:
         conn.close()
 
+def _get_strategy_record_for_deploy(strategy_id: int, user_id: int) -> Optional[sqlite3.Row]:
+    """
+    For live deploy we allow:
+      - Strategies owned by the user (any approval), but backend deploy flow elsewhere enforces 'approved'
+      - Public strategies that are approved (shared by others)
+    """
+    conn = get_db_connection()
+    try:
+        return conn.execute(
+            """
+            SELECT * FROM strategies 
+            WHERE id = ?
+              AND (
+                    user_id = ?
+                 OR (visibility = 'public' AND (approval_status = 'approved' OR approval_status IS NULL))
+              )
+            """,
+            (strategy_id, user_id)
+        ).fetchone()
+    finally:
+        conn.close()
+
 def _serialize_live_deployment(deployment: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     if not deployment:
         return None
@@ -7653,9 +7675,9 @@ def api_live_trade_deploy():
         strategy_id = int(strategy_id_raw)
     except (TypeError, ValueError):
         return jsonify({'status': 'error', 'message': 'Invalid strategy identifier.'}), 400
-    strategy_row = _get_strategy_record(strategy_id, user_id)
+    strategy_row = _get_strategy_record_for_deploy(strategy_id, user_id)
     if not strategy_row:
-        return jsonify({'status': 'error', 'message': 'Strategy not found for this user.'}), 404
+        return jsonify({'status': 'error', 'message': 'Strategy not found or not deployable.'}), 404
     strategy = dict(strategy_row)
     strategy_name = strategy.get('strategy_name') or f"Strategy #{strategy_id}"
 
