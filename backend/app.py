@@ -3185,12 +3185,14 @@ def api_login():
                 'redirect': '/verify-otp'  # Relative path for React Router
             })
         else:
+            # Return 200 with error status instead of 404 to prevent Nginx/CloudFront
+            # from intercepting and serving HTML error pages
             response = jsonify({
                 'status': 'error',
                 'message': 'User not found. Please sign up.'
             })
             response.headers['Content-Type'] = 'application/json'
-            return response, 404
+            return response, 200
     except Exception as e:
         logging.error(f"Error in api_login: {e}")
         response = jsonify({
