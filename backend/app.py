@@ -1644,6 +1644,43 @@ def _get_strategy_record(strategy_id: int, user_id: int) -> Optional[sqlite3.Row
     finally:
         conn.close()
 
+def _get_strategy_record_for_preview(strategy_id: int, user_id: int) -> Optional[sqlite3.Row]:
+    """
+    For trade preview we allow:
+      - Strategies owned by the user (any visibility/status)
+      - Public strategies (shared by others)
+    Deployment and order placement must still use _get_strategy_record (owned by user).
+    """
+    conn = get_db_connection()
+    try:
+        return conn.execute(
+            "SELECT * FROM strategies WHERE id = ? AND (user_id = ? OR visibility = 'public')",
+            (strategy_id, user_id)
+        ).fetchone()
+    finally:
+        conn.close()
+
+def _get_strategy_record_for_deploy(strategy_id: int, user_id: int) -> Optional[sqlite3.Row]:
+    """
+    For live deploy we allow:
+      - Strategies owned by the user (any approval), but backend deploy flow elsewhere enforces 'approved'
+      - Public strategies that are approved (shared by others)
+    """
+    conn = get_db_connection()
+    try:
+        return conn.execute(
+            """
+            SELECT * FROM strategies 
+            WHERE id = ?
+              AND (
+                    user_id = ?
+                 OR (visibility = 'public' AND (approval_status = 'approved' OR approval_status IS NULL))
+              )
+            """,
+            (strategy_id, user_id)
+        ).fetchone()
+    finally:
+        conn.close()
 
 def _serialize_live_deployment(deployment: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     if not deployment:
@@ -3817,7 +3854,7 @@ def save_strategy():
         if strategy_id:
             # Check if strategy exists and belongs to user
             try:
-                existing = conn.execute('SELECT approval_status FROM strategies WHERE id = ? AND user_id = ?', 
+                existing = conn.execute('SELECT * FROM strategies WHERE id = ? AND user_id = ?', 
                                        (strategy_id, user_id)).fetchone()
                 if not existing:
                     conn.close()
@@ -3832,8 +3869,36 @@ def save_strategy():
             # Convert Row to dict for safe access
             existing_dict = dict(existing) if existing else {}
             current_status = existing_dict.get('approval_status') or 'draft'
-            # When a strategy is edited, reset it to draft so it needs re-approval
-            new_status = 'draft'
+            # Determine if only visibility has changed (keep approval status if approved)
+            def _norm(val):
+                if val is None:
+                    return None
+                return str(val).strip() if isinstance(val, str) else val
+            only_visibility_change = (
+                _norm(existing_dict.get('strategy_name')) == _norm(strategy_name_input) and
+                _norm(existing_dict.get('strategy_type')) == _norm(strategy_type) and
+                _norm(existing_dict.get('instrument')) == _norm(instrument) and
+                _norm(existing_dict.get('candle_time')) == _norm(candle_time) and
+                _norm(existing_dict.get('start_time')) == _norm(execution_start) and
+                _norm(existing_dict.get('end_time')) == _norm(execution_end) and
+                _norm(existing_dict.get('stop_loss')) == _norm(stop_loss) and
+                _norm(existing_dict.get('target_profit')) == _norm(target_profit) and
+                _norm(existing_dict.get('total_lot')) == _norm(total_lot) and
+                _norm(existing_dict.get('trailing_stop_loss')) == _norm(trailing_stop_loss) and
+                _norm(existing_dict.get('segment')) == _norm(segment) and
+                _norm(existing_dict.get('trade_type')) == _norm(trade_type) and
+                _norm(existing_dict.get('strike_price')) == _norm(strike_price) and
+                _norm(existing_dict.get('expiry_type')) == _norm(expiry_type) and
+                _norm(existing_dict.get('ema_period')) == _norm(ema_period) and
+                _norm(existing_dict.get('indicators')) == _norm(indicators_json) and
+                _norm(existing_dict.get('entry_rules')) == _norm(entry_rules_json) and
+                _norm(existing_dict.get('exit_rules')) == _norm(exit_rules_json) and
+                _norm(existing_dict.get('blueprint')) == _norm(blueprint_text)
+            )
+            # When a strategy is edited, reset to draft unless only visibility changed on an approved strategy
+            new_status = current_status
+            if not only_visibility_change:
+                new_status = 'draft'
             conn.execute(
                 '''UPDATE strategies SET strategy_name = ?, strategy_type = ?, instrument = ?, candle_time = ?, 
                    start_time = ?, end_time = ?, stop_loss = ?, target_profit = ?, total_lot = ?, 
@@ -7468,7 +7533,7 @@ def api_live_trade_preview():
     except (TypeError, ValueError):
         return jsonify({'status': 'error', 'message': 'Invalid strategy identifier.'}), 400
 
-    strategy_row = _get_strategy_record(strategy_id, session['user_id'])
+    strategy_row = _get_strategy_record_for_preview(strategy_id, session['user_id'])
     if not strategy_row:
         return jsonify({'status': 'error', 'message': 'Strategy not found for this user.'}), 404
 
@@ -7528,7 +7593,7 @@ def api_live_trade_preview_order():
     except (TypeError, ValueError):
         return jsonify({'status': 'error', 'message': 'Invalid strategy identifier.'}), 400
 
-    strategy_row = _get_strategy_record(strategy_id, session['user_id'])
+    strategy_row = _get_strategy_record_for_preview(strategy_id, session['user_id'])
     if not strategy_row:
         return jsonify({'status': 'error', 'message': 'Strategy not found for this user.'}), 404
 
@@ -7610,9 +7675,9 @@ def api_live_trade_deploy():
         strategy_id = int(strategy_id_raw)
     except (TypeError, ValueError):
         return jsonify({'status': 'error', 'message': 'Invalid strategy identifier.'}), 400
-    strategy_row = _get_strategy_record(strategy_id, user_id)
+    strategy_row = _get_strategy_record_for_deploy(strategy_id, user_id)
     if not strategy_row:
-        return jsonify({'status': 'error', 'message': 'Strategy not found for this user.'}), 404
+        return jsonify({'status': 'error', 'message': 'Strategy not found or not deployable.'}), 404
     strategy = dict(strategy_row)
     strategy_name = strategy.get('strategy_name') or f"Strategy #{strategy_id}"
 

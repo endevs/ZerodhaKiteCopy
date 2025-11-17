@@ -1128,6 +1128,7 @@ const AIEnabledStrategyChat: React.FC<AIEnabledStrategyChatProps> = ({
   const [draftBlueprint, setDraftBlueprint] = useState('');
   const [strategyName, setStrategyName] = useState<string>('');
   const [blueprintMaximized, setBlueprintMaximized] = useState(false);
+  const [visibilitySelection, setVisibilitySelection] = useState<VisibilityOption>('private');
   const chatBodyRef = useRef<HTMLDivElement | null>(null);
 
   // Consume incoming blueprint (from Saved Strategies Edit)
@@ -1139,6 +1140,7 @@ const AIEnabledStrategyChat: React.FC<AIEnabledStrategyChatProps> = ({
       setError(null);
       setLastSavedPath(null);
       setStrategyName(extractStrategyName(incomingBlueprint) || (editingStrategy?.strategy_name ?? ''));
+      setVisibilitySelection(normalizeVisibility(editingStrategy?.visibility));
       onBlueprintConsumed && onBlueprintConsumed();
       window.scrollTo({ top: 0, behavior: 'smooth' });
     }
@@ -1166,7 +1168,10 @@ const AIEnabledStrategyChat: React.FC<AIEnabledStrategyChatProps> = ({
     } else if (editingStrategy?.strategy_name) {
       setStrategyName(editingStrategy.strategy_name);
     }
-  }, [latestStrategy, editingStrategy?.strategy_name]);
+    if (editingStrategy) {
+      setVisibilitySelection(normalizeVisibility(editingStrategy.visibility));
+    }
+  }, [latestStrategy, editingStrategy?.strategy_name, editingStrategy]);
 
   const ensureStrategyNameInBlueprint = (text: string): string => {
     const hasName = /STRATEGY\s+"[^"]+"/i.test(text);
@@ -1273,6 +1278,15 @@ const AIEnabledStrategyChat: React.FC<AIEnabledStrategyChatProps> = ({
     setLoading(true);
     setError(null);
     try {
+      // Enforce: Only approved strategies can be made public
+      if (visibilitySelection === 'public') {
+        const status = editingStrategy?.approval_status || 'draft';
+        if (status !== 'approved') {
+          setError('Only approved strategies can be made public. Please get approval first.');
+          setLoading(false);
+          return;
+        }
+      }
       // If editing existing strategy, use /api/strategy/save with strategy fields preserved
       if (editingStrategy) {
         const validationLocal = validateBlueprintFormat(blueprintToSave);
@@ -1299,7 +1313,7 @@ const AIEnabledStrategyChat: React.FC<AIEnabledStrategyChatProps> = ({
           'strategy-name': desiredName || editingStrategy.strategy_name,
           instrument: editingStrategy.instrument || 'NIFTY',
           segment: editingStrategy.segment || 'Option',
-          visibility: normalizeVisibility(editingStrategy.visibility),
+          visibility: visibilitySelection,
           'candle-time': editingStrategy.candle_time || '5',
           'candle_time': editingStrategy.candle_time || '5',
           'execution-start': editingStrategy.start_time || '09:15',
@@ -1374,7 +1388,7 @@ const AIEnabledStrategyChat: React.FC<AIEnabledStrategyChatProps> = ({
         'strategy-name': createdName,
         instrument: 'NIFTY',
         segment: 'Option',
-        visibility: 'private',
+        visibility: visibilitySelection,
         'candle-time': '5',
         'candle_time': '5',
         'execution-start': '09:15',
@@ -1415,6 +1429,7 @@ const AIEnabledStrategyChat: React.FC<AIEnabledStrategyChatProps> = ({
       setLatestStrategy('');
       setDraftBlueprint('');
       setStrategyName('');
+      setVisibilitySelection('private');
       setMessages([]);
       setIsEditingBlueprint(false);
       onStrategySaved && onStrategySaved();
@@ -1715,6 +1730,32 @@ const AIEnabledStrategyChat: React.FC<AIEnabledStrategyChatProps> = ({
                   value={strategyName}
                   onChange={(e) => setStrategyName(e.target.value)}
                 />
+              </div>
+              <div className="mb-2">
+                <label htmlFor="strategy-visibility-select" className="form-label small mb-1">
+                  Visibility
+                </label>
+                <select
+                  id="strategy-visibility-select"
+                  className="form-select form-select-sm"
+                  value={visibilitySelection}
+                  onChange={(e) => {
+                    const nextVis = normalizeVisibility(e.target.value);
+                    if (nextVis === 'public') {
+                      const status = editingStrategy?.approval_status || 'draft';
+                      if (status !== 'approved') {
+                        setError('Only approved strategies can be made public. Please get approval first.');
+                        setVisibilitySelection('private');
+                        return;
+                      }
+                    }
+                    setVisibilitySelection(nextVis);
+                  }}
+                  disabled={!editingStrategy && !latestStrategy}
+                >
+                  <option value="private">Private</option>
+                  <option value="public">Public</option>
+                </select>
               </div>
               <div
                 className="bg-white border rounded p-3 flex-grow-1 overflow-auto"
