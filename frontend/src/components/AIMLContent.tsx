@@ -1090,6 +1090,236 @@ const TrainModelPanel: React.FC = () => {
                   </div>
                 </div>
               )}
+              
+              {/* Detailed Trade History with Explanations */}
+              {rlEvaluationResults.trade_history && rlEvaluationResults.trade_history.length > 0 && (
+                <div className="card border-0 shadow-sm mt-3">
+                  <div className="card-header bg-primary text-white d-flex justify-content-between align-items-center">
+                    <h6 className="mb-0">
+                      <i className="bi bi-list-check me-2"></i>
+                      Detailed Trade History with Model Decisions
+                    </h6>
+                    <div className="d-flex align-items-center gap-2">
+                      {rlEvaluationResults.market_hours_only && (
+                        <span className="badge bg-success">
+                          <i className="bi bi-clock me-1"></i>
+                          Market Hours Only (9:15 AM - 3:30 PM)
+                        </span>
+                      )}
+                      {rlEvaluationResults.trade_history_all && rlEvaluationResults.trade_history_all.length > rlEvaluationResults.trade_history.length && (
+                        <small className="text-white-50">
+                          Showing {rlEvaluationResults.trade_history.length} of {rlEvaluationResults.trade_history_all.length} trades (market hours only)
+                        </small>
+                      )}
+                    </div>
+                  </div>
+                  <div className="card-body">
+                    <div className="table-responsive" style={{ maxHeight: '600px', overflowY: 'auto' }}>
+                      <table className="table table-hover table-sm">
+                        <thead className="table-light sticky-top">
+                          <tr>
+                            <th>#</th>
+                            <th>Entry Time</th>
+                            <th>Exit Time</th>
+                            <th>Entry Price</th>
+                            <th>Exit Price</th>
+                            <th>PnL</th>
+                            <th>Exit Reason</th>
+                            <th>Confidence</th>
+                            <th>Details</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {rlEvaluationResults.trade_history.map((trade: any, idx: number) => (
+                            <React.Fragment key={idx}>
+                              <tr className={trade.pnl > 0 ? 'table-success' : 'table-danger'}>
+                                <td>{idx + 1}</td>
+                                <td>
+                                  {trade.entry_timestamp 
+                                    ? (typeof trade.entry_timestamp === 'string' 
+                                        ? new Date(trade.entry_timestamp).toLocaleString() 
+                                        : trade.entry_timestamp)
+                                    : `Step ${trade.entry_step || 'N/A'}`}
+                                </td>
+                                <td>
+                                  {trade.exit_timestamp 
+                                    ? (typeof trade.exit_timestamp === 'string' 
+                                        ? new Date(trade.exit_timestamp).toLocaleString() 
+                                        : trade.exit_timestamp)
+                                    : `Step ${trade.exit_step || 'N/A'}`}
+                                </td>
+                                <td>₹{trade.entry_price?.toFixed(2) || 'N/A'}</td>
+                                <td>₹{trade.exit_price?.toFixed(2) || 'N/A'}</td>
+                                <td>
+                                  <strong className={trade.pnl > 0 ? 'text-success' : 'text-danger'}>
+                                    ₹{trade.pnl?.toFixed(2) || 'N/A'}
+                                  </strong>
+                                </td>
+                                <td>
+                                  <span className="badge bg-secondary">
+                                    {trade.exit_reason || 'N/A'}
+                                  </span>
+                                </td>
+                                <td>
+                                  {trade.model_confidence !== undefined 
+                                    ? `${(trade.model_confidence * 100).toFixed(1)}%`
+                                    : 'N/A'}
+                                </td>
+                                <td>
+                                  <button
+                                    className="btn btn-sm btn-outline-info"
+                                    type="button"
+                                    data-bs-toggle="collapse"
+                                    data-bs-target={`#trade-details-${idx}`}
+                                    aria-expanded="false"
+                                  >
+                                    <i className="bi bi-info-circle me-1"></i>
+                                    View Details
+                                  </button>
+                                </td>
+                              </tr>
+                              <tr>
+                                <td colSpan={9} className="p-0">
+                                  <div className="collapse" id={`trade-details-${idx}`}>
+                                    <div className="card card-body bg-light m-2">
+                                      <h6 className="text-primary">Entry Reasoning:</h6>
+                                      {trade.entry_reasoning && trade.entry_reasoning.length > 0 ? (
+                                        <ul className="mb-2">
+                                          {trade.entry_reasoning.map((reason: string, rIdx: number) => (
+                                            <li key={rIdx}>{reason}</li>
+                                          ))}
+                                        </ul>
+                                      ) : (
+                                        <p className="text-muted">No entry reasoning available</p>
+                                      )}
+                                      
+                                      <h6 className="text-primary mt-3">Exit Reasoning:</h6>
+                                      {trade.exit_reasoning && trade.exit_reasoning.length > 0 ? (
+                                        <ul className="mb-2">
+                                          {trade.exit_reasoning.map((reason: string, rIdx: number) => (
+                                            <li key={rIdx}>{reason}</li>
+                                          ))}
+                                        </ul>
+                                      ) : (
+                                        <p className="text-muted">No exit reasoning available</p>
+                                      )}
+                                      
+                                      {trade.signal_high !== undefined && trade.signal_low !== undefined && (
+                                        <div className="mt-3">
+                                          <h6 className="text-primary">Signal Details:</h6>
+                                          <p className="mb-0">
+                                            Signal High: ₹{trade.signal_high.toFixed(2)}, 
+                                            Signal Low: ₹{trade.signal_low.toFixed(2)}
+                                          </p>
+                                        </div>
+                                      )}
+                                      
+                                      {trade.q_values && trade.q_values.length > 0 && (
+                                        <div className="mt-3">
+                                          <h6 className="text-primary">Q-Values (Model Action Scores):</h6>
+                                          <div className="d-flex gap-2">
+                                            <span className="badge bg-secondary">HOLD: {trade.q_values[0]?.toFixed(3) || 'N/A'}</span>
+                                            <span className="badge bg-secondary">ENTER_PE: {trade.q_values[1]?.toFixed(3) || 'N/A'}</span>
+                                            <span className="badge bg-secondary">EXIT: {trade.q_values[2]?.toFixed(3) || 'N/A'}</span>
+                                          </div>
+                                        </div>
+                                      )}
+                                    </div>
+                                  </div>
+                                </td>
+                              </tr>
+                            </React.Fragment>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    <div className="mt-3">
+                      <p className="text-muted small">
+                        <i className="bi bi-info-circle me-1"></i>
+                        Showing {rlEvaluationResults.trade_history.length} trades during market hours (9:15 AM - 3:30 PM). 
+                        Green rows indicate profitable trades, red rows indicate losses.
+                        {rlEvaluationResults.trade_history_all && rlEvaluationResults.trade_history_all.length > rlEvaluationResults.trade_history.length && (
+                          <span className="ms-2">
+                            <i className="bi bi-info-circle me-1"></i>
+                            {rlEvaluationResults.trade_history_all.length - rlEvaluationResults.trade_history.length} trades outside market hours have been filtered out.
+                          </span>
+                        )}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
+              
+              {/* Decision Log (Recent Decisions) */}
+              {rlEvaluationResults.decision_log && rlEvaluationResults.decision_log.length > 0 && (
+                <div className="card border-0 shadow-sm mt-3">
+                  <div className="card-header bg-info text-white">
+                    <h6 className="mb-0">
+                      <i className="bi bi-activity me-2"></i>
+                      Recent Model Decisions (Last 100)
+                    </h6>
+                  </div>
+                  <div className="card-body">
+                    <div className="table-responsive" style={{ maxHeight: '400px', overflowY: 'auto' }}>
+                      <table className="table table-sm table-hover">
+                        <thead className="table-light sticky-top">
+                          <tr>
+                            <th>Time</th>
+                            <th>Action</th>
+                            <th>Price</th>
+                            <th>RSI</th>
+                            <th>EMA5</th>
+                            <th>Confidence</th>
+                            <th>Reasoning</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {rlEvaluationResults.decision_log.slice(-100).reverse().map((decision: any, idx: number) => (
+                            <tr key={idx}>
+                              <td className="small">
+                                {decision.timestamp 
+                                  ? (typeof decision.timestamp === 'string' 
+                                      ? new Date(decision.timestamp).toLocaleString() 
+                                      : decision.timestamp)
+                                  : `Step ${decision.step || 'N/A'}`}
+                              </td>
+                              <td>
+                                <span className={`badge ${
+                                  decision.action_name === 'ENTER_PE' ? 'bg-success' :
+                                  decision.action_name === 'EXIT' ? 'bg-warning' :
+                                  'bg-secondary'
+                                }`}>
+                                  {decision.action_name || 'N/A'}
+                                </span>
+                              </td>
+                              <td>₹{decision.current_price?.toFixed(2) || 'N/A'}</td>
+                              <td>{decision.rsi14?.toFixed(2) || 'N/A'}</td>
+                              <td>₹{decision.ema5?.toFixed(2) || 'N/A'}</td>
+                              <td>
+                                {decision.confidence !== undefined 
+                                  ? `${(decision.confidence * 100).toFixed(1)}%`
+                                  : 'N/A'}
+                              </td>
+                              <td>
+                                {decision.reasoning && decision.reasoning.length > 0 ? (
+                                  <small>
+                                    {decision.reasoning[0]}
+                                    {decision.reasoning.length > 1 && (
+                                      <span className="text-muted"> (+{decision.reasoning.length - 1} more)</span>
+                                    )}
+                                  </small>
+                                ) : (
+                                  <span className="text-muted">N/A</span>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>

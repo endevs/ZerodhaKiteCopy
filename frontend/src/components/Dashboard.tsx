@@ -14,6 +14,7 @@ import { apiUrl, SOCKET_BASE_URL } from '../config/api';
 const Dashboard: React.FC = () => {
   const [activeTab, setActiveTab] = useState<string>('dashboard');
   const [userName, setUserName] = useState<string>('Guest');
+  const [kiteClientId, setKiteClientId] = useState<string | null>(null);
   const [niftyPrice, setNiftyPrice] = useState<string>('Loading...');
   const [bankNiftyPrice, setBankNiftyPrice] = useState<string>('Loading...');
   const [isAdmin, setIsAdmin] = useState<boolean>(false);
@@ -52,6 +53,7 @@ const Dashboard: React.FC = () => {
         const data = await response.json();
         if (response.ok) {
           setUserName(data.user_name || 'User');
+          setKiteClientId(data.kite_client_id || null);
           const hasAccessToken = data.access_token_present || false;
           
           // Check admin status
@@ -283,6 +285,7 @@ const Dashboard: React.FC = () => {
         activeTab={activeTab}
         onTabChange={setActiveTab}
         userName={userName}
+        kiteClientId={kiteClientId}
         onLogout={handleLogout}
         niftyPrice={niftyPrice}
         bankNiftyPrice={bankNiftyPrice}

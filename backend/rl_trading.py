@@ -6,6 +6,7 @@ import os
 import pickle
 import logging
 import datetime
+from datetime import datetime as dt
 import random
 import math
 from collections import deque
@@ -113,6 +114,8 @@ class MountainSignalRLEnv:
         self.losing_trades = 0
         self.total_pnl = 0.0
         self.trade_history = []
+        # Decision explanation tracking
+        self.decision_log: List[Dict[str, Any]] = []
         
         return self._get_state()
     
@@ -159,10 +162,21 @@ class MountainSignalRLEnv:
         
         return state
     
-    def _check_mountain_signals(self):
-        """Check for Mountain Signal conditions (PE signal only)"""
+    def _check_mountain_signals(self) -> Dict[str, Any]:
+        """Check for Mountain Signal conditions (PE signal only) with detailed explanation"""
+        signal_info = {
+            'signal_detected': False,
+            'signal_type': None,
+            'reasons': [],
+            'candle_time': None,
+            'signal_high': None,
+            'signal_low': None,
+            'ema_value': None,
+            'rsi_value': None,
+        }
+        
         if self.current_step < 2:
-            return
+            return signal_info
         
         prev_row = self.df.iloc[self.current_step - 1]
         prev_ema = prev_row['ema5']
@@ -173,8 +187,92 @@ class MountainSignalRLEnv:
             if prev_rsi is not None and prev_rsi > 70:
                 self.pe_signal_candle_idx = self.current_step - 1
                 self.pe_signal_price_above_low = False
+                
+                signal_info['signal_detected'] = True
+                signal_info['signal_type'] = 'PE'
+                signal_info['reasons'] = [
+                    f"LOW ({prev_row['low']:.2f}) > EMA5 ({prev_ema:.2f})",
+                    f"RSI14 ({prev_rsi:.2f}) > 70 (overbought condition)"
+                ]
+                signal_info['candle_time'] = prev_row.name if hasattr(prev_row, 'name') else self.current_step - 1
+                signal_info['signal_high'] = float(prev_row['high'])
+                signal_info['signal_low'] = float(prev_row['low'])
+                signal_info['ema_value'] = float(prev_ema)
+                signal_info['rsi_value'] = float(prev_rsi)
+        
+        # Convert any numpy/pandas booleans to Python bools for JSON serialization
+        if isinstance(signal_info.get('signal_detected'), (np.bool_, bool)):
+            signal_info['signal_detected'] = bool(signal_info['signal_detected'])
+        
+        return signal_info
     
-    def step(self, action: int) -> Tuple[np.ndarray, float, bool, Dict]:
+    def _explain_decision(
+        self,
+        action: int,
+        action_name: str,
+        q_values: Optional[List[float]] = None,
+        confidence: Optional[float] = None,
+        signal_info: Optional[Dict] = None,
+        entry_condition_met: Optional[bool] = None,
+        exit_reason: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Create detailed decision explanation"""
+        if self.current_step >= len(self.df):
+            return {}
+        
+        current_row = self.df.iloc[self.current_step]
+        timestamp = current_row.name if hasattr(current_row, 'name') else self.current_step
+        
+        explanation = {
+            'timestamp': timestamp.isoformat() if hasattr(timestamp, 'isoformat') else str(timestamp),
+            'step': int(self.current_step),
+            'action': action,
+            'action_name': action_name,
+            'current_price': float(current_row['close']),
+            'ema5': float(current_row['ema5']) if not pd.isna(current_row['ema5']) else None,
+            'rsi14': float(current_row['rsi14']) if not pd.isna(current_row['rsi14']) else None,
+            'position': 'PE' if self.position == -1 else 'FLAT',
+            'entry_price': float(self.entry_price) if self.entry_price > 0 else None,
+            'q_values': q_values,
+            'confidence': float(confidence) if confidence is not None else None,
+            'signal_info': signal_info,
+            'entry_condition_met': bool(entry_condition_met) if entry_condition_met is not None else None,
+            'exit_reason': exit_reason,
+        }
+        
+        # Add detailed reasoning based on action
+        if action_name == 'HOLD':
+            rsi_str = f"{explanation['rsi14']:.2f}" if explanation['rsi14'] is not None else 'N/A'
+            ema_str = f"{explanation['ema5']:.2f}" if explanation['ema5'] is not None else 'N/A'
+            explanation['reasoning'] = [
+                'No signal detected' if not signal_info or not signal_info.get('signal_detected') else 'Signal detected but entry condition not met',
+                f"Current RSI: {rsi_str}",
+                f"Current EMA5: {ema_str}",
+            ]
+        elif action_name == 'ENTER_PE':
+            if signal_info and signal_info.get('signal_detected'):
+                explanation['reasoning'] = [
+                    'PE Signal detected:',
+                    *signal_info.get('reasons', []),
+                    f"Entry condition: Close ({explanation['current_price']:.2f}) < Signal Low ({signal_info.get('signal_low', 0):.2f})" if entry_condition_met else 'Entry condition not yet met',
+                ]
+            else:
+                explanation['reasoning'] = ['No PE signal available for entry']
+        elif action_name == 'EXIT':
+            entry_price_str = f"{explanation['entry_price']:.2f}" if explanation['entry_price'] is not None else 'N/A'
+            explanation['reasoning'] = [
+                f"Exit reason: {exit_reason or 'Manual exit'}",
+                f"Entry price: {entry_price_str}",
+                f"Exit price: {explanation['current_price']:.2f}",
+            ]
+        
+        return explanation
+    
+    def step(
+        self,
+        action: int,
+        q_values: Optional[List[float]] = None,
+    ) -> Tuple[np.ndarray, float, bool, Dict]:
         """
         Execute action and return (next_state, reward, done, info)
         
@@ -186,12 +284,20 @@ class MountainSignalRLEnv:
         if self.current_step >= len(self.df) - 1:
             return self._get_state(), 0.0, True, {'done': True}
         
-        self._check_mountain_signals()
+        signal_info = self._check_mountain_signals()
         
         current_row = self.df.iloc[self.current_step]
         current_price = current_row['close']
         reward = 0.0
         info = {}
+        
+        # Calculate confidence from Q-values
+        confidence = None
+        if q_values:
+            max_q = max(q_values)
+            min_q = min(q_values)
+            if max_q != min_q:
+                confidence = (max_q - min_q) / (abs(max_q) + abs(min_q) + 1e-6)
         
         # Update price action validation
         if self.pe_signal_candle_idx is not None and self.position == 0:
@@ -199,18 +305,46 @@ class MountainSignalRLEnv:
             if current_row['high'] > pe_signal_row['low']:
                 self.pe_signal_price_above_low = True
         
-        # Execute action
+        # Execute action with explanations
+        entry_condition_met = None
+        exit_reason = None
+        
         if action == 1 and self.position == 0:  # Enter Short (PE)
             if self.pe_signal_candle_idx is not None:
                 pe_signal_row = self.df.iloc[self.pe_signal_candle_idx]
+                entry_condition_met = current_price < pe_signal_row['low']
                 # Check entry condition: CLOSE < signal LOW
-                if current_price < pe_signal_row['low']:
+                if entry_condition_met:
                     is_first = (self.pe_signal_candle_idx not in [t.get('signal_idx') for t in self.trade_history])
                     if is_first or self.pe_signal_price_above_low:
                         self.position = -1
                         self.entry_price = current_price
                         self.entry_step = self.current_step
                         info['action'] = 'PE_ENTRY'
+                        
+                        # Enhanced trade entry with detailed explanation
+                        trade_entry = {
+                            'entry_step': self.entry_step,
+                            'entry_price': self.entry_price,
+                            'position': 'PE',
+                            'signal_idx': self.pe_signal_candle_idx,
+                            'signal_high': float(pe_signal_row['high']),
+                            'signal_low': float(pe_signal_row['low']),
+                            'entry_timestamp': current_row.name if hasattr(current_row, 'name') else self.current_step,
+                            'entry_reasoning': [
+                                f"PE Signal detected at step {self.pe_signal_candle_idx}",
+                                f"Signal High: {pe_signal_row['high']:.2f}, Signal Low: {pe_signal_row['low']:.2f}",
+                                f"Entry condition met: Close ({current_price:.2f}) < Signal Low ({pe_signal_row['low']:.2f})",
+                                f"First entry: {is_first}, Price validation: {self.pe_signal_price_above_low}",
+                                f"RSI: {signal_info.get('rsi_value'):.2f}" if signal_info.get('rsi_value') is not None else "RSI: N/A",
+                                f"EMA5: {signal_info.get('ema_value'):.2f}" if signal_info.get('ema_value') is not None else "EMA5: N/A",
+                            ],
+                            'model_confidence': confidence,
+                            'q_values': q_values,
+                        }
+                        self.trade_history.append(trade_entry)
+            else:
+                entry_condition_met = False
         
         elif action == 2 and self.position != 0:  # Exit
             pnl = (current_price - self.entry_price) * self.position * self.lot_size
@@ -223,15 +357,32 @@ class MountainSignalRLEnv:
             else:
                 self.losing_trades += 1
             
-            self.trade_history.append({
+            exit_reason = 'MANUAL_EXIT'
+            trade_exit = {
                 'entry_step': self.entry_step,
                 'exit_step': self.current_step,
                 'entry_price': self.entry_price,
                 'exit_price': current_price,
                 'pnl': pnl,
                 'position': 'PE',
-                'signal_idx': self.pe_signal_candle_idx
-            })
+                'exit_reason': exit_reason,
+                'signal_idx': self.pe_signal_candle_idx,
+                'exit_timestamp': current_row.name if hasattr(current_row, 'name') else self.current_step,
+                'exit_reasoning': [
+                    f"Manual exit triggered by model",
+                    f"Entry: {self.entry_price:.2f}, Exit: {current_price:.2f}",
+                    f"PnL: {pnl:.2f}",
+                    f"Model confidence: {confidence:.3f}" if confidence else "N/A",
+                ],
+                'model_confidence': confidence,
+            }
+            
+            # Update the last trade entry with exit info
+            if self.trade_history:
+                last_trade = self.trade_history[-1]
+                last_trade.update(trade_exit)
+            else:
+                self.trade_history.append(trade_exit)
             
             reward = pnl / 100.0  # Scale reward
             self.position = 0
@@ -255,16 +406,28 @@ class MountainSignalRLEnv:
                             self.total_trades += 1
                             self.losing_trades += 1
                             reward = pnl / 100.0
-                            self.trade_history.append({
+                            exit_reason = 'OPTION_STOP_LOSS'
+                            exit_data = {
                                 'entry_step': self.entry_step,
                                 'exit_step': self.current_step,
                                 'entry_price': self.entry_price,
                                 'exit_price': current_price,
                                 'pnl': pnl,
                                 'position': 'PE',
-                                'exit_reason': 'OPTION_STOP_LOSS',
-                                'signal_idx': self.pe_signal_candle_idx
-                            })
+                                'exit_reason': exit_reason,
+                                'signal_idx': self.pe_signal_candle_idx,
+                                'exit_timestamp': current_row.name if hasattr(current_row, 'name') else self.current_step,
+                                'exit_reasoning': [
+                                    f"Option Stop Loss hit: Price change {price_change_ratio*100:.2f}% <= -{self.stop_loss_pct*100:.2f}%",
+                                    f"Entry: {self.entry_price:.2f}, Exit: {current_price:.2f}",
+                                    f"PnL: {pnl:.2f}",
+                                ],
+                                'model_confidence': confidence,
+                            }
+                            if self.trade_history:
+                                self.trade_history[-1].update(exit_data)
+                            else:
+                                self.trade_history.append(exit_data)
                             self.position = 0
                             self.entry_price = 0.0
                             self.entry_step = -1
@@ -280,16 +443,28 @@ class MountainSignalRLEnv:
                             else:
                                 self.losing_trades += 1
                             reward = pnl / 100.0
-                            self.trade_history.append({
+                            exit_reason = 'OPTION_TARGET'
+                            exit_data = {
                                 'entry_step': self.entry_step,
                                 'exit_step': self.current_step,
                                 'entry_price': self.entry_price,
                                 'exit_price': current_price,
                                 'pnl': pnl,
                                 'position': 'PE',
-                                'exit_reason': 'OPTION_TARGET',
-                                'signal_idx': self.pe_signal_candle_idx
-                            })
+                                'exit_reason': exit_reason,
+                                'signal_idx': self.pe_signal_candle_idx,
+                                'exit_timestamp': current_row.name if hasattr(current_row, 'name') else self.current_step,
+                                'exit_reasoning': [
+                                    f"Option Target hit: Price change {price_change_ratio*100:.2f}% >= {self.target_pct*100:.2f}%",
+                                    f"Entry: {self.entry_price:.2f}, Exit: {current_price:.2f}",
+                                    f"PnL: {pnl:.2f}",
+                                ],
+                                'model_confidence': confidence,
+                            }
+                            if self.trade_history:
+                                self.trade_history[-1].update(exit_data)
+                            else:
+                                self.trade_history.append(exit_data)
                             self.position = 0
                             self.entry_price = 0.0
                             self.entry_step = -1
@@ -303,16 +478,28 @@ class MountainSignalRLEnv:
                         self.total_trades += 1
                         self.losing_trades += 1
                         reward = pnl / 100.0
-                        self.trade_history.append({
+                        exit_reason = 'INDEX_STOP_LOSS'
+                        exit_data = {
                             'entry_step': self.entry_step,
                             'exit_step': self.current_step,
                             'entry_price': self.entry_price,
                             'exit_price': current_price,
                             'pnl': pnl,
                             'position': 'PE',
-                            'exit_reason': 'SL',
-                            'signal_idx': self.pe_signal_candle_idx
-                        })
+                            'exit_reason': exit_reason,
+                            'signal_idx': self.pe_signal_candle_idx,
+                            'exit_timestamp': current_row.name if hasattr(current_row, 'name') else self.current_step,
+                            'exit_reasoning': [
+                                f"Index Stop Loss: Price ({current_price:.2f}) >= Signal High ({pe_signal_row['high']:.2f})",
+                                f"Entry: {self.entry_price:.2f}, Exit: {current_price:.2f}",
+                                f"PnL: {pnl:.2f}",
+                            ],
+                            'model_confidence': confidence,
+                        }
+                        if self.trade_history:
+                            self.trade_history[-1].update(exit_data)
+                        else:
+                            self.trade_history.append(exit_data)
                         self.position = 0
                         self.entry_price = 0.0
                         self.entry_step = -1
@@ -334,16 +521,28 @@ class MountainSignalRLEnv:
                                     else:
                                         self.losing_trades += 1
                                     reward = pnl / 100.0
-                                    self.trade_history.append({
+                                    exit_reason = 'INDEX_TARGET'
+                                    exit_data = {
                                         'entry_step': self.entry_step,
                                         'exit_step': self.current_step,
                                         'entry_price': self.entry_price,
                                         'exit_price': current_price,
                                         'pnl': pnl,
                                         'position': 'PE',
-                                        'exit_reason': 'TP',
-                                        'signal_idx': self.pe_signal_candle_idx
-                                    })
+                                        'exit_reason': exit_reason,
+                                        'signal_idx': self.pe_signal_candle_idx,
+                                        'exit_timestamp': current_row.name if hasattr(current_row, 'name') else self.current_step,
+                                        'exit_reasoning': [
+                                            f"Index Target: High < EMA5 and 2 consecutive closes > EMA5",
+                                            f"Entry: {self.entry_price:.2f}, Exit: {current_price:.2f}",
+                                            f"PnL: {pnl:.2f}",
+                                        ],
+                                        'model_confidence': confidence,
+                                    }
+                                    if self.trade_history:
+                                        self.trade_history[-1].update(exit_data)
+                                    else:
+                                        self.trade_history.append(exit_data)
                                     self.position = 0
                                     self.entry_price = 0.0
                                     self.entry_step = -1
@@ -354,6 +553,19 @@ class MountainSignalRLEnv:
         if action == 0 and self.position == 0:
             reward = -0.01
         
+        # Log decision explanation
+        action_names = {0: 'HOLD', 1: 'ENTER_PE', 2: 'EXIT'}
+        decision_explanation = self._explain_decision(
+            action=action,
+            action_name=action_names.get(action, 'UNKNOWN'),
+            q_values=q_values,
+            confidence=confidence,
+            signal_info=signal_info,
+            entry_condition_met=entry_condition_met,
+            exit_reason=exit_reason,
+        )
+        self.decision_log.append(decision_explanation)
+        
         # Update step
         self.current_step += 1
         done = self.current_step >= len(self.df) - 1
@@ -363,6 +575,7 @@ class MountainSignalRLEnv:
             reward += self.total_pnl / 1000.0
         
         next_state = self._get_state()
+        info['decision_explanation'] = decision_explanation
         return next_state, reward, done, info
 
 
@@ -439,16 +652,18 @@ def train_rl_agent(
         
         while not done and step_count < len(env.df) - 21:
             # Epsilon-greedy action selection
+            q_values_list = None
             if random.random() < epsilon:
                 action = random.randrange(action_dim)
             else:
                 with torch.no_grad():
                     state_tensor = torch.from_numpy(state).float().unsqueeze(0).to(RL_DEVICE)
                     q_values = policy_net(state_tensor)
+                    q_values_list = q_values.cpu().numpy()[0].tolist()
                     action = int(torch.argmax(q_values, dim=1).item())
             
-            # Execute action
-            next_state, reward, done, info = env.step(action)
+            # Execute action with Q-values for explanation
+            next_state, reward, done, info = env.step(action, q_values=q_values_list)
             total_reward += reward
             
             # Store experience
@@ -595,10 +810,11 @@ def evaluate_rl_agent(
         with torch.no_grad():
             state_tensor = torch.from_numpy(state).float().unsqueeze(0).to(RL_DEVICE)
             q_values = model(state_tensor)
+            q_values_list = q_values.cpu().numpy()[0].tolist()
             action = int(torch.argmax(q_values, dim=1).item())
         actions_taken.append(action)
         
-        next_state, reward, done, info = env.step(action)
+        next_state, reward, done, info = env.step(action, q_values=q_values_list)
         state = next_state
         
         idx = max(0, min(env.current_step - 1, len(env.df) - 1))
@@ -612,10 +828,56 @@ def evaluate_rl_agent(
             'position': int(env.position),
         })
     
-    # Calculate metrics
+    # Calculate metrics - filter out incomplete trades (those without pnl)
+    completed_trades = [t for t in env.trade_history if 'pnl' in t and t.get('pnl') is not None]
+    
+    # Filter trades to market hours only (9:15 AM - 3:30 PM)
+    def is_market_hours(timestamp) -> bool:
+        """Check if timestamp is within market hours (9:15 AM - 3:30 PM)"""
+        if timestamp is None:
+            return False
+        try:
+            if isinstance(timestamp, str):
+                dt_obj = dt.fromisoformat(timestamp.replace('Z', '+00:00'))
+            elif hasattr(timestamp, 'hour'):
+                dt_obj = timestamp
+            else:
+                return False
+            
+            hour = dt_obj.hour
+            minute = dt_obj.minute
+            time_minutes = hour * 60 + minute
+            
+            # Market hours: 9:15 AM (555 minutes) to 3:30 PM (930 minutes)
+            market_open = 9 * 60 + 15  # 9:15 AM
+            market_close = 15 * 60 + 30  # 3:30 PM
+            
+            return market_open <= time_minutes <= market_close
+        except Exception:
+            return False
+    
+    # Filter trades to market hours
+    market_hours_trades = []
+    for trade in completed_trades:
+        entry_ts = trade.get('entry_timestamp')
+        exit_ts = trade.get('exit_timestamp')
+        
+        # Include trade if entry or exit is during market hours
+        # (or if we can't determine, include it to be safe)
+        if entry_ts and is_market_hours(entry_ts):
+            market_hours_trades.append(trade)
+        elif exit_ts and is_market_hours(exit_ts):
+            market_hours_trades.append(trade)
+        elif not entry_ts and not exit_ts:
+            # If no timestamp, include it (might be step-based)
+            market_hours_trades.append(trade)
+    
+    # Use market hours trades for metrics if available, otherwise use all trades
+    trades_for_metrics = market_hours_trades if market_hours_trades else completed_trades
+    
     win_rate = (env.winning_trades / env.total_trades * 100) if env.total_trades > 0 else 0.0
-    avg_win = np.mean([t['pnl'] for t in env.trade_history if t['pnl'] > 0]) if env.winning_trades > 0 else 0.0
-    avg_loss = np.mean([t['pnl'] for t in env.trade_history if t['pnl'] < 0]) if env.losing_trades > 0 else 0.0
+    avg_win = np.mean([t['pnl'] for t in trades_for_metrics if t.get('pnl', 0) > 0]) if env.winning_trades > 0 else 0.0
+    avg_loss = np.mean([t['pnl'] for t in trades_for_metrics if t.get('pnl', 0) < 0]) if env.losing_trades > 0 else 0.0
     logging.info(
         "[RL][%s] Evaluation complete | PnL=%.2f | trades=%d | win_rate=%.2f%%",
         symbol,
@@ -645,10 +907,11 @@ def evaluate_rl_agent(
             'subset': entry['subset'],
         })
     
-    # Trade scatter points
+    # Trade scatter points - use market hours trades if available
     trade_points: List[Dict[str, Any]] = []
     test_cutoff_time = equity_series[split_index]['time'] if equity_series and split_index < len(equity_series) else None
-    for trade in env.trade_history:
+    trades_for_scatter = market_hours_trades if market_hours_trades else completed_trades
+    for trade in trades_for_scatter:
         entry_step = trade.get('entry_step', 0)
         exit_step = trade.get('exit_step', entry_step)
         entry_idx = max(0, min(entry_step, len(env.df) - 1))
@@ -667,22 +930,45 @@ def evaluate_rl_agent(
             'subset': subset,
         })
     
+    # Helper function to convert numpy/pandas types to JSON-serializable types
+    def make_json_serializable(obj):
+        """Recursively convert numpy/pandas types to Python native types"""
+        if isinstance(obj, dict):
+            return {k: make_json_serializable(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [make_json_serializable(item) for item in obj]
+        elif isinstance(obj, (np.integer, np.int64, np.int32)):
+            return int(obj)
+        elif isinstance(obj, (np.floating, np.float64, np.float32)):
+            return float(obj)
+        elif isinstance(obj, np.bool_):
+            return bool(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif pd.isna(obj):
+            return None
+        else:
+            return obj
+    
     return {
-        'total_pnl': env.total_pnl,
-        'total_trades': env.total_trades,
-        'winning_trades': env.winning_trades,
-        'losing_trades': env.losing_trades,
-        'win_rate': win_rate,
-        'avg_win': avg_win,
-        'avg_loss': avg_loss,
-        'final_balance': env.balance,
-        'trade_history': env.trade_history[-50:],  # Last 50 trades
-        'actions_taken': len(actions_taken),
-        'series': equity_series,
-        'split_index': split_index,
-        'initial_balance': initial_balance,
-        'drawdown_series': drawdown_series,
-        'trade_points': trade_points,
-        'max_drawdown_abs': max_drawdown_abs,
+        'total_pnl': float(env.total_pnl),
+        'total_trades': int(env.total_trades),
+        'winning_trades': int(env.winning_trades),
+        'losing_trades': int(env.losing_trades),
+        'win_rate': float(win_rate),
+        'avg_win': float(avg_win),
+        'avg_loss': float(avg_loss),
+        'final_balance': float(env.balance),
+        'trade_history': make_json_serializable(market_hours_trades[-50:] if market_hours_trades else completed_trades[-50:]),  # Last 50 market hours trades with detailed explanations
+        'trade_history_all': make_json_serializable(completed_trades[-50:]),  # All trades including outside market hours
+        'market_hours_only': bool(market_hours_trades),  # Flag indicating if filtering was applied
+        'decision_log': make_json_serializable(env.decision_log[-1000:]),  # Last 1000 decisions with explanations
+        'actions_taken': int(len(actions_taken)),
+        'series': make_json_serializable(equity_series),
+        'split_index': int(split_index),
+        'initial_balance': float(initial_balance),
+        'drawdown_series': make_json_serializable(drawdown_series),
+        'trade_points': make_json_serializable(trade_points),
+        'max_drawdown_abs': float(max_drawdown_abs),
     }
 

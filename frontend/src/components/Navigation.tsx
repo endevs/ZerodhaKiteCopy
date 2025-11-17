@@ -4,6 +4,7 @@ interface NavigationProps {
   activeTab: string;
   onTabChange: (tab: string) => void;
   userName: string;
+  kiteClientId?: string | null;
   onLogout: () => void;
   niftyPrice: string;
   bankNiftyPrice: string;
@@ -14,6 +15,7 @@ const Navigation: React.FC<NavigationProps> = ({
   activeTab,
   onTabChange,
   userName,
+  kiteClientId,
   onLogout,
   niftyPrice,
   bankNiftyPrice,
@@ -116,6 +118,9 @@ const Navigation: React.FC<NavigationProps> = ({
               <span className="nav-link text-light">
                 <i className="bi bi-person-circle me-2"></i>
                 Welcome, <strong>{userName}</strong>
+                {kiteClientId && (
+                  <span className="ms-1 text-white-50">({kiteClientId})</span>
+                )}
               </span>
             </li>
             <li className="nav-item">
