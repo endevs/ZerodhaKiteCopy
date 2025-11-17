@@ -2896,8 +2896,8 @@ def api_signup():
         
         return jsonify({
             'status': 'success',
-            'message': 'Signup successful! We have emailed an OTP. Please log in to continue.',
-            'redirect': '/login'
+            'message': 'Signup successful! Please verify your OTP and then login.',
+            'redirect': '/verify-otp'
         })
     except Exception as e:
         logging.error(f"Error in api_signup: {e}")
