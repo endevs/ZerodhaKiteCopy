@@ -26,25 +26,44 @@ const Login: React.FC = () => {
         body: JSON.stringify({ email }),
       });
 
-      console.log('Raw response:', response);
-      console.log('Response Status:', response.status);
-      console.log('Response Status Text:', response.statusText);
-
-      if (!response.ok) {
-        // If response is not OK, try to parse JSON error, otherwise use status text
-        let errorData;
+      // Check Content-Type before parsing
+      const contentType = response.headers.get('content-type');
+      const isJson = contentType && contentType.includes('application/json');
+      
+      // Get response text first to check if it's JSON
+      const responseText = await response.text();
+      
+      let data;
+      if (isJson && responseText) {
         try {
-          errorData = await response.json();
+          data = JSON.parse(responseText);
         } catch (jsonError) {
-          errorData = { message: `Server error: ${response.statusText}` };
+          console.error('Failed to parse JSON response:', jsonError);
+          // If user not found (404), show appropriate message
+          if (response.status === 404) {
+            setMessage({ type: 'danger', text: 'User not found. Please sign up.' });
+            return;
+          }
+          setMessage({ type: 'danger', text: 'An unexpected error occurred. Please try again.' });
+          return;
         }
-        setMessage({ type: 'danger', text: errorData.message || 'Login failed.' });
-        console.error('Login failed:', errorData);
+      } else {
+        // Response is not JSON (likely HTML error page from Nginx/CloudFront)
+        console.error('Non-JSON response received:', responseText.substring(0, 200));
+        if (response.status === 404) {
+          setMessage({ type: 'danger', text: 'User not found. Please sign up.' });
+          return;
+        }
+        setMessage({ type: 'danger', text: 'An unexpected error occurred. Please try again.' });
         return;
       }
 
-      const data = await response.json();
-      console.log('Parsed data:', data); // Log the parsed data
+      // Handle non-OK responses with JSON data
+      if (!response.ok) {
+        setMessage({ type: 'danger', text: data.message || 'Login failed.' });
+        console.error('Login failed:', data);
+        return;
+      }
 
       if (data.status === 'success') {
         setMessage({ type: 'success', text: data.message || 'OTP sent successfully!' });
