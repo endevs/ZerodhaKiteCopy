@@ -30,10 +30,10 @@ const Signup: React.FC = () => {
       const data = await response.json();
 
       if (response.ok) {
-        setMessage({ type: 'success', text: data.message || 'Signup successful! Please check your email for OTP.' });
+        setMessage({ type: 'success', text: data.message || 'Signup successful! Please verify your OTP and then login.' });
         setTimeout(() => {
-          navigate('/login', { state: { email } });
-        }, 2000);
+          navigate('/verify-otp', { state: { email } });
+        }, 3000);
       } else {
         setMessage({ type: 'danger', text: data.message || 'Signup failed.' });
       }
