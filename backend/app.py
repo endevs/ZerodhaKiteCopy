@@ -1304,8 +1304,8 @@ logging.basicConfig(level=logging.INFO)
 # Reduce noisy werkzeug/socket logs (but keep ERROR level for debugging)
 try:
     logging.getLogger('werkzeug').setLevel(logging.WARNING)  # Changed from ERROR to WARNING to see 404s
-    logging.getLogger('engineio').setLevel(logging.WARNING)
-    logging.getLogger('socketio').setLevel(logging.WARNING)
+    logging.getLogger('engineio').setLevel(logging.ERROR)  # Only show errors, suppress INFO messages
+    logging.getLogger('socketio').setLevel(logging.ERROR)  # Only show errors, suppress INFO messages
 except Exception:
     pass
 
@@ -1347,8 +1347,8 @@ else:
 socketio = SocketIO(app, 
                     cors_allowed_origins=socketio_cors_origins,
                     async_mode=ASYNC_MODE,
-                    logger=True,  # Enable logging for debugging connection issues
-                    engineio_logger=True,  # Enable engineio logging for debugging
+                    logger=False,  # Disable verbose Socket.IO logging
+                    engineio_logger=False,  # Disable verbose EngineIO logging
                     ping_timeout=60,
                     ping_interval=25,
                     allow_upgrades=True,
@@ -3579,7 +3579,8 @@ def api_user_data():
             'balance': 0,
             'access_token_present': False,
             'token_valid': False,
-            'zerodha_credentials_present': bool(app_key)
+            'zerodha_credentials_present': bool(app_key),
+            'kite_client_id': None  # Will be populated if token is valid
         }
 
         tokens_to_try: List[str] = []
@@ -3601,11 +3602,16 @@ def api_user_data():
 
                     user_name = profile.get("user_name", "Guest")
                     balance = margins.get("equity", {}).get("available", {}).get("live_balance", 0)
+                    
+                    # Get Zerodha Kite Client ID (user_id from profile, e.g., "RD2033")
+                    kite_client_id = profile.get("user_id") or profile.get("client_id") or None
+                    
                     default_response.update({
                         'user_name': user_name,
                         'balance': balance,
                         'access_token_present': True,
                         'token_valid': True,
+                        'kite_client_id': kite_client_id,
                         'message': 'Zerodha session active'
                     })
                     return jsonify(default_response)
@@ -8264,7 +8270,8 @@ def api_rl_evaluate():
             'win_rate': result.get('win_rate'),
             'avg_win': result.get('avg_win'),
             'avg_loss': result.get('avg_loss'),
-            'trade_history': result.get('trade_history'),
+            'trade_history': result.get('trade_history', []),  # Enhanced with detailed explanations
+            'decision_log': result.get('decision_log', []),  # Model decision explanations
             'actions_taken': result.get('actions_taken'),
             'final_balance': result.get('final_balance'),
             'total_trades': result.get('total_trades'),
