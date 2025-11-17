@@ -3128,7 +3128,7 @@ def api_login():
         
         if not email:
             logging.warning("Login request - Email is missing")
-            return jsonify({
+            response = jsonify({
                 'status': 'error', 
                 'message': 'Email is required',
                 'debug': {
@@ -3136,7 +3136,9 @@ def api_login():
                     'has_json': request.is_json,
                     'form_data': dict(request.form) if request.form else None
                 }
-            }), 400
+            })
+            response.headers['Content-Type'] = 'application/json'
+            return response, 400
         
         # Use try-finally to ensure connection is always closed
         try:
@@ -3183,16 +3185,20 @@ def api_login():
                 'redirect': '/verify-otp'  # Relative path for React Router
             })
         else:
-            return jsonify({
+            response = jsonify({
                 'status': 'error',
                 'message': 'User not found. Please sign up.'
-            }), 404
+            })
+            response.headers['Content-Type'] = 'application/json'
+            return response, 404
     except Exception as e:
         logging.error(f"Error in api_login: {e}")
-        return jsonify({
+        response = jsonify({
             'status': 'error',
             'message': 'An error occurred. Please try again.'
-        }), 500
+        })
+        response.headers['Content-Type'] = 'application/json'
+        return response, 500
 
 
 @app.route("/zerodha_login")
