@@ -3,12 +3,14 @@ from utils.kite_utils import get_option_symbols
 from utils.indicators import calculate_rsi
 from rules import load_mountain_signal_pe_rules
 from kiteconnect import KiteConnect
+from kiteconnect.exceptions import TokenException, NetworkException, InputException
 import logging
 import datetime
 import re
 import pandas as pd
 import numpy as np
 import uuid
+import time
 from typing import Optional, Dict, Any
 
 
@@ -95,9 +97,9 @@ class CaptureMountainSignal(BaseStrategy):
             option_lot_size = None
         if not option_lot_size or option_lot_size <= 0:
             if 'BANK' in (self.instrument or '').upper():
-                option_lot_size = 25
+                option_lot_size = 15  # BANKNIFTY lot size is 15
             elif 'NIFTY' in (self.instrument or '').upper():
-                option_lot_size = 50
+                option_lot_size = 50  # NIFTY lot size is 50
             else:
                 option_lot_size = 50
         self.option_lot_size = int(max(1, option_lot_size))
@@ -324,13 +326,14 @@ class CaptureMountainSignal(BaseStrategy):
                         option_data['atm_plus2_pe'] = {'token': inst['instrument_token'], 'symbol': inst['tradingsymbol'], 'strike': strike}
             
             return option_data
-        except kite_exceptions.TokenException as exc:
+        except TokenException as exc:
             logging.error(f"Token error while fetching option instruments: {exc}")
             return {}
-        except kite_exceptions.NetworkException as exc:
+        except NetworkException as exc:
             wait_seconds = getattr(exc, 'retry_after', None)
             logging.warning(f"Rate limited while fetching option instruments: {exc}. "
                             f"{'Retrying after ' + str(wait_seconds) + 's' if wait_seconds else 'Will retry later.'}")
+            # Return cached instruments if available, otherwise empty dict
             return self._instruments_cache or {}
         except Exception as e:
             logging.error(f"Error getting option instruments for monitoring: {e}", exc_info=True)
@@ -602,6 +605,11 @@ class CaptureMountainSignal(BaseStrategy):
             # Find the trading symbol and instrument token
             for inst in filtered_instruments:
                 if inst['strike'] == atm_strike:
+                    # Update lot size from instrument data if available
+                    if 'lot_size' in inst and inst['lot_size'] and inst['lot_size'] > 0:
+                        self.option_lot_size = int(inst['lot_size'])
+                        self.live_order_context['lot_size'] = self.option_lot_size
+                        logging.info(f"Updated lot size from instrument data: {self.option_lot_size}")
                     return inst['tradingsymbol'], inst['instrument_token']
             
             return None, None
@@ -616,9 +624,13 @@ class CaptureMountainSignal(BaseStrategy):
             return None, None, None
         
         try:
-            quantity = int(max(1, int(self.total_lot)) * max(1, int(self.option_lot_size)))
+            # Calculate base quantity
+            base_quantity = int(max(1, int(self.total_lot)) * max(1, int(self.option_lot_size)))
+            # Ensure quantity is a multiple of lot size (required by Kite API)
+            quantity = round_to_multiple(base_quantity, self.option_lot_size)
         except Exception:
-            quantity = max(1, int(self.total_lot)) * self.option_lot_size
+            base_quantity = max(1, int(self.total_lot)) * self.option_lot_size
+            quantity = round_to_multiple(base_quantity, self.option_lot_size)
 
         if self.paper_trade or not self.live_order_context.get('api_key') or not self.live_order_context.get('access_token'):
             order_id = str(uuid.uuid4())[:8]
@@ -668,12 +680,21 @@ class CaptureMountainSignal(BaseStrategy):
             )
             self.status['last_live_order_error'] = None
             return order_id, trading_symbol, instrument_token
-        except kite_exceptions.TokenException as exc:
+        except TokenException as exc:
             logging.error(f"[LIVE TRADE] Token error while placing {transaction_type} order for {trading_symbol}: {exc}")
             self.status['last_live_order_error'] = str(exc)
             return None, trading_symbol, instrument_token
-        except kite_exceptions.NetworkException as exc:
-            logging.warning(f"[LIVE TRADE] Network error while placing {transaction_type} order for {trading_symbol}: {exc}")
+        except NetworkException as exc:
+            wait_seconds = getattr(exc, 'retry_after', 5)  # Default to 5 seconds if not specified
+            logging.warning(f"[LIVE TRADE] Network error (rate limited?) while placing {transaction_type} order for {trading_symbol}: {exc}. "
+                          f"Will retry after {wait_seconds}s")
+            self.status['last_live_order_error'] = f"Rate limited: {exc}. Retry after {wait_seconds}s"
+            # Wait before returning to allow retry
+            time.sleep(min(wait_seconds, 10))  # Cap at 10 seconds
+            return None, trading_symbol, instrument_token
+        except InputException as exc:
+            logging.error(f"[LIVE TRADE] Input error while placing {transaction_type} order for {trading_symbol}: {exc}. "
+                         f"Quantity was {quantity}, lot size is {self.option_lot_size}")
             self.status['last_live_order_error'] = str(exc)
             return None, trading_symbol, instrument_token
         except Exception as exc:
