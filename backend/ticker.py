@@ -160,7 +160,12 @@ class Ticker:
                             try:
                                 candle_date = candle.get('date') if isinstance(candle, dict) else getattr(candle, 'date', None)
                                 if candle_date:
-                                    if isinstance(candle_date, datetime.datetime):
+                                    # Handle pandas Timestamp
+                                    if hasattr(candle_date, 'to_pydatetime'):
+                                        date_str = candle_date.to_pydatetime().isoformat()
+                                    elif hasattr(candle_date, 'isoformat'):
+                                        date_str = candle_date.isoformat()
+                                    elif isinstance(candle_date, datetime.datetime):
                                         date_str = candle_date.isoformat()
                                     else:
                                         date_str = str(candle_date)
@@ -169,11 +174,11 @@ class Ticker:
                                 
                                 historical_candles.append({
                                     'time': date_str,
-                                    'open': candle.get('open') if isinstance(candle, dict) else getattr(candle, 'open', 0),
-                                    'high': candle.get('high') if isinstance(candle, dict) else getattr(candle, 'high', 0),
-                                    'low': candle.get('low') if isinstance(candle, dict) else getattr(candle, 'low', 0),
-                                    'close': candle.get('close') if isinstance(candle, dict) else getattr(candle, 'close', 0),
-                                    'volume': candle.get('volume', 0) if isinstance(candle, dict) else getattr(candle, 'volume', 0)
+                                    'open': float(candle.get('open') if isinstance(candle, dict) else getattr(candle, 'open', 0)),
+                                    'high': float(candle.get('high') if isinstance(candle, dict) else getattr(candle, 'high', 0)),
+                                    'low': float(candle.get('low') if isinstance(candle, dict) else getattr(candle, 'low', 0)),
+                                    'close': float(candle.get('close') if isinstance(candle, dict) else getattr(candle, 'close', 0)),
+                                    'volume': float(candle.get('volume', 0) if isinstance(candle, dict) else getattr(candle, 'volume', 0))
                                 })
                             except Exception as e:
                                 logging.debug(f"Error processing candle data: {e}")
@@ -212,22 +217,42 @@ class Ticker:
                     elif position == 1 and signal_candle_high > 0:  # CE position
                         ce_break_level = signal_candle_high
                     
+                    # Sanitize signal_history_today to ensure JSON serializable
+                    signal_history = []
+                    for sig in strategy_status.get('signal_history_today', []):
+                        try:
+                            sanitized_sig = {}
+                            for key, value in sig.items():
+                                # Convert pandas Timestamp to string
+                                if hasattr(value, 'to_pydatetime'):
+                                    sanitized_sig[key] = value.to_pydatetime().isoformat()
+                                elif hasattr(value, 'isoformat'):
+                                    sanitized_sig[key] = value.isoformat()
+                                elif isinstance(value, datetime.datetime):
+                                    sanitized_sig[key] = value.isoformat()
+                                else:
+                                    sanitized_sig[key] = value
+                            signal_history.append(sanitized_sig)
+                        except Exception as e:
+                            logging.debug(f"Error sanitizing signal history entry: {e}")
+                            continue
+                    
                     # Emit to strategy room
                     self.socketio.emit('strategy_update', {
                         'strategy_id': str(db_id),
                         'metrics': metrics,
                         'historical_candles': historical_candles,
-                        'signal_candle_high': signal_candle_high,
-                        'signal_candle_low': signal_candle_low,
-                        'pe_break_level': pe_break_level,
-                        'ce_break_level': ce_break_level,
-                        'signal_history_today': strategy_status.get('signal_history_today', []),
+                        'signal_candle_high': float(signal_candle_high) if signal_candle_high else None,
+                        'signal_candle_low': float(signal_candle_low) if signal_candle_low else None,
+                        'pe_break_level': float(pe_break_level) if pe_break_level else None,
+                        'ce_break_level': float(ce_break_level) if ce_break_level else None,
+                        'signal_history_today': signal_history,
                         'log': {
                             'timestamp': datetime.datetime.now().isoformat(),
                             'action': strategy_status.get('message', 'Processing'),
-                            'price': metrics['currentPrice'],
-                            'quantity': metrics['quantity'],
-                            'pnl': metrics['currentPnL'],
+                            'price': float(metrics['currentPrice']) if metrics.get('currentPrice') else 0,
+                            'quantity': int(metrics['quantity']) if metrics.get('quantity') else 0,
+                            'pnl': float(metrics['currentPnL']) if metrics.get('currentPnL') else 0,
                             'status': 'active'
                         }
                     }, room=room_name)

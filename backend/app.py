@@ -2128,6 +2128,70 @@ def _process_single_live_trade_deployment(deployment: Dict[str, Any], now: datet
                 'stopLoss': int(counts.get('stop_loss', 0)),
                 'targetHit': int(counts.get('target_hit', 0)),
             }
+        # Add signals from market open to history (only once, when initialized)
+        if strategy_status.get('historical_data_initialized') and not state.get('signals_from_market_open_added'):
+            import pandas as pd  # Local import for timestamp conversion
+            signals_from_open = strategy_status.get('signals_from_market_open', [])
+            ignored_from_open = strategy_status.get('ignored_signals_from_market_open', [])
+            
+            # Add identified signals to history
+            for signal in signals_from_open:
+                timestamp = signal.get('timestamp') or signal.get('candle_time')
+                if isinstance(timestamp, str):
+                    try:
+                        timestamp = datetime.datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                    except:
+                        timestamp = None
+                elif isinstance(timestamp, pd.Timestamp):
+                    timestamp = timestamp.to_pydatetime()
+                
+                append_history_entry(
+                    f"{signal.get('type', 'PE')} Signal: {', '.join(signal.get('reasons', []))}",
+                    level='info',
+                    category='signal_identified',
+                    meta={
+                        'eventType': 'signal_identified',
+                        'signalType': signal.get('type'),
+                        'timestamp': timestamp.isoformat() if timestamp else None,
+                        'candleTime': signal.get('candle_time'),
+                        'signalHigh': signal.get('signal_high'),
+                        'signalLow': signal.get('signal_low'),
+                        'emaValue': signal.get('ema_value'),
+                        'rsiValue': signal.get('rsi_value'),
+                        'price': signal.get('price'),
+                    },
+                    timestamp=timestamp.isoformat() if timestamp else None,
+                )
+            
+            # Add ignored signals to history
+            for ignored in ignored_from_open:
+                timestamp = ignored.get('timestamp') or ignored.get('candle_time')
+                if isinstance(timestamp, str):
+                    try:
+                        timestamp = datetime.datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                    except:
+                        timestamp = None
+                elif isinstance(timestamp, pd.Timestamp):
+                    timestamp = timestamp.to_pydatetime()
+                
+                append_history_entry(
+                    ignored.get('reason', 'Signal ignored'),
+                    level='warning',
+                    category='signal_ignored',
+                    meta={
+                        'eventType': 'signal_ignored',
+                        'signalType': ignored.get('type'),
+                        'timestamp': timestamp.isoformat() if timestamp else None,
+                        'candleTime': ignored.get('candle_time'),
+                        'emaValue': ignored.get('ema_value'),
+                        'rsiValue': ignored.get('rsi_value'),
+                        'price': ignored.get('price'),
+                    },
+                    timestamp=timestamp.isoformat() if timestamp else None,
+                )
+            
+            state['signals_from_market_open_added'] = True
+        
         signal_status = strategy_status.get('signal_status')
         previous_signal_status = state.get('lastSignalStatus')
         if signal_status and signal_status != previous_signal_status:
@@ -2160,6 +2224,10 @@ def _process_single_live_trade_deployment(deployment: Dict[str, Any], now: datet
             'stopLossLevel': strategy_status.get('stop_loss_level'),
             'targetLevel': strategy_status.get('target_profit_level'),
             'pnl': strategy_status.get('pnl'),
+            'currentLtp': strategy_status.get('current_ltp', 0),
+            'historicalDataInitialized': strategy_status.get('historical_data_initialized', False),
+            'historicalCandlesLoaded': strategy_status.get('historical_candles_loaded', 0),
+            'exitConditions': strategy_status.get('exit_conditions'),  # Add exit conditions for display
         }
         state['strategyInsights'] = _simplify_for_json(insights)
 
@@ -8132,6 +8200,459 @@ def api_live_trade_delete():
 
     live_delete_deployment(deployment['id'])
     return jsonify({'status': 'success', 'message': 'Deployment deleted.'})
+
+
+@app.route("/api/live_trade/replay_candles", methods=['GET'])
+def api_live_trade_replay_candles():
+    """Fetch historical candle data for replay mode"""
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+
+    try:
+        date_str = request.args.get('date')
+        strategy_id_str = request.args.get('strategy_id')
+
+        if not date_str or not strategy_id_str:
+            return jsonify({'status': 'error', 'message': 'Date and strategy_id are required'}), 400
+
+        try:
+            replay_date = datetime.datetime.strptime(date_str, '%Y-%m-%d').date()
+            strategy_id = int(strategy_id_str)
+        except ValueError:
+            return jsonify({'status': 'error', 'message': 'Invalid date or strategy_id format'}), 400
+
+        # Get strategy record
+        user_id = session['user_id']
+        strategy = _get_strategy_record_for_preview(strategy_id, user_id)
+        if not strategy:
+            return jsonify({'status': 'error', 'message': 'Strategy not found or access denied'}), 404
+
+        strategy_dict = dict(strategy)
+        instrument = strategy_dict.get('instrument', 'BANKNIFTY')
+        candle_time = strategy_dict.get('candle_time', '5')
+        ema_period = strategy_dict.get('ema_period')
+        # Ensure ema_period is not None, default to 5
+        if ema_period is None:
+            ema_period = 5
+        else:
+            try:
+                ema_period = int(ema_period)
+            except (ValueError, TypeError):
+                ema_period = 5
+
+        # Resolve instrument token
+        if instrument.upper() == 'NIFTY':
+            token = 256265
+        elif instrument.upper() == 'BANKNIFTY':
+            token = 260105
+        else:
+            return jsonify({'status': 'error', 'message': 'Invalid instrument'}), 400
+
+        # Check if date is a weekday
+        if replay_date.weekday() >= 5:  # Saturday=5, Sunday=6
+            return jsonify({
+                'status': 'success',
+                'candles': [],
+                'message': 'Selected date is a weekend. No trading data available.'
+            })
+
+        # Fetch historical candles using user's Kite client
+        def _fetch_candles(kite_client):
+            start_dt = datetime.datetime.combine(replay_date, datetime.time(9, 15))
+            end_dt = datetime.datetime.combine(replay_date, datetime.time(15, 30))
+            kite_interval = f"{candle_time}minute"
+
+            try:
+                historical_data = kite_client.historical_data(
+                    token,
+                    start_dt,
+                    end_dt,
+                    interval=kite_interval
+                )
+                return historical_data
+            except Exception as e:
+                logging.error(f"Error fetching historical data for replay: {e}", exc_info=True)
+                raise
+
+        user_id = session['user_id']
+        try:
+            historical_data = _with_valid_kite_client(
+                user_id,
+                f"fetch replay candles for {date_str}",
+                _fetch_candles
+            )
+        except kite_exceptions.TokenException:
+            return jsonify({
+                'status': 'error',
+                'message': 'Zerodha session expired. Please log in again.',
+                'authExpired': True
+            }), 401
+        except RuntimeError as err:
+            logging.error(f"Error preparing Zerodha session for replay candles: {err}")
+            return jsonify({
+                'status': 'error',
+                'message': str(err)
+            }), 400
+
+        if not historical_data:
+            return jsonify({
+                'status': 'success',
+                'candles': [],
+                'message': 'No historical data available for the selected date.'
+            })
+
+        # Process candles and calculate EMA5
+        candles = []
+        closes = []
+        
+        for candle in historical_data:
+            candle_time_str = candle['date'].strftime('%Y-%m-%d %H:%M:%S')
+            close_price = float(candle['close'])
+            closes.append(close_price)
+            
+            # Calculate EMA5
+            ema5 = None
+            if len(closes) >= ema_period:
+                if len(closes) == ema_period:
+                    # First EMA value is SMA
+                    ema5 = sum(closes) / ema_period
+                else:
+                    # Subsequent EMA values
+                    multiplier = 2 / (ema_period + 1)
+                    prev_ema = candles[-1].get('ema5', sum(closes[:-1][-ema_period:]) / ema_period)
+                    ema5 = (close_price - prev_ema) * multiplier + prev_ema
+            
+            candles.append({
+                'time': candle_time_str,
+                'open': float(candle['open']),
+                'high': float(candle['high']),
+                'low': float(candle['low']),
+                'close': close_price,
+                'ema5': round(ema5, 2) if ema5 is not None else None,
+                'volume': int(candle.get('volume', 0))
+            })
+
+        return jsonify({
+            'status': 'success',
+            'candles': candles,
+            'date': date_str,
+            'instrument': instrument,
+            'count': len(candles)
+        })
+
+    except Exception as e:
+        logging.error(f"Error in api_live_trade_replay_candles: {e}", exc_info=True)
+        return jsonify({
+            'status': 'error',
+            'message': f'Failed to fetch replay candles: {str(e)}'
+        }), 500
+
+
+@app.route("/api/live_trade/replay_data", methods=['GET'])
+def api_live_trade_replay_data():
+    """Fetch historical replay data (signals, trades, orders, etc.) for a specific date and time"""
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+
+    try:
+        date_str = request.args.get('date')
+        strategy_id_str = request.args.get('strategy_id')
+        current_time_str = request.args.get('current_time', '15:30:00')  # Default to end of day
+
+        if not date_str or not strategy_id_str:
+            return jsonify({'status': 'error', 'message': 'Date and strategy_id are required'}), 400
+
+        try:
+            replay_date = datetime.datetime.strptime(date_str, '%Y-%m-%d').date()
+            strategy_id = int(strategy_id_str)
+            # Parse current_time (format: HH:MM:SS or HH:MM)
+            time_parts = current_time_str.split(':')
+            current_hour = int(time_parts[0])
+            current_min = int(time_parts[1]) if len(time_parts) > 1 else 0
+            current_seconds = int(time_parts[2]) if len(time_parts) > 2 else 0
+            # Create timezone-aware datetime (IST)
+            IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+            current_datetime = datetime.datetime.combine(
+                replay_date, 
+                datetime.time(current_hour, current_min, current_seconds),
+                tzinfo=IST
+            )
+        except (ValueError, IndexError) as e:
+            return jsonify({'status': 'error', 'message': f'Invalid date or time format: {str(e)}'}), 400
+
+        # Get strategy record
+        user_id = session['user_id']
+        strategy = _get_strategy_record_for_preview(strategy_id, user_id)
+        if not strategy:
+            return jsonify({'status': 'error', 'message': 'Strategy not found or access denied'}), 404
+
+        strategy_dict = dict(strategy)
+        instrument = strategy_dict.get('instrument', 'BANKNIFTY')
+        candle_time = strategy_dict.get('candle_time', '5')
+
+        # Resolve instrument token
+        if instrument.upper() == 'NIFTY':
+            token = 256265
+        elif instrument.upper() == 'BANKNIFTY':
+            token = 260105
+        else:
+            return jsonify({'status': 'error', 'message': 'Invalid instrument'}), 400
+
+        # Check if date is a weekday
+        if replay_date.weekday() >= 5:
+            return jsonify({
+                'status': 'success',
+                'signals': [],
+                'trades': [],
+                'orders': [],
+                'positions': [],
+                'history': [],
+                'message': 'Selected date is a weekend. No trading data available.'
+            })
+
+        # Fetch historical candles and run strategy simulation
+        def _fetch_and_simulate(kite_client):
+            start_dt = datetime.datetime.combine(replay_date, datetime.time(9, 15))
+            end_dt = datetime.datetime.combine(replay_date, datetime.time(15, 30))
+            kite_interval = f"{candle_time}minute"
+
+            try:
+                historical_data = kite_client.historical_data(
+                    token,
+                    start_dt,
+                    end_dt,
+                    interval=kite_interval
+                )
+                return historical_data
+            except Exception as e:
+                logging.error(f"Error fetching historical data for replay: {e}", exc_info=True)
+                raise
+
+        user_id = session['user_id']
+        try:
+            historical_data = _with_valid_kite_client(
+                user_id,
+                f"fetch replay data for {date_str}",
+                _fetch_and_simulate
+            )
+        except kite_exceptions.TokenException:
+            return jsonify({
+                'status': 'error',
+                'message': 'Zerodha session expired. Please log in again.',
+                'authExpired': True
+            }), 401
+        except RuntimeError as err:
+            logging.error(f"Error preparing Zerodha session for replay data: {err}")
+            return jsonify({
+                'status': 'error',
+                'message': str(err)
+            }), 400
+
+        if not historical_data:
+            return jsonify({
+                'status': 'success',
+                'signals': [],
+                'trades': [],
+                'orders': [],
+                'positions': [],
+                'history': [],
+                'message': 'No historical data available for the selected date.'
+            })
+
+        # Convert to DataFrame and run strategy simulation
+        import pandas as pd
+        from strategies.capture_mountain_signal import CaptureMountainSignal
+        from utils.indicators import calculate_rsi
+
+        df = pd.DataFrame(historical_data)
+        df['date'] = pd.to_datetime(df['date'])
+        # Ensure all dates are timezone-aware (IST)
+        IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+        if df['date'].dt.tz is None:
+            # Make naive datetimes timezone-aware (assume IST)
+            df['date'] = df['date'].dt.tz_localize(IST)
+        df = df.sort_values('date').reset_index(drop=True)
+
+        # Calculate indicators
+        df['ema5'] = df['close'].ewm(span=5, adjust=False).mean()
+        df['rsi14'] = calculate_rsi(df['close'], period=14)
+
+        # Initialize strategy for replay
+        strategy_obj = CaptureMountainSignal(
+            None,  # No kite client for replay
+            instrument,
+            candle_time,
+            strategy_dict.get('start_time', '09:15:00'),
+            strategy_dict.get('end_time', '15:30:00'),
+            strategy_dict.get('stop_loss', 0),
+            strategy_dict.get('target_profit', 0),
+            strategy_dict.get('total_lot', 1),
+            strategy_dict.get('trailing_stop_loss', 0),
+            strategy_dict.get('segment', 'OPT'),
+            strategy_dict.get('trade_type', 'PE'),
+            strategy_dict.get('strike_price', 0),
+            strategy_dict.get('expiry_type', 'monthly'),
+            strategy_dict.get('strategy_name', 'Replay'),
+            paper_trade=True
+        )
+
+        # Simulate strategy execution up to current_time
+        signals = []
+        trades = []
+        orders = []
+        positions = []
+        history = []
+
+        # Ensure current_datetime is timezone-aware (IST)
+        IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+        if current_datetime.tzinfo is None:
+            # Make naive datetime timezone-aware (assume IST)
+            current_datetime = current_datetime.replace(tzinfo=IST)
+        
+        # Convert current_datetime to pandas Timestamp for comparison
+        import pandas as pd
+        current_timestamp = pd.Timestamp(current_datetime)
+        # Ensure both are timezone-aware
+        if current_timestamp.tz is None:
+            current_timestamp = current_timestamp.tz_localize(IST)
+        
+        for idx, row in df.iterrows():
+            candle_time = row['date']  # This is a pandas Timestamp
+            
+            # Ensure candle_time is timezone-aware for comparison
+            if candle_time.tz is None:
+                candle_time = candle_time.tz_localize(IST)
+            
+            # Normalize both to same timezone if needed
+            if candle_time.tz != current_timestamp.tz:
+                candle_time = candle_time.tz_convert(current_timestamp.tz)
+            
+            # Stop if we've reached the current replay time
+            if candle_time > current_timestamp:
+                break
+
+            # Process candle
+            candle_data = {
+                'date': candle_time,
+                'open': float(row['open']),
+                'high': float(row['high']),
+                'low': float(row['low']),
+                'close': float(row['close']),
+                'volume': int(row.get('volume', 0))
+            }
+
+            # Check for signals based on business rules
+            # PE Signal: LOW > 5 EMA AND RSI > 70
+            # CE Signal: HIGH < 5 EMA AND RSI < 30
+            ema5_value = float(row['ema5']) if pd.notna(row['ema5']) else None
+            rsi14_value = float(row['rsi14']) if pd.notna(row['rsi14']) else None
+            
+            signal_detected = False
+            signal_type = None
+            reasons = []
+            
+            if ema5_value is not None and rsi14_value is not None:
+                # Check PE signal: LOW > 5 EMA AND RSI > 70
+                if candle_data['low'] > ema5_value and rsi14_value > 70:
+                    signal_detected = True
+                    signal_type = 'PE'
+                    reasons = [
+                        f"PE Signal: Candle LOW ({candle_data['low']:.2f}) > 5 EMA ({ema5_value:.2f})",
+                        f"RSI ({rsi14_value:.2f}) > 70 (Overbought condition)"
+                    ]
+                # Check CE signal: HIGH < 5 EMA AND RSI < 30
+                elif candle_data['high'] < ema5_value and rsi14_value < 30:
+                    signal_detected = True
+                    signal_type = 'CE'
+                    reasons = [
+                        f"CE Signal: Candle HIGH ({candle_data['high']:.2f}) < 5 EMA ({ema5_value:.2f})",
+                        f"RSI ({rsi14_value:.2f}) < 30 (Oversold condition)"
+                    ]
+            
+            if signal_detected:
+                signals.append({
+                    'timestamp': candle_time.isoformat() if hasattr(candle_time, 'isoformat') else str(candle_time),
+                    'type': signal_type,
+                    'reasons': reasons,
+                    'candle_time': candle_time.isoformat() if hasattr(candle_time, 'isoformat') else str(candle_time),
+                    'signal_high': float(candle_data['high']),
+                    'signal_low': float(candle_data['low']),
+                    'ema_value': float(ema5_value) if ema5_value is not None else None,
+                    'rsi_value': float(rsi14_value) if rsi14_value is not None else None,
+                    'price': float(row['close'])
+                })
+                
+                # Add to strategy's audit trail for consistency
+                strategy_obj._add_audit_trail('signal_identified', f"{signal_type} Signal: {', '.join(reasons)}", {
+                    'signal_type': signal_type,
+                    'candle_time': str(candle_time),
+                    'high': candle_data['high'],
+                    'low': candle_data['low'],
+                    'ema': ema5_value,
+                    'rsi': rsi14_value
+                })
+
+            # Check entry conditions and simulate trades
+            # (This is a simplified simulation - full logic would be in strategy_obj.process_ticks)
+            # For now, we'll extract from audit trail if available
+
+        # Filter audit trail by time
+        filtered_audit = []
+        if hasattr(strategy_obj, 'status') and 'audit_trail' in strategy_obj.status:
+            for entry in strategy_obj.status.get('audit_trail', []):
+                entry_time_str = entry.get('timestamp', '')
+                try:
+                    if entry_time_str:
+                        # Parse timestamp and ensure it's timezone-aware
+                        if 'Z' in entry_time_str:
+                            entry_time = datetime.datetime.fromisoformat(entry_time_str.replace('Z', '+00:00'))
+                        elif '+' in entry_time_str or entry_time_str.endswith('00:00'):
+                            entry_time = datetime.datetime.fromisoformat(entry_time_str)
+                        else:
+                            # Assume naive datetime, make it timezone-aware (IST)
+                            entry_time = datetime.datetime.fromisoformat(entry_time_str)
+                            if entry_time.tzinfo is None:
+                                entry_time = entry_time.replace(tzinfo=IST)
+                        
+                        # Ensure both are timezone-aware for comparison
+                        if entry_time.tzinfo is None:
+                            entry_time = entry_time.replace(tzinfo=IST)
+                        if current_datetime.tzinfo is None:
+                            current_datetime = current_datetime.replace(tzinfo=IST)
+                        
+                        # Normalize to same timezone for comparison
+                        if entry_time.tzinfo != current_datetime.tzinfo:
+                            entry_time = entry_time.astimezone(current_datetime.tzinfo)
+                        
+                        if entry_time <= current_datetime:
+                            filtered_audit.append(entry)
+                except Exception as e:
+                    logging.debug(f"Error parsing audit trail timestamp {entry_time_str}: {e}")
+                    pass
+
+        # Categorize audit entries
+        signals_identified = [e for e in filtered_audit if e.get('type') == 'signal_identified']
+        signals_ignored = [e for e in filtered_audit if 'ignored' in e.get('type', '').lower() or 'blocked' in e.get('type', '').lower()]
+        trade_entries = [e for e in filtered_audit if e.get('type') in ['entry', 'exit', 'stop_loss', 'target_hit']]
+
+        return jsonify({
+            'status': 'success',
+            'signals': signals_identified[-20:],  # Last 20 signals
+            'signals_ignored': signals_ignored[-20:],  # Last 20 ignored
+            'trades': trade_entries[-20:],  # Last 20 trades
+            'orders': orders,
+            'positions': positions,
+            'history': filtered_audit[-50:],  # Last 50 history entries
+            'current_time': current_time_str,
+            'date': date_str
+        })
+
+    except Exception as e:
+        logging.error(f"Error in api_live_trade_replay_data: {e}", exc_info=True)
+        return jsonify({
+            'status': 'error',
+            'message': f'Failed to fetch replay data: {str(e)}'
+        }), 500
 
 
 # ========================= Reinforcement Learning =========================
