@@ -59,6 +59,9 @@ from live_trade import (
     get_deployments_for_processing as live_get_deployments_for_processing,
     update_deployment as live_update_deployment,
     delete_deployment as live_delete_deployment,
+    get_archived_deployments,
+    get_archived_deployment_by_id,
+    delete_archived_deployment,
     STATUS_SCHEDULED,
     STATUS_ACTIVE,
     STATUS_PAUSED,
@@ -8198,8 +8201,95 @@ def api_live_trade_delete():
         if info.get('live_deployment_id') == deployment['id']:
             del running_strategies[run_id]
 
-    live_delete_deployment(deployment['id'])
-    return jsonify({'status': 'success', 'message': 'Deployment deleted.'})
+    # Archive before deletion (default behavior)
+    live_delete_deployment(deployment['id'], archive=True)
+    return jsonify({'status': 'success', 'message': 'Deployment archived and deleted.'})
+
+
+@app.route("/api/live_trade/archived", methods=['GET'])
+def api_live_trade_archived():
+    """Get archived deployments for the current user."""
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+    
+    try:
+        limit = int(request.args.get('limit', 50))
+        offset = int(request.args.get('offset', 0))
+        strategy_id = request.args.get('strategy_id')
+        
+        user_id = session['user_id']
+        archived = get_archived_deployments(user_id, limit=limit, offset=offset)
+        
+        # Filter by strategy_id if provided
+        if strategy_id:
+            try:
+                strategy_id_int = int(strategy_id)
+                archived = [d for d in archived if d.get('strategy_id') == strategy_id_int]
+            except ValueError:
+                pass
+        
+        # Serialize archived deployments (similar to live deployments)
+        serialized = []
+        for arch in archived:
+            serialized.append(_serialize_live_deployment(arch))
+        
+        return jsonify({
+            'status': 'success',
+            'archived_deployments': serialized,
+            'count': len(serialized)
+        })
+    except Exception as e:
+        logging.error(f"Error fetching archived deployments: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route("/api/live_trade/archived/<int:archive_id>", methods=['GET'])
+def api_live_trade_archived_detail(archive_id: int):
+    """Get details of a specific archived deployment."""
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+    
+    try:
+        user_id = session['user_id']
+        archived = get_archived_deployment_by_id(archive_id, user_id)
+        
+        if not archived:
+            return jsonify({'status': 'error', 'message': 'Archived deployment not found'}), 404
+        
+        return jsonify({
+            'status': 'success',
+            'archived_deployment': _serialize_live_deployment(archived)
+        })
+    except Exception as e:
+        logging.error(f"Error fetching archived deployment {archive_id}: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route("/api/live_trade/archived/<int:archive_id>", methods=['DELETE'])
+def api_live_trade_archived_delete(archive_id: int):
+    """Delete an archived deployment. Only admin users can delete."""
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+    
+    # Check if user is admin
+    if not _is_admin(session['user_id']):
+        return jsonify({'status': 'error', 'message': 'Only admin users can delete archived deployments'}), 403
+    
+    try:
+        user_id = session['user_id']
+        # Admin can delete any archived deployment
+        success = delete_archived_deployment(archive_id, user_id)
+        
+        if success:
+            return jsonify({
+                'status': 'success',
+                'message': 'Archived deployment deleted successfully'
+            })
+        else:
+            return jsonify({'status': 'error', 'message': 'Archived deployment not found'}), 404
+    except Exception as e:
+        logging.error(f"Error deleting archived deployment {archive_id}: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
 @app.route("/api/live_trade/replay_candles", methods=['GET'])

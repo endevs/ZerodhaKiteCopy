@@ -190,6 +190,11 @@ const LiveTradeContent: React.FC = () => {
   const [replayTrades, setReplayTrades] = useState<Array<any>>([]);
   const [replayHistory, setReplayHistory] = useState<Array<any>>([]);
   const [replayDataLoading, setReplayDataLoading] = useState<boolean>(false);
+  
+  // Archived deployments
+  const [archivedDeployments, setArchivedDeployments] = useState<Array<any>>([]);
+  const [archivedLoading, setArchivedLoading] = useState<boolean>(false);
+  const [showArchived, setShowArchived] = useState<boolean>(false);
 
   const formatCurrency = useCallback((value?: number | null, fallback = '—') => {
     if (value === undefined || value === null || Number.isNaN(value)) {
@@ -446,6 +451,83 @@ const LiveTradeContent: React.FC = () => {
       fetchHistoricalCandles(replayDate, selectedStrategy);
     }
   }, [isReplayMode, replayDate, selectedStrategy, fetchHistoricalCandles]);
+
+  // Fetch archived deployments
+  const fetchArchivedDeployments = useCallback(async () => {
+    try {
+      setArchivedLoading(true);
+      const response = await fetch(
+        apiUrl('/api/live_trade/archived?limit=50'),
+        { credentials: 'include' }
+      );
+      
+      if (!response.ok) {
+        throw new Error('Failed to fetch archived deployments');
+      }
+      
+      const data = await response.json();
+      if (data.status === 'success') {
+        setArchivedDeployments(data.archived_deployments || []);
+      } else {
+        throw new Error(data.message || 'Failed to fetch archived deployments');
+      }
+    } catch (error) {
+      console.error('Error fetching archived deployments:', error);
+      setArchivedDeployments([]);
+    } finally {
+      setArchivedLoading(false);
+    }
+  }, []);
+
+  // Delete archived deployment (admin only)
+  const handleDeleteArchived = useCallback(async (archiveId: number) => {
+    try {
+      const response = await fetch(
+        apiUrl(`/api/live_trade/archived/${archiveId}`),
+        {
+          method: 'DELETE',
+          credentials: 'include'
+        }
+      );
+      
+      const data = await response.json();
+      
+      if (response.ok && data.status === 'success') {
+        setActionMessage('Archived deployment deleted successfully.');
+        // Refresh the archived deployments list
+        fetchArchivedDeployments();
+      } else {
+        setError(data.message || 'Failed to delete archived deployment');
+      }
+    } catch (error) {
+      console.error('Error deleting archived deployment:', error);
+      setError('Failed to delete archived deployment');
+    }
+  }, [fetchArchivedDeployments]);
+
+  // Clear replay mode and reset all replay-related state
+  const handleClearReplay = useCallback(() => {
+    setIsReplayMode(false);
+    setReplayDate('');
+    setCurrentReplayTime('09:15:00');
+    setReplayProgress(0);
+    setCandleData([]);
+    setIsPlaying(false);
+    setReplaySignals([]);
+    setReplayIgnoredSignals([]);
+    setReplayTrades([]);
+    setReplayHistory([]);
+    // Reset strategy dropdown and preview to default
+    setSelectedStrategy('');
+    selectedStrategyRef.current = '';
+    setPreview(null);
+    // Stop any replay interval if running
+    if (replayIntervalRef.current) {
+      clearInterval(replayIntervalRef.current);
+      replayIntervalRef.current = null;
+    }
+    setActionMessage('Replay mode cleared.');
+  }, []);
 
   // Fetch replay data (signals, trades, etc.) aligned with replay time
   const fetchReplayData = useCallback(async (date: string, strategyId: string, currentTime: string) => {
@@ -1260,7 +1342,7 @@ const LiveTradeContent: React.FC = () => {
               )}
             </div>
             <div className="card-body">
-              {!deployment ? (
+              {!deployment && !isReplayMode ? (
                 <div className="text-center py-5 text-muted">
                   <i className="bi bi-info-circle display-6 d-block mb-3"></i>
                   <p className="mb-0">
@@ -1269,8 +1351,8 @@ const LiveTradeContent: React.FC = () => {
                 </div>
               ) : (
                 <>
-                  {/* Media Player Controls - Always visible when deployment exists */}
-                  <div className="card bg-light mb-4">
+                  {/* Media Player Controls - Always visible when deployment exists or in replay mode */}
+                  <div className="card bg-light mb-4" data-replay-section>
                     <div className="card-body">
                       <div className="d-flex align-items-center justify-content-between mb-3">
                         <h6 className="mb-0">
@@ -1282,88 +1364,98 @@ const LiveTradeContent: React.FC = () => {
                             </span>
                           )}
                         </h6>
+                        {isReplayMode && (
+                          <button
+                            className="btn btn-sm btn-outline-danger"
+                            onClick={handleClearReplay}
+                            title="Clear replay mode and return to live view"
+                          >
+                            <i className="bi bi-x-circle me-1"></i>
+                            Clear Replay
+                          </button>
+                        )}
+                      </div>
                       <div className="text-muted small">
                         {isReplayMode ? 'Simulating past trading day' : 'Live trading in progress'}
                       </div>
-                    </div>
-                    
-                    {/* Progress Section - Only show in replay mode */}
-                    {isReplayMode && (
-                      <>
-                        {/* Progress Bar (Seek Bar) */}
-                        <div className="mb-3">
-                          <input
-                            type="range"
-                            className="form-range"
-                            min="0"
-                            max="100"
-                            step="0.1"
-                            value={replayProgress}
-                            onChange={(e) => handleSeek(Number(e.target.value))}
-                          />
-                          <div className="d-flex justify-content-between small text-muted">
-                            <span>09:15 AM</span>
-                            <span>03:30 PM</span>
+                      
+                      {/* Progress Section - Only show in replay mode */}
+                      {isReplayMode && (
+                        <>
+                          {/* Progress Bar (Seek Bar) */}
+                          <div className="mb-3">
+                            <input
+                              type="range"
+                              className="form-range"
+                              min="0"
+                              max="100"
+                              step="0.1"
+                              value={replayProgress}
+                              onChange={(e) => handleSeek(Number(e.target.value))}
+                            />
+                            <div className="d-flex justify-content-between small text-muted">
+                              <span>09:15 AM</span>
+                              <span>03:30 PM</span>
+                            </div>
                           </div>
-                        </div>
 
-                        {/* Control Buttons */}
-                        <div className="d-flex align-items-center justify-content-center gap-2 mb-3">
-                          <button
-                            className="btn btn-sm btn-outline-secondary"
-                            onClick={handleRewind}
-                            disabled={currentReplayTime === '09:15:00'}
-                            title="Rewind 5 minutes"
-                          >
-                            <i className="bi bi-skip-backward-fill"></i>
-                          </button>
-                          
-                          <button
-                            className="btn btn-sm btn-primary"
-                            onClick={handlePlayPause}
-                            disabled={!replayDate}
-                            title={isPlaying ? 'Pause' : 'Play'}
-                          >
-                            {isPlaying ? (
-                              <i className="bi bi-pause-fill"></i>
-                            ) : (
-                              <i className="bi bi-play-fill"></i>
-                            )}
-                          </button>
-                          
-                          <button
-                            className="btn btn-sm btn-outline-secondary"
-                            onClick={handleFastForward}
-                            disabled={currentReplayTime === '15:30:00'}
-                            title="Fast forward 5 minutes"
-                          >
-                            <i className="bi bi-skip-forward-fill"></i>
-                          </button>
-                        </div>
+                          {/* Control Buttons */}
+                          <div className="d-flex align-items-center justify-content-center gap-2 mb-3">
+                            <button
+                              className="btn btn-sm btn-outline-secondary"
+                              onClick={handleRewind}
+                              disabled={currentReplayTime === '09:15:00'}
+                              title="Rewind 5 minutes"
+                            >
+                              <i className="bi bi-skip-backward-fill"></i>
+                            </button>
+                            
+                            <button
+                              className="btn btn-sm btn-primary"
+                              onClick={handlePlayPause}
+                              disabled={!replayDate}
+                              title={isPlaying ? 'Pause' : 'Play'}
+                            >
+                              {isPlaying ? (
+                                <i className="bi bi-pause-fill"></i>
+                              ) : (
+                                <i className="bi bi-play-fill"></i>
+                              )}
+                            </button>
+                            
+                            <button
+                              className="btn btn-sm btn-outline-secondary"
+                              onClick={handleFastForward}
+                              disabled={currentReplayTime === '15:30:00'}
+                              title="Fast forward 5 minutes"
+                            >
+                              <i className="bi bi-skip-forward-fill"></i>
+                            </button>
+                          </div>
 
-                        {/* Time Display */}
-                        <div className="d-flex justify-content-between align-items-center flex-wrap gap-2">
-                          <div className="small">
-                            <strong>Current Time:</strong>{' '}
-                            <span className="text-primary">
-                              {currentReplayTime}
-                            </span>
+                          {/* Time Display */}
+                          <div className="d-flex justify-content-between align-items-center flex-wrap gap-2">
+                            <div className="small">
+                              <strong>Current Time:</strong>{' '}
+                              <span className="text-primary">
+                                {currentReplayTime}
+                              </span>
+                            </div>
+                            <div className="small">
+                              <strong>Duration:</strong>{' '}
+                              <span className="text-muted">
+                                {replayDuration}
+                              </span>
+                            </div>
+                            <div className="small">
+                              <strong>Progress:</strong>{' '}
+                              <span className="text-muted">
+                                {replayProgress.toFixed(1)}%
+                              </span>
+                            </div>
                           </div>
-                          <div className="small">
-                            <strong>Duration:</strong>{' '}
-                            <span className="text-muted">
-                              {replayDuration}
-                            </span>
-                          </div>
-                          <div className="small">
-                            <strong>Progress:</strong>{' '}
-                            <span className="text-muted">
-                              {replayProgress.toFixed(1)}%
-                            </span>
-                          </div>
-                        </div>
-                      </>
-                    )}
+                        </>
+                      )}
                     </div>
                   </div>
 
@@ -1523,7 +1615,7 @@ const LiveTradeContent: React.FC = () => {
                         </h6>
                         <p className="mb-1">
                           <strong>Strategy:</strong>{' '}
-                          {deployment.strategyName || 'N/A'}
+                          {isReplayMode ? (selectedStrategy ? `Strategy ID: ${selectedStrategy}` : 'N/A') : (deployment?.strategyName || 'N/A')}
                         </p>
                         <p className="mb-1">
                           <strong>Status:</strong>{' '}
@@ -1533,7 +1625,7 @@ const LiveTradeContent: React.FC = () => {
                             </span>
                           ) : (
                             <span className={`badge ${statusBadgeClass}`}>
-                              {deployment.status.toUpperCase()}
+                              {deployment?.status?.toUpperCase() || 'N/A'}
                             </span>
                           )}
                         </p>
@@ -1550,7 +1642,7 @@ const LiveTradeContent: React.FC = () => {
                             {replayDate} {scheduledStart || '09:15:00'}
                           </span>
                         ) : (
-                          deployment.scheduledStart
+                          deployment?.scheduledStart
                             ? formatDateTime(deployment.scheduledStart)
                             : '—'
                         )}
@@ -1562,11 +1654,11 @@ const LiveTradeContent: React.FC = () => {
                             Replay started at {currentReplayTime}
                           </span>
                         ) : (
-                          deployment.startedAt
+                          deployment?.startedAt
                             ? formatDateTime(deployment.startedAt)
-                            : deployment.status === 'SCHEDULED'
+                            : deployment?.status === 'SCHEDULED'
                               ? 'Pending start'
-                              : deployment.status === 'ACTIVE'
+                              : deployment?.status === 'ACTIVE'
                                 ? 'Starting...'
                                 : '—'
                         )}
@@ -1591,13 +1683,13 @@ const LiveTradeContent: React.FC = () => {
                           <strong>Message:</strong>{' '}
                           {isReplayMode 
                             ? `Replaying historical data up to ${currentReplayTime}`
-                            : deployment.state?.message || '—'}
+                            : deployment?.state?.message || '—'}
                         </p>
                         <p className="mb-1">
                           <strong>Last Check:</strong>{' '}
                           {isReplayMode 
                             ? `${replayDate} ${currentReplayTime}`
-                            : formatDateTime(deployment.state?.lastCheck)}
+                            : formatDateTime(deployment?.state?.lastCheck)}
                         </p>
                         <p className="mb-1">
                           <strong>Candle Interval:</strong>{' '}
@@ -1627,12 +1719,12 @@ const LiveTradeContent: React.FC = () => {
                               <strong>Live P&L:</strong>{' '}
                               <span
                                 className={
-                                  (deployment.state?.livePnl ?? 0) >= 0
+                                  (deployment?.state?.livePnl ?? 0) >= 0
                                     ? 'text-success fw-semibold'
                                     : 'text-danger fw-semibold'
                                 }
                               >
-                                {formatCurrency(deployment.state?.livePnl)}
+                                {formatCurrency(deployment?.state?.livePnl)}
                               </span>
                             </p>
                           </>
@@ -1657,7 +1749,7 @@ const LiveTradeContent: React.FC = () => {
                     </div>
                   </div>
 
-                  {deployment.errorMessage && (
+                  {deployment?.errorMessage && (
                     <div className="alert alert-danger">
                       <i className="bi bi-x-octagon me-2"></i>
                       {deployment.errorMessage}
@@ -2140,6 +2232,177 @@ const LiveTradeContent: React.FC = () => {
                   </div>
                 </>
               )}
+
+              {/* Archived Deployments Section - Always visible */}
+              <div className="mb-4">
+                <div className="card border-0 shadow-sm">
+                  <div className="card-header bg-secondary text-white d-flex justify-content-between align-items-center">
+                    <h5 className="card-title mb-0 d-flex align-items-center">
+                      <i className="bi bi-archive me-2"></i>
+                      Archived Deployments
+                    </h5>
+                    <button
+                      className="btn btn-sm btn-light"
+                      onClick={() => {
+                        if (!showArchived) {
+                          fetchArchivedDeployments();
+                        }
+                        setShowArchived(!showArchived);
+                      }}
+                    >
+                      {showArchived ? 'Hide' : 'Show'} Archived
+                    </button>
+                  </div>
+                  {showArchived && (
+                    <div className="card-body">
+                      {archivedLoading ? (
+                        <div className="text-center py-4">
+                          <span className="spinner-border spinner-border-sm me-2" role="status" />
+                          Loading archived deployments...
+                        </div>
+                      ) : archivedDeployments.length === 0 ? (
+                        <p className="text-muted mb-0">No archived deployments found.</p>
+                      ) : (
+                        <div className="table-responsive">
+                          <table className="table table-hover table-striped mb-0">
+                            <thead className="table-secondary">
+                              <tr>
+                                <th>Strategy</th>
+                                <th>Status</th>
+                                <th>Started</th>
+                                <th>Archived</th>
+                                <th>Final P&L</th>
+                                <th>Actions</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {archivedDeployments.map((arch) => (
+                                <tr key={arch.id}>
+                                  <td>
+                                    <strong>{arch.strategyName || 'N/A'}</strong>
+                                    {arch.strategyId && (
+                                      <small className="text-muted d-block">ID: {arch.strategyId}</small>
+                                    )}
+                                  </td>
+                                  <td>
+                                    <span className={`badge ${
+                                      arch.status === 'active' ? 'bg-success' :
+                                      arch.status === 'stopped' ? 'bg-danger' :
+                                      arch.status === 'error' ? 'bg-warning' :
+                                      'bg-secondary'
+                                    }`}>
+                                      {arch.status?.toUpperCase() || 'N/A'}
+                                    </span>
+                                  </td>
+                                  <td>
+                                    {arch.startedAt ? formatDateTime(arch.startedAt) : '—'}
+                                  </td>
+                                  <td>
+                                    {arch.archivedAt ? formatDateTime(arch.archivedAt) : '—'}
+                                  </td>
+                                  <td>
+                                    {arch.state?.livePnl !== undefined ? (
+                                      <span className={arch.state.livePnl >= 0 ? 'text-success fw-bold' : 'text-danger fw-bold'}>
+                                        ₹{arch.state.livePnl.toFixed(2)}
+                                      </span>
+                                    ) : (
+                                      '—'
+                                    )}
+                                  </td>
+                                  <td>
+                                    <div className="d-flex gap-2">
+                                      {isReplayMode && replayDate && arch.startedAt && 
+                                       new Date(replayDate).toISOString().split('T')[0] === new Date(arch.startedAt).toISOString().split('T')[0] && 
+                                       selectedStrategy === arch.strategyId?.toString() ? (
+                                        // Show "Clear Replay" button if this archived deployment is currently being replayed
+                                        <button
+                                          className="btn btn-sm btn-outline-danger"
+                                          onClick={handleClearReplay}
+                                          title="Clear current replay and exit replay mode"
+                                        >
+                                          <i className="bi bi-x-circle me-1"></i>
+                                          Clear Replay
+                                        </button>
+                                      ) : (
+                                        // Show "Replay" button if not currently replaying this deployment
+                                        <button
+                                          className="btn btn-sm btn-outline-primary"
+                                          onClick={async () => {
+                                            // Load archived deployment for replay
+                                            if (arch.strategyId) {
+                                              // Set strategy first
+                                              setSelectedStrategy(arch.strategyId.toString());
+                                              
+                                              // Determine the date to use for replay
+                                              // Use startedAt if available (when deployment actually ran)
+                                              // Otherwise use archivedAt or lastRunAt
+                                              const dateToUse = arch.startedAt || arch.lastRunAt || arch.archivedAt;
+                                              if (dateToUse) {
+                                                const replayDateObj = new Date(dateToUse);
+                                                const dateStr = replayDateObj.toISOString().split('T')[0];
+                                                
+                                                // Set replay mode and date
+                                                setReplayDate(dateStr);
+                                                setCurrentReplayTime('09:15:00'); // Start from market open
+                                                setReplayProgress(0);
+                                                setIsReplayMode(true);
+                                                
+                                                // Force immediate data fetch
+                                                try {
+                                                  // Fetch historical candles
+                                                  await fetchHistoricalCandles(dateStr, arch.strategyId.toString());
+                                                  // Fetch replay data for market open
+                                                  await fetchReplayData(dateStr, arch.strategyId.toString(), '09:15:00');
+                                                  
+                                                  // Scroll to replay section
+                                                  setTimeout(() => {
+                                                    const replaySection = document.querySelector('[data-replay-section]');
+                                                    if (replaySection) {
+                                                      replaySection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                                                    }
+                                                  }, 500);
+                                                } catch (error) {
+                                                  console.error('Error loading replay data:', error);
+                                                  setError('Failed to load replay data. Please try again.');
+                                                }
+                                              } else {
+                                                setError('No valid date found for this archived deployment.');
+                                              }
+                                            } else {
+                                              setError('Strategy ID not found for this archived deployment.');
+                                            }
+                                          }}
+                                          title="Replay this archived deployment"
+                                        >
+                                          <i className="bi bi-play-circle me-1"></i>
+                                          Replay
+                                        </button>
+                                      )}
+                                      {isAdmin && (
+                                        <button
+                                          className="btn btn-sm btn-outline-danger"
+                                          onClick={() => {
+                                            if (window.confirm(`Are you sure you want to delete this archived deployment?\n\nStrategy: ${arch.strategyName || 'N/A'}\nArchived: ${arch.archivedAt ? formatDateTime(arch.archivedAt) : 'N/A'}\n\nThis action cannot be undone.`)) {
+                                              handleDeleteArchived(arch.id);
+                                            }
+                                          }}
+                                          title="Delete archived deployment (Admin only)"
+                                        >
+                                          <i className="bi bi-trash"></i>
+                                        </button>
+                                      )}
+                                    </div>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
             </div>
           </div>
         </div>
