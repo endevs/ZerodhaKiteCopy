@@ -314,6 +314,22 @@ def archive_deployment(deployment_id: int) -> Optional[Dict[str, Any]]:
     
     conn = get_db_connection()
     try:
+        # Check if this deployment has already been archived
+        existing_archive = conn.execute(
+            """
+            SELECT * FROM archived_deployments 
+            WHERE original_deployment_id = ? 
+            ORDER BY archived_at DESC 
+            LIMIT 1
+            """,
+            (deployment_id,)
+        ).fetchone()
+        
+        if existing_archive:
+            # Already archived, return the existing archive record
+            logging.info(f"Deployment {deployment_id} already archived, skipping duplicate archive")
+            return _row_to_dict(existing_archive)
+        
         # Insert into archived_deployments table
         conn.execute(
             """

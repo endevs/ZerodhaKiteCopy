@@ -17,7 +17,7 @@ const AdminContent: React.FC = () => {
   const [users, setUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'user-management' | 'strategy-approvals'>('user-management');
+  const [activeTab, setActiveTab] = useState<'user-management' | 'strategy-approvals' | 'subscriptions'>('user-management');
   
   interface PendingStrategy {
     id: number;
@@ -34,13 +34,68 @@ const AdminContent: React.FC = () => {
   
   const [pendingStrategies, setPendingStrategies] = useState<PendingStrategy[]>([]);
   const [loadingStrategies, setLoadingStrategies] = useState(false);
+  
+  interface Subscription {
+    subscription_id: number;
+    user_id: number;
+    email: string;
+    mobile: string;
+    plan_type: string;
+    subscription_status: string;
+    start_date: string;
+    end_date: string | null;
+    trial_end_date: string | null;
+    subscription_created_at: string;
+    payment_id: number | null;
+    razorpay_payment_id: string | null;
+    razorpay_order_id: string | null;
+    amount: number | null;
+    payment_status: string | null;
+    payment_method: string | null;
+    transaction_date: string | null;
+  }
+  
+  const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
+  const [loadingSubscriptions, setLoadingSubscriptions] = useState(false);
 
   useEffect(() => {
     loadUsers();
     if (activeTab === 'strategy-approvals') {
       loadPendingStrategies();
+    } else if (activeTab === 'subscriptions') {
+      loadSubscriptions();
     }
   }, [activeTab]);
+  
+  const loadSubscriptions = async () => {
+    try {
+      setLoadingSubscriptions(true);
+      const response = await fetch(apiUrl('/api/admin/subscriptions'), {
+        credentials: 'include',
+      });
+
+      if (response.status === 403) {
+        setError('You do not have admin access');
+        return;
+      }
+
+      if (!response.ok) {
+        throw new Error('Failed to load subscriptions');
+      }
+
+      const data = await response.json();
+      if (data.status === 'success') {
+        setSubscriptions(data.subscriptions || []);
+      } else {
+        setError(data.message || 'Failed to load subscriptions');
+        setSubscriptions([]);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'An error occurred');
+    } finally {
+      setLoadingSubscriptions(false);
+    }
+  };
   
   const loadPendingStrategies = async () => {
     try {
@@ -296,6 +351,18 @@ const AdminContent: React.FC = () => {
                 )}
               </button>
             </li>
+            <li className="nav-item">
+              <button
+                className={`nav-link ${activeTab === 'subscriptions' ? 'active' : ''}`}
+                onClick={() => setActiveTab('subscriptions')}
+              >
+                <i className="bi bi-credit-card me-2"></i>
+                Subscriptions
+                {subscriptions.length > 0 && (
+                  <span className="badge bg-success ms-2">{subscriptions.length}</span>
+                )}
+              </button>
+            </li>
           </ul>
 
           {/* Strategy Approvals Tab */}
@@ -501,6 +568,134 @@ const AdminContent: React.FC = () => {
                     </tbody>
                   </table>
                 </div>
+              </div>
+            </div>
+          )}
+
+          {/* Subscriptions Tab */}
+          {activeTab === 'subscriptions' && (
+            <div className="card">
+              <div className="card-header d-flex justify-content-between align-items-center">
+                <h5 className="mb-0">
+                  <i className="bi bi-credit-card me-2"></i>
+                  Active Subscriptions ({subscriptions.length})
+                </h5>
+                <button
+                  className="btn btn-sm btn-outline-primary"
+                  onClick={loadSubscriptions}
+                  disabled={loadingSubscriptions}
+                >
+                  <i className="bi bi-arrow-clockwise me-1"></i>
+                  Refresh
+                </button>
+              </div>
+              <div className="card-body">
+                {loadingSubscriptions ? (
+                  <div className="text-center py-4">
+                    <div className="spinner-border" role="status">
+                      <span className="visually-hidden">Loading...</span>
+                    </div>
+                  </div>
+                ) : subscriptions.length === 0 ? (
+                  <div className="text-center text-muted py-4">
+                    <i className="bi bi-inbox fs-1 d-block mb-2"></i>
+                    No active subscriptions
+                  </div>
+                ) : (
+                  <div className="table-responsive">
+                    <table className="table table-hover">
+                      <thead>
+                        <tr>
+                          <th>#</th>
+                          <th>User</th>
+                          <th>Plan</th>
+                          <th>Status</th>
+                          <th>Start Date</th>
+                          <th>End Date</th>
+                          <th>Trial End</th>
+                          <th>Amount</th>
+                          <th>Payment Method</th>
+                          <th>Payment ID</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {subscriptions.map((sub, idx) => (
+                          <tr key={sub.subscription_id}>
+                            <td>{idx + 1}</td>
+                            <td>
+                              <div>
+                                <strong>{sub.email}</strong>
+                              </div>
+                              <small className="text-muted">{sub.mobile || 'N/A'}</small>
+                              <br />
+                              <small className="text-muted">User ID: {sub.user_id}</small>
+                            </td>
+                            <td>
+                              <span className={`badge ${
+                                sub.plan_type === 'super_premium' ? 'bg-success' :
+                                sub.plan_type === 'premium' ? 'bg-primary' : 'bg-secondary'
+                              }`}>
+                                {sub.plan_type === 'super_premium' ? 'Super Premium' :
+                                 sub.plan_type === 'premium' ? 'Premium' :
+                                 sub.plan_type === 'freemium' ? 'Freemium' : sub.plan_type}
+                              </span>
+                            </td>
+                            <td>
+                              <span className={`badge ${
+                                sub.subscription_status === 'active' ? 'bg-success' :
+                                sub.subscription_status === 'trial' ? 'bg-info' : 'bg-secondary'
+                              }`}>
+                                {sub.subscription_status || 'N/A'}
+                              </span>
+                            </td>
+                            <td>
+                              {sub.start_date 
+                                ? new Date(sub.start_date).toLocaleDateString('en-IN', {
+                                    year: 'numeric',
+                                    month: 'short',
+                                    day: 'numeric'
+                                  })
+                                : 'N/A'}
+                            </td>
+                            <td>
+                              {sub.end_date 
+                                ? new Date(sub.end_date).toLocaleDateString('en-IN', {
+                                    year: 'numeric',
+                                    month: 'short',
+                                    day: 'numeric'
+                                  })
+                                : 'N/A'}
+                            </td>
+                            <td>
+                              {sub.trial_end_date 
+                                ? new Date(sub.trial_end_date).toLocaleDateString('en-IN', {
+                                    year: 'numeric',
+                                    month: 'short',
+                                    day: 'numeric'
+                                  })
+                                : 'N/A'}
+                            </td>
+                            <td>
+                              {sub.amount !== null && sub.amount !== undefined
+                                ? `₹${sub.amount.toFixed(2)}`
+                                : 'N/A'}
+                            </td>
+                            <td>
+                              {sub.payment_method 
+                                ? <span className="badge bg-secondary">{sub.payment_method.toUpperCase()}</span>
+                                : 'N/A'}
+                            </td>
+                            <td>
+                              {sub.razorpay_payment_id 
+                                ? <small className="font-monospace">{sub.razorpay_payment_id.substring(0, 12)}...</small>
+                                : 'N/A'}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </div>
             </div>
           )}

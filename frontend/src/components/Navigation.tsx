@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 
 interface NavigationProps {
   activeTab: string;
@@ -9,6 +9,8 @@ interface NavigationProps {
   niftyPrice: string;
   bankNiftyPrice: string;
   isAdmin?: boolean;
+  onProfileClick?: () => void;
+  onSubscribeClick?: () => void;
 }
 
 const Navigation: React.FC<NavigationProps> = ({
@@ -20,7 +22,28 @@ const Navigation: React.FC<NavigationProps> = ({
   niftyPrice,
   bankNiftyPrice,
   isAdmin = false,
+  onProfileClick,
+  onSubscribeClick,
 }) => {
+  const [showDropdown, setShowDropdown] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+        setShowDropdown(false);
+      }
+    };
+
+    if (showDropdown) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [showDropdown]);
   const navItems = [
     { id: 'dashboard', label: 'Dashboard', icon: '📊' },
     { id: 'algo-visualization', label: 'Algo Visualization', icon: '🎯' },
@@ -115,34 +138,66 @@ const Navigation: React.FC<NavigationProps> = ({
               </span>
             </li>
             <li className="nav-item">
-              <span className="nav-link text-light">
-                <i className="bi bi-person-circle me-2"></i>
-                Welcome, <strong>{userName}</strong>
-                {kiteClientId && (
-                  <span className="ms-1 text-white-50">({kiteClientId})</span>
+              <div className="position-relative" ref={dropdownRef}>
+                <span 
+                  className="nav-link text-light"
+                  style={{ cursor: 'pointer' }}
+                  onMouseEnter={() => setShowDropdown(true)}
+                  onMouseLeave={() => setShowDropdown(false)}
+                  onClick={() => setShowDropdown(!showDropdown)}
+                >
+                  <i className="bi bi-person-circle me-2"></i>
+                  Welcome, <strong>{userName}</strong>
+                  {kiteClientId && (
+                    <span className="ms-1 text-white-50">({kiteClientId})</span>
+                  )}
+                  <i className={`bi bi-chevron-${showDropdown ? 'up' : 'down'} ms-2`} style={{ fontSize: '0.75rem' }}></i>
+                </span>
+                {showDropdown && (
+                  <div 
+                    className="dropdown-menu show position-absolute end-0 mt-1"
+                    style={{ minWidth: '200px', zIndex: 1050 }}
+                    onMouseEnter={() => setShowDropdown(true)}
+                    onMouseLeave={() => setShowDropdown(false)}
+                  >
+                    <button
+                      className="dropdown-item"
+                      onClick={() => {
+                        setShowDropdown(false);
+                        if (onProfileClick) {
+                          onProfileClick();
+                        }
+                      }}
+                    >
+                      <i className="bi bi-person me-2"></i>
+                      Profile
+                    </button>
+                    <button
+                      className="dropdown-item"
+                      onClick={() => {
+                        setShowDropdown(false);
+                        if (onSubscribeClick) {
+                          onSubscribeClick();
+                        }
+                      }}
+                    >
+                      <i className="bi bi-star me-2"></i>
+                      Subscribe
+                    </button>
+                    <hr className="dropdown-divider" />
+                    <button
+                      className="dropdown-item text-danger"
+                      onClick={() => {
+                        setShowDropdown(false);
+                        onLogout();
+                      }}
+                    >
+                      <i className="bi bi-box-arrow-right me-2"></i>
+                      Logout
+                    </button>
+                  </div>
                 )}
-              </span>
-            </li>
-            <li className="nav-item">
-              <button
-                className="nav-link btn btn-link text-light text-decoration-none"
-                onClick={onLogout}
-                style={{
-                  background: 'none',
-                  border: 'none',
-                  cursor: 'pointer',
-                  padding: '0.5rem 1rem',
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.color = '#0d6efd';
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.color = '#fff';
-                }}
-              >
-                <i className="bi bi-box-arrow-right me-1"></i>
-                Logout
-              </button>
+              </div>
             </li>
           </ul>
         </div>

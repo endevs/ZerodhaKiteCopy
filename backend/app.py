@@ -3393,6 +3393,73 @@ def api_admin_check():
     is_admin = _require_admin()
     return jsonify({'is_admin': is_admin}), 200
 
+@app.route("/api/admin/subscriptions", methods=['GET'])
+def api_admin_get_subscriptions():
+    """Get all subscribed users with their subscription details (admin only)."""
+    if not _require_admin():
+        return jsonify({'status': 'error', 'message': 'Admin access required'}), 403
+    
+    conn = get_db_connection()
+    try:
+        # Get all active subscriptions with user and payment details
+        subscriptions = conn.execute("""
+            SELECT 
+                s.id as subscription_id,
+                s.user_id,
+                s.plan_type,
+                s.status as subscription_status,
+                s.start_date,
+                s.end_date,
+                s.trial_end_date,
+                s.created_at as subscription_created_at,
+                u.email,
+                u.mobile,
+                p.id as payment_id,
+                p.razorpay_payment_id,
+                p.razorpay_order_id,
+                p.amount,
+                p.payment_status,
+                p.payment_method,
+                p.transaction_date,
+                p.created_at as payment_created_at
+            FROM subscriptions s
+            INNER JOIN users u ON s.user_id = u.id
+            LEFT JOIN payments p ON s.id = p.subscription_id
+            WHERE s.status IN ('active', 'trial')
+            ORDER BY s.created_at DESC
+        """).fetchall()
+        
+        result = []
+        for sub in subscriptions:
+            sub_dict = dict(sub)
+            # Format dates
+            if sub_dict.get('start_date'):
+                try:
+                    sub_dict['start_date'] = datetime.datetime.fromisoformat(sub_dict['start_date']).isoformat()
+                except:
+                    pass
+            if sub_dict.get('end_date'):
+                try:
+                    sub_dict['end_date'] = datetime.datetime.fromisoformat(sub_dict['end_date']).isoformat()
+                except:
+                    pass
+            if sub_dict.get('trial_end_date'):
+                try:
+                    sub_dict['trial_end_date'] = datetime.datetime.fromisoformat(sub_dict['trial_end_date']).isoformat()
+                except:
+                    pass
+            result.append(sub_dict)
+        
+        return jsonify({
+            'status': 'success',
+            'subscriptions': result
+        })
+    except Exception as e:
+        logging.error(f"Error fetching subscriptions: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': 'Failed to fetch subscriptions'}), 500
+    finally:
+        conn.close()
+
 @app.route("/api/admin/users", methods=['GET'])
 def api_admin_get_users():
     """Get all users (admin only)"""
@@ -3771,6 +3838,39 @@ def api_contact():
     finally:
         conn.close()
 
+
+@app.route("/api/user/profile", methods=['GET'])
+def api_user_profile():
+    """Get user profile information including email and mobile"""
+    if 'user_id' not in session:
+        return jsonify({
+            'status': 'error',
+            'message': 'User not logged in'
+        }), 401
+    
+    try:
+        user_id = session['user_id']
+        user_row = _get_user_record(user_id)
+        
+        if not user_row:
+            return jsonify({
+                'status': 'error',
+                'message': 'User record not found'
+            }), 404
+        
+        user = dict(user_row)
+        
+        return jsonify({
+            'status': 'success',
+            'email': user.get('email', 'N/A'),
+            'mobile': user.get('mobile', 'N/A')
+        })
+    except Exception as e:
+        logging.error(f"Error fetching user profile: {e}", exc_info=True)
+        return jsonify({
+            'status': 'error',
+            'message': 'Failed to fetch profile'
+        }), 500
 
 @app.route("/api/user-credentials", methods=['GET', 'POST'])
 def api_user_credentials():
@@ -4764,28 +4864,27 @@ def api_backtest_mountain_signal():
                     ce_signal_candle = None
 
             # CE Signal: HIGH < 5 EMA AND RSI < 30
+            # NOTE: CE signals are IGNORED in live trading - only PE trades are allowed
+            # CE signals are detected but not processed for trade entry
             if previous_candle['high'] < previous_ema:
                 if previous_rsi is not None and previous_rsi < 30:
+                    # CE signal detected but ignored - clear any existing CE signal
                     if ce_signal_candle is not None:
                         ce_signal_price_below_high = False
                         if 'index' in ce_signal_candle:
                             signal_candles_with_entry.discard(ce_signal_candle['index'])
-                    ce_signal_candle = {
-                        'date': previous_candle['date'],
-                        'high': previous_candle['high'],
-                        'low': previous_candle['low'],
-                        'index': i - 1
-                    }
-                    pe_signal_candle = None
+                    ce_signal_candle = None  # Clear CE signal instead of setting it
+                    # Don't clear PE signal when CE is detected
 
             # Price action validation for re-entry
             if pe_signal_candle is not None and not trade_placed and not pe_signal_price_above_low:
                 if current_candle['high'] > pe_signal_candle['low']:
                     pe_signal_price_above_low = True
 
-            if ce_signal_candle is not None and not trade_placed and not ce_signal_price_below_high:
-                if current_candle['low'] < ce_signal_candle['high']:
-                    ce_signal_price_below_high = True
+            # CE price action validation disabled - CE signals are ignored
+            # if ce_signal_candle is not None and not trade_placed and not ce_signal_price_below_high:
+            #     if current_candle['low'] < ce_signal_candle['high']:
+            #         ce_signal_price_below_high = True
 
             # Entry Logic
             if not trade_placed:
@@ -4871,8 +4970,9 @@ def api_backtest_mountain_signal():
                         trades[trade_index]['target_price'] = float(target_price_abs)
                         active_option_trade = option_trade
 
-                # CE Entry
-                elif ce_signal_candle is not None and current_candle['close'] > ce_signal_candle['high']:
+                # CE Entry: DISABLED for live trading - only PE trades allowed
+                # CE signals are ignored and no trades are entered
+                elif False:  # Disabled: ce_signal_candle is not None and current_candle['close'] > ce_signal_candle['high']:
                     signal_candle_index = ce_signal_candle['index']
                     is_first_entry = signal_candle_index not in signal_candles_with_entry
                     entry_allowed = is_first_entry or ce_signal_price_below_high
@@ -8925,6 +9025,26 @@ def api_rl_status_compat():
 
 
 app.register_blueprint(chat_bp)
+
+# Register Razorpay routes
+try:
+    from razorpay_routes import register_razorpay_routes
+    register_razorpay_routes(app)
+    logging.info("Razorpay routes registered successfully")
+except ImportError as e:
+    logging.warning(f"Could not import Razorpay routes: {e}")
+except Exception as e:
+    logging.error(f"Error registering Razorpay routes: {e}", exc_info=True)
+
+# Register subscription routes
+try:
+    from subscription_routes import register_subscription_routes
+    register_subscription_routes(app)
+    logging.info("Subscription routes registered successfully")
+except ImportError as e:
+    logging.warning(f"Could not import subscription routes: {e}")
+except Exception as e:
+    logging.error(f"Error registering subscription routes: {e}", exc_info=True)
 
 # Log all registered routes on startup (for debugging)
 def log_routes():

@@ -119,6 +119,25 @@ class Ticker:
                     room_name = f"strategy_{user_id}_{db_id}"
                     strategy_status = strategy_obj.status if hasattr(strategy_obj, 'status') else {}
                     
+                    # Helper function to recursively convert Timestamp objects to strings
+                    def make_json_serializable(obj):
+                        """Recursively convert pandas Timestamp and other non-serializable objects to JSON-compatible types."""
+                        import pandas as pd
+                        if isinstance(obj, pd.Timestamp):
+                            return obj.isoformat()
+                        elif isinstance(obj, datetime.datetime):
+                            return obj.isoformat()
+                        elif isinstance(obj, dict):
+                            return {key: make_json_serializable(value) for key, value in obj.items()}
+                        elif isinstance(obj, (list, tuple)):
+                            return [make_json_serializable(item) for item in obj]
+                        elif hasattr(obj, 'to_pydatetime'):  # pandas Timestamp
+                            return obj.to_pydatetime().isoformat()
+                        elif hasattr(obj, 'isoformat'):  # datetime-like objects
+                            return obj.isoformat()
+                        else:
+                            return obj
+                    
                     # Prepare comprehensive metrics including all strategy details
                     metrics = {
                         'currentPrice': strategy_status.get('current_price', strategy_status.get('current_ltp', 0)),
@@ -237,25 +256,33 @@ class Ticker:
                             logging.debug(f"Error sanitizing signal history entry: {e}")
                             continue
                     
-                    # Emit to strategy room
-                    self.socketio.emit('strategy_update', {
-                        'strategy_id': str(db_id),
-                        'metrics': metrics,
-                        'historical_candles': historical_candles,
-                        'signal_candle_high': float(signal_candle_high) if signal_candle_high else None,
-                        'signal_candle_low': float(signal_candle_low) if signal_candle_low else None,
-                        'pe_break_level': float(pe_break_level) if pe_break_level else None,
-                        'ce_break_level': float(ce_break_level) if ce_break_level else None,
-                        'signal_history_today': signal_history,
-                        'log': {
-                            'timestamp': datetime.datetime.now().isoformat(),
-                            'action': strategy_status.get('message', 'Processing'),
-                            'price': float(metrics['currentPrice']) if metrics.get('currentPrice') else 0,
-                            'quantity': int(metrics['quantity']) if metrics.get('quantity') else 0,
-                            'pnl': float(metrics['currentPnL']) if metrics.get('currentPnL') else 0,
-                            'status': 'active'
-                        }
-                    }, room=room_name)
+                    # Sanitize all data before emitting
+                    try:
+                        sanitized_metrics = make_json_serializable(metrics)
+                        sanitized_historical_candles = make_json_serializable(historical_candles)
+                        sanitized_signal_history = make_json_serializable(signal_history)
+                        
+                        # Emit to strategy room
+                        self.socketio.emit('strategy_update', {
+                            'strategy_id': str(db_id),
+                            'metrics': sanitized_metrics,
+                            'historical_candles': sanitized_historical_candles,
+                            'signal_candle_high': float(signal_candle_high) if signal_candle_high else None,
+                            'signal_candle_low': float(signal_candle_low) if signal_candle_low else None,
+                            'pe_break_level': float(pe_break_level) if pe_break_level else None,
+                            'ce_break_level': float(ce_break_level) if ce_break_level else None,
+                            'signal_history_today': sanitized_signal_history,
+                            'log': {
+                                'timestamp': datetime.datetime.now().isoformat(),
+                                'action': strategy_status.get('message', 'Processing'),
+                                'price': float(metrics.get('currentPrice', 0)) if metrics.get('currentPrice') else 0,
+                                'quantity': int(metrics.get('quantity', 0)) if metrics.get('quantity') else 0,
+                                'pnl': float(metrics.get('currentPnL', 0)) if metrics.get('currentPnL') else 0,
+                                'status': 'active'
+                            }
+                        }, room=room_name)
+                    except Exception as e:
+                        logging.error(f"Error emitting strategy update for strategy {db_id}: {e}", exc_info=True)
                     
                     # Emit paper trade specific updates if this is a paper trade strategy
                     if strategy_info.get('paper_trade'):
@@ -265,12 +292,23 @@ class Ticker:
                             audit_log = None
                             if latest_audit:
                                 latest_entry = latest_audit[-1]
+                                # Convert timestamp to string if it's a Timestamp object
+                                timestamp = latest_entry.get('timestamp', datetime.datetime.now())
+                                if hasattr(timestamp, 'to_pydatetime'):
+                                    timestamp = timestamp.to_pydatetime().isoformat()
+                                elif hasattr(timestamp, 'isoformat'):
+                                    timestamp = timestamp.isoformat()
+                                elif isinstance(timestamp, datetime.datetime):
+                                    timestamp = timestamp.isoformat()
+                                else:
+                                    timestamp = str(timestamp) if timestamp else datetime.datetime.now().isoformat()
+                                
                                 audit_log = {
                                     'id': len(latest_audit),
-                                    'timestamp': latest_entry.get('timestamp', datetime.datetime.now().isoformat()),
+                                    'timestamp': timestamp,
                                     'type': latest_entry.get('type', 'info'),
                                     'message': latest_entry.get('message', ''),
-                                    'details': latest_entry.get('data', {})
+                                    'details': make_json_serializable(latest_entry.get('data', {}))
                                 }
                             
                             # Prepare chart data (today's candles only)
@@ -301,15 +339,26 @@ class Ticker:
                             trade_event = None
                             if strategy_status.get('trade_placed') and not strategy_status.get('last_trade_event_emitted'):
                                 # New trade entry
+                                signal_time = strategy_status.get('signal_candle_time', '')
+                                # Convert signal_time to string if it's a Timestamp
+                                if hasattr(signal_time, 'to_pydatetime'):
+                                    signal_time = signal_time.to_pydatetime().isoformat()
+                                elif hasattr(signal_time, 'isoformat'):
+                                    signal_time = signal_time.isoformat()
+                                elif isinstance(signal_time, datetime.datetime):
+                                    signal_time = signal_time.isoformat()
+                                else:
+                                    signal_time = str(signal_time) if signal_time else ''
+                                
                                 trade_event = {
-                                    'signalTime': strategy_status.get('signal_candle_time', ''),
+                                    'signalTime': signal_time,
                                     'signalType': 'PE' if strategy_status.get('position') == -1 else 'CE',
-                                    'signalHigh': strategy_status.get('signal_candle_high', 0),
-                                    'signalLow': strategy_status.get('signal_candle_low', 0),
+                                    'signalHigh': float(strategy_status.get('signal_candle_high', 0)),
+                                    'signalLow': float(strategy_status.get('signal_candle_low', 0)),
                                     'entryTime': datetime.datetime.now().isoformat(),
-                                    'entryPrice': strategy_status.get('entry_price', 0),
-                                    'optionSymbol': strategy_status.get('traded_instrument', ''),
-                                    'optionPrice': strategy_status.get('option_prices', {}).get('atm_pe' if strategy_status.get('position') == -1 else 'atm_ce', 0),
+                                    'entryPrice': float(strategy_status.get('entry_price', 0)),
+                                    'optionSymbol': str(strategy_status.get('traded_instrument', '')),
+                                    'optionPrice': float(strategy_status.get('option_prices', {}).get('atm_pe' if strategy_status.get('position') == -1 else 'atm_ce', 0)),
                                     'exitTime': None,
                                     'exitPrice': None,
                                     'exitType': None,
@@ -321,10 +370,10 @@ class Ticker:
                                 # Trade was closed
                                 trade_event = {
                                     'exitTime': datetime.datetime.now().isoformat(),
-                                    'exitPrice': strategy_status.get('exit_price', 0),
-                                    'exitType': strategy_status.get('exit_type', ''),
-                                    'pnl': strategy_status.get('pnl', 0),
-                                    'pnlPercent': strategy_status.get('pnl_percent', 0)
+                                    'exitPrice': float(strategy_status.get('exit_price', 0)),
+                                    'exitType': str(strategy_status.get('exit_type', '')),
+                                    'pnl': float(strategy_status.get('pnl', 0)),
+                                    'pnlPercent': float(strategy_status.get('pnl_percent', 0))
                                 }
                                 strategy_status['last_trade_event_emitted'] = False
                             
@@ -332,13 +381,13 @@ class Ticker:
                             if audit_log or len(today_candles) > 0 or trade_event:
                                 self.socketio.emit('paper_trade_update', {
                                     'status': strategy_status.get('message', 'Running'),
-                                    'auditLog': audit_log,
+                                    'auditLog': make_json_serializable(audit_log) if audit_log else None,
                                     'chartData': {
-                                        'candles': today_candles,
-                                        'ema5': today_ema,
-                                        'rsi14': today_rsi
+                                        'candles': make_json_serializable(today_candles),
+                                        'ema5': make_json_serializable(today_ema),
+                                        'rsi14': make_json_serializable(today_rsi)
                                     },
-                                    'tradeEvent': trade_event
+                                    'tradeEvent': make_json_serializable(trade_event) if trade_event else None
                                 }, room=f'paper_trade_{db_id}')
                         except Exception as e:
                             logging.error(f"Error emitting paper trade update for strategy {db_id}: {e}", exc_info=True)
