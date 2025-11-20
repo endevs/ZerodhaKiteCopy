@@ -308,7 +308,7 @@ const Dashboard: React.FC = () => {
       case 'admin':
         return <AdminContent />;
       case 'profile':
-        return <ProfileContent />;
+        return <ProfileContent onSubscribeClick={handleSubscribeClick} />;
       case 'subscribe':
         return <SubscribeContent />;
       default:

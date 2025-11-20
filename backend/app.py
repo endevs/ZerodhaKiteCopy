@@ -1485,7 +1485,7 @@ def _update_user_access_token(user_id: int, token: Optional[str]) -> None:
         if token:
             conn.execute(
                 'UPDATE users SET zerodha_access_token = ?, zerodha_token_created_at = ? WHERE id = ?',
-                (token, datetime.datetime.utcnow().isoformat(), user_id)
+                (token, datetime.datetime.now(datetime.timezone.utc).isoformat(), user_id)
             )
         else:
             conn.execute(
