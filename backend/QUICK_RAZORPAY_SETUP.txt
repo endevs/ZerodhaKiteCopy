@@ -1,0 +1,40 @@
+================================================================================
+QUICK RAZORPAY SETUP - ADD YOUR KEYS TO .env FILE
+================================================================================
+
+LOCATION: D:\WorkSpace\ZerodhaKiteGit\backend\.env
+
+ADD THESE 3 LINES TO YOUR .env FILE:
+-------------------------------------
+
+RAZORPAY_KEY_ID=your_key_id_here
+RAZORPAY_KEY_SECRET=your_key_secret_here
+RAZORPAY_WEBHOOK_SECRET=
+
+EXAMPLE:
+--------
+If Razorpay gave you:
+  key_id: rzp_live_AbCdEfGhIjKlMn
+  key_secret: xyz123abc456def789ghi012jkl345mno
+
+Then add to .env:
+RAZORPAY_KEY_ID=rzp_live_AbCdEfGhIjKlMn
+RAZORPAY_KEY_SECRET=xyz123abc456def789ghi012jkl345mno
+RAZORPAY_WEBHOOK_SECRET=
+
+IMPORTANT:
+----------
+✓ No spaces around = sign
+✓ No quotes around values
+✓ Replace with your actual keys
+✓ Save the file
+✓ Restart backend server
+
+AFTER ADDING:
+-------------
+1. Save .env file
+2. Restart backend server
+3. Check logs for: "Razorpay client initialized successfully"
+
+================================================================================
+

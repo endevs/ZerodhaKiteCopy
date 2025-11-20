@@ -12,6 +12,8 @@ import numpy as np
 import uuid
 import time
 from typing import Optional, Dict, Any
+import requests
+from requests.exceptions import ConnectionError as RequestsConnectionError
 
 
 def round_to_multiple(value, multiple):
@@ -235,8 +237,13 @@ class CaptureMountainSignal(BaseStrategy):
             return 260105
         return None
 
-    def _get_option_instruments_for_monitoring(self, ltp):
-        """Get instrument tokens and symbols for ATM, ATM+2, ATM-2 options (CE and PE)"""
+    def _get_option_instruments_for_monitoring(self, ltp, use_cache_only=False):
+        """Get instrument tokens and symbols for ATM, ATM+2, ATM-2 options (CE and PE)
+        
+        Args:
+            ltp: Current LTP for ATM calculation
+            use_cache_only: If True, only use cached data, don't fetch from API
+        """
         # Skip option monitoring during replay (when kite is None)
         if self.kite is None:
             return {}
@@ -249,14 +256,66 @@ class CaptureMountainSignal(BaseStrategy):
                 self._last_instruments_fetch is not None and
                 (now - self._last_instruments_fetch) < cache_ttl
             )
-            if reuse_cache:
-                instruments = self._instruments_cache
-            else:
-                instruments = self.kite.instruments('NFO')
-                self._instruments_cache = instruments
-                self._last_instruments_fetch = now
-                CaptureMountainSignal._GLOBAL_NFO_INSTRUMENTS = instruments
-                CaptureMountainSignal._GLOBAL_NFO_LAST_FETCH = now
+            instruments = None
+            if reuse_cache or use_cache_only:
+                if self._instruments_cache is not None:
+                    instruments = self._instruments_cache
+                elif use_cache_only:
+                    # Requested cache-only but no cache available
+                    return {}
+                # If reuse_cache is True but cache is None, fall through to fetch
+            
+            if instruments is None and not use_cache_only:
+                # Retry logic for connection errors (common when system is idle)
+                max_retries = 3
+                retry_delay = 1  # Start with 1 second
+                instruments = None
+                last_error = None
+                
+                for attempt in range(max_retries):
+                    try:
+                        instruments = self.kite.instruments('NFO')
+                        # Success - cache and break
+                        self._instruments_cache = instruments
+                        self._last_instruments_fetch = now
+                        CaptureMountainSignal._GLOBAL_NFO_INSTRUMENTS = instruments
+                        CaptureMountainSignal._GLOBAL_NFO_LAST_FETCH = now
+                        break
+                    except (ConnectionResetError, RequestsConnectionError, NetworkException) as e:
+                        last_error = e
+                        if attempt < max_retries - 1:
+                            # Wait before retry with exponential backoff
+                            time.sleep(retry_delay)
+                            retry_delay *= 2
+                        else:
+                            # All retries failed - use cached data if available
+                            if self._instruments_cache is not None:
+                                logging.warning(
+                                    f"[INSTRUMENTS] Failed to fetch instruments after {max_retries} attempts "
+                                    f"(connection reset). Using cached data from {self._last_instruments_fetch}."
+                                )
+                                instruments = self._instruments_cache
+                                # Extend cache validity since we're using stale data
+                                self._last_instruments_fetch = now - cache_ttl + datetime.timedelta(minutes=5)
+                            else:
+                                # No cache available - log error but don't crash
+                                logging.error(
+                                    f"[INSTRUMENTS] Failed to fetch instruments after {max_retries} attempts "
+                                    f"and no cached data available. Error: {type(e).__name__}"
+                                )
+                                return {}
+                    except Exception as e:
+                        # Other errors (TokenException, etc.) - don't retry
+                        logging.error(f"[INSTRUMENTS] Error fetching instruments: {type(e).__name__}: {e}")
+                        if self._instruments_cache is not None:
+                            instruments = self._instruments_cache
+                            logging.warning("[INSTRUMENTS] Using cached instruments due to error.")
+                        else:
+                            return {}
+                        break
+                
+                if instruments is None:
+                    return {}
             
             # Find expiry date
             all_expiries = sorted(list(set([
@@ -331,15 +390,44 @@ class CaptureMountainSignal(BaseStrategy):
             return option_data
         except TokenException as exc:
             logging.error(f"Token error while fetching option instruments: {exc}")
+            # Try to use cached data if available
+            if self._instruments_cache is not None:
+                logging.warning("[INSTRUMENTS] Using cached instruments due to token error.")
+                return self._get_option_instruments_for_monitoring(ltp, use_cache_only=True)  # Recursive call with cache
             return {}
+        except (ConnectionResetError, RequestsConnectionError) as exc:
+            # Connection reset errors are common when system is idle - use cached data if available
+            if self._instruments_cache is not None:
+                logging.debug(
+                    f"[INSTRUMENTS] Connection reset (likely idle timeout). Using cached instruments. "
+                    f"Cache age: {(datetime.datetime.now() - self._last_instruments_fetch).total_seconds() / 60:.1f} minutes"
+                )
+                # Extend cache validity since we're using stale data
+                if self._last_instruments_fetch:
+                    self._last_instruments_fetch = datetime.datetime.now() - datetime.timedelta(minutes=10)
+                return self._get_option_instruments_for_monitoring(ltp, use_cache_only=True)  # Recursive call with cache
+            else:
+                # No cache - log at debug level to reduce noise
+                logging.debug(f"[INSTRUMENTS] Connection reset and no cache available: {type(exc).__name__}")
+                return {}
         except NetworkException as exc:
             wait_seconds = getattr(exc, 'retry_after', None)
             logging.warning(f"Rate limited while fetching option instruments: {exc}. "
                             f"{'Retrying after ' + str(wait_seconds) + 's' if wait_seconds else 'Will retry later.'}")
             # Return cached instruments if available, otherwise empty dict
-            return self._instruments_cache or {}
+            if self._instruments_cache is not None:
+                return self._get_option_instruments_for_monitoring(ltp, use_cache_only=True)  # Recursive call with cache
+            return {}
         except Exception as e:
-            logging.error(f"Error getting option instruments for monitoring: {e}", exc_info=True)
+            # Other errors - log but don't spam with full traceback for connection errors
+            if isinstance(e, (ConnectionResetError, RequestsConnectionError)):
+                logging.debug(f"[INSTRUMENTS] Connection error: {type(e).__name__}")
+            else:
+                logging.error(f"Error getting option instruments for monitoring: {type(e).__name__}: {e}")
+            # Try to use cached data if available
+            if self._instruments_cache is not None:
+                logging.warning("[INSTRUMENTS] Using cached instruments due to error.")
+                return self._get_option_instruments_for_monitoring(ltp, use_cache_only=True)  # Recursive call with cache
             return {}
     
     def _update_option_prices(self):
@@ -1322,12 +1410,16 @@ class CaptureMountainSignal(BaseStrategy):
         seconds_before_close = candle_duration_seconds - seconds_into_candle
         
         target_seconds = getattr(self, '_signal_evaluate_seconds', 20)
-        buffer_seconds = getattr(self, '_signal_evaluate_buffer', 2)
-        lower_bound = max(0, target_seconds - buffer_seconds)
-        upper_bound = target_seconds + buffer_seconds
+        # Use a very narrow window (20±0.5 seconds) to ensure evaluation happens only once
+        # This prevents multiple evaluations from different ticks arriving during the window
+        tolerance = 0.5  # Half second tolerance to account for tick timing variations
+        lower_bound = max(0, target_seconds - tolerance)
+        upper_bound = target_seconds + tolerance
 
         # Check if we're at the evaluation time (20 seconds before candle close)
-        is_evaluation_time = lower_bound <= seconds_before_close <= upper_bound
+        # CRITICAL: Only evaluate ONCE per candle, exactly at 20 seconds before close
+        is_evaluation_time = (lower_bound <= seconds_before_close <= upper_bound and 
+                             not self.signal_evaluated_for_current_candle)
 
         # Update "Last Check" timestamp ONLY at evaluation time (20 seconds before candle close)
         # This ensures it shows the exact time when signal evaluation happens
@@ -1340,15 +1432,23 @@ class CaptureMountainSignal(BaseStrategy):
 
         # Evaluate signal AND run strategy logic ONLY at the evaluation time (20 seconds before candle close)
         # Example: For 12:15 candle (12:15:00 to 12:19:59), evaluation happens at 12:19:40 (20s before 12:20:00)
-        if is_evaluation_time:
+        # IMPORTANT: This happens EXACTLY ONCE per candle - no fallback, no multiple evaluations
+        if is_evaluation_time and len(self.historical_data) > self.ema_period:
             candle_time_str = self.current_candle_data['date'].strftime('%H:%M') if self.current_candle_data and 'date' in self.current_candle_data else 'N/A'
-            if not self.signal_evaluated_for_current_candle and len(self.historical_data) > self.ema_period:
-                self._evaluate_signal_candle()
-                self.signal_evaluated_for_current_candle = True
+            
+            # Double-check flag to prevent race conditions (shouldn't be needed but extra safety)
+            if self.signal_evaluated_for_current_candle:
+                logging.warning(
+                    f"[TIMING] Signal evaluation attempted but already evaluated for candle {candle_time_str} at {tick_datetime.strftime('%H:%M:%S')}. Skipping."
+                )
+            else:
                 logging.info(
                     f"[TIMING] Signal evaluation at {tick_datetime.strftime('%H:%M:%S')} "
-                    f"for candle {candle_time_str} ({seconds_before_close:.1f}s before close; target {target_seconds}s ± {buffer_seconds}s)"
+                    f"for candle {candle_time_str} ({seconds_before_close:.1f}s before close; target {target_seconds}s ± {tolerance}s)"
                 )
+                # Set flag IMMEDIATELY before evaluation to prevent race conditions
+                self.signal_evaluated_for_current_candle = True
+                self._evaluate_signal_candle()
             
             # Run strategy logic (entry/exit decisions) ONLY at evaluation time (20 seconds before candle close)
             # Entry decisions are made at this time, not continuously on every tick
@@ -1361,6 +1461,7 @@ class CaptureMountainSignal(BaseStrategy):
         else:
             # Outside evaluation time: Only run exit logic if position is open (for stop loss/target monitoring)
             # But do NOT check entry conditions outside evaluation time
+            # CRITICAL: Do NOT evaluate signals or make entry decisions outside the 20-second window
             if len(self.historical_data) > self.ema_period and self.trade_placed:
                 # Only check exit conditions (SL/Target/Market Close) - not entry
                 self._check_exit_conditions_only()
@@ -1440,7 +1541,16 @@ class CaptureMountainSignal(BaseStrategy):
         Evaluate signal candle conditions 20 seconds before candle close.
         This method checks if the CURRENT (forming) candle meets signal criteria.
         At 20 seconds before close, we have 99% complete candle data.
+        
+        IMPORTANT: This method should be called EXACTLY ONCE per candle at 20 seconds before close.
         """
+        # Safety check: If already evaluated for this candle, skip (shouldn't happen but prevents duplicates)
+        if self.signal_evaluated_for_current_candle:
+            logging.warning(
+                f"[TIMING] _evaluate_signal_candle called but already evaluated for current candle. Skipping duplicate evaluation."
+            )
+            return
+        
         df = pd.DataFrame(self.historical_data)
         df['ema'] = df['close'].ewm(span=self.ema_period, adjust=False).mean()
         
@@ -1522,6 +1632,7 @@ class CaptureMountainSignal(BaseStrategy):
             self.status['signal_candle_low'] = float(current_candle['low'])
             self.ce_signal_candle = None  # Only one active signal type
             
+            # Add to audit trail for identified signals
             self._add_audit_trail('signal_identified', self.status['signal_status'], {
                 'signal_type': 'PE',
                 'candle_time': self.status['signal_candle_time'],
@@ -1567,9 +1678,23 @@ class CaptureMountainSignal(BaseStrategy):
             evaluation_record['result'] = 'ignored'
             if not low_above_ema:
                 evaluation_record['reason'] = f"Signal ignored: LOW ({current_candle['low']:.2f}) <= EMA ({current_ema:.2f})"
+                ignore_reason = f"PE Signal ignored: LOW ({current_candle['low']:.2f}) <= EMA ({current_ema:.2f})"
             else:
                 evaluation_record['reason'] = f"Signal ignored: RSI ({current_rsi:.2f}) <= 70 (required > 70)"
+                ignore_reason = f"PE Signal ignored: RSI ({current_rsi:.2f}) <= 70 (required > 70)"
             logging.debug(f"[SIGNAL EVAL] ✗ {evaluation_record['reason']}")
+            
+            # Add to audit trail so it appears in live trade history
+            self._add_audit_trail('signal_ignored', ignore_reason, {
+                'signal_type': 'PE',
+                'candle_time': candle_time_str,
+                'high': float(current_candle['high']),
+                'low': float(current_candle['low']),
+                'ema': float(current_ema),
+                'rsi': float(current_rsi) if current_rsi is not None else None,
+                'reason': evaluation_record['reason'],
+                'evaluation_timing': f'{int(timing_seconds)}_seconds_before_close'
+            })
         
         # Add evaluation record to history (keep last 500 evaluations)
         if 'signal_evaluations' not in self.status:

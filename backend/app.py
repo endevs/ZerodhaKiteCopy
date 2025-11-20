@@ -1309,8 +1309,51 @@ try:
     logging.getLogger('werkzeug').setLevel(logging.WARNING)  # Changed from ERROR to WARNING to see 404s
     logging.getLogger('engineio').setLevel(logging.ERROR)  # Only show errors, suppress INFO messages
     logging.getLogger('socketio').setLevel(logging.ERROR)  # Only show errors, suppress INFO messages
+    # Suppress connection reset errors from eventlet (common when clients disconnect)
+    logging.getLogger('eventlet.wsgi').setLevel(logging.WARNING)
+    logging.getLogger('eventlet.hubs').setLevel(logging.WARNING)
+    logging.getLogger('eventlet.greenthread').setLevel(logging.WARNING)
 except Exception:
     pass
+
+# Suppress ConnectionResetError and BrokenPipeError (common when clients disconnect)
+# These are normal and don't need to be logged as errors
+if ASYNC_MODE == 'eventlet':
+    import sys
+    import traceback
+    
+    # Store original excepthook
+    _original_excepthook = sys.excepthook
+    
+    def _suppress_connection_reset_excepthook(exc_type, exc_value, exc_traceback):
+        """Custom excepthook to suppress harmless connection reset errors"""
+        # Check if it's a connection reset error
+        if exc_type == ConnectionResetError:
+            # Check if it's from eventlet's WSGI layer (harmless client disconnect)
+            if exc_traceback:
+                tb_str = ''.join(traceback.format_tb(exc_traceback))
+                if 'eventlet' in tb_str and ('wsgi' in tb_str or 'hubs' in tb_str):
+                    # This is a harmless connection reset from eventlet, suppress it
+                    return
+        elif exc_type == BrokenPipeError:
+            # Broken pipe is also harmless (client disconnected)
+            if exc_traceback:
+                tb_str = ''.join(traceback.format_tb(exc_traceback))
+                if 'eventlet' in tb_str:
+                    return
+        elif exc_type == OSError:
+            # Check for Windows connection reset error (WinError 10054)
+            if hasattr(exc_value, 'winerror') and exc_value.winerror == 10054:
+                if exc_traceback:
+                    tb_str = ''.join(traceback.format_tb(exc_traceback))
+                    if 'eventlet' in tb_str:
+                        return
+        
+        # For all other errors, use the original handler
+        _original_excepthook(exc_type, exc_value, exc_traceback)
+    
+    # Install custom excepthook
+    sys.excepthook = _suppress_connection_reset_excepthook
 
 app = Flask(__name__)
 app.secret_key = config.SECRET_KEY
@@ -1493,6 +1536,45 @@ def _update_user_access_token(user_id: int, token: Optional[str]) -> None:
                 (user_id,)
             )
         conn.commit()
+    finally:
+        conn.close()
+
+
+def _get_user_name_from_zerodha(user_id: int) -> Optional[str]:
+    """Fetch user name from Zerodha Kite API if not stored in database."""
+    conn = get_db_connection()
+    try:
+        user = conn.execute(
+            'SELECT app_key, zerodha_access_token FROM users WHERE id = ?',
+            (user_id,)
+        ).fetchone()
+        
+        if not user or not user['app_key'] or not user['zerodha_access_token']:
+            return None
+        
+        try:
+            from kiteconnect import KiteConnect
+            kite_client = KiteConnect(api_key=user['app_key'])
+            kite_client.set_access_token(user['zerodha_access_token'])
+            profile = execute_with_retries(
+                "fetching Kite profile for user name",
+                lambda: kite_client.profile()
+            )
+            user_name = profile.get("user_name")
+            
+            # Store it in database for future use
+            if user_name:
+                conn.execute(
+                    'UPDATE users SET user_name = ? WHERE id = ?',
+                    (user_name, user_id)
+                )
+                conn.commit()
+                logging.info(f"Fetched and stored user name '{user_name}' for user {user_id}")
+            
+            return user_name
+        except Exception as e:
+            logging.warning(f"Could not fetch user name from Zerodha for user {user_id}: {e}")
+            return None
     finally:
         conn.close()
 
@@ -2125,7 +2207,7 @@ def _process_single_live_trade_deployment(deployment: Dict[str, Any], now: datet
             )
             state['eventStats'] = {
                 'signalsIdentified': int(counts.get('signal_identified', 0)),
-                'signalsIgnored': int(counts.get('entry_blocked', 0)),
+                'signalsIgnored': int(counts.get('signal_ignored', 0) + counts.get('entry_blocked', 0)),
                 'tradeEntries': int(counts.get('entry', 0)),
                 'tradeExits': int(counts.get('exit', 0) + counts.get('market_close_square_off', 0)),
                 'stopLoss': int(counts.get('stop_loss', 0)),
@@ -2194,6 +2276,63 @@ def _process_single_live_trade_deployment(deployment: Dict[str, Any], now: datet
                 )
             
             state['signals_from_market_open_added'] = True
+        
+        # Process signal_evaluations to ensure all ignored signals are captured
+        # This is important because some evaluations might not have been added to audit_trail
+        signal_evaluations = strategy_status.get('signal_evaluations', [])
+        if isinstance(signal_evaluations, list) and len(signal_evaluations) > 0:
+            eval_cursor = state.get('signalEvalCursor', 0)
+            if not isinstance(eval_cursor, int) or eval_cursor < 0 or eval_cursor > len(signal_evaluations):
+                eval_cursor = 0
+            
+            for eval_record in signal_evaluations[eval_cursor:]:
+                if not isinstance(eval_record, dict):
+                    continue
+                
+                result = eval_record.get('result')
+                if result == 'ignored':
+                    # Add ignored signal to history if not already in audit_trail
+                    timestamp = eval_record.get('timestamp') or eval_record.get('candle_start')
+                    
+                    append_history_entry(
+                        eval_record.get('reason', 'Signal ignored'),
+                        level='warning',
+                        category='signal_ignored',
+                        meta={
+                            'eventType': 'signal_ignored',
+                            'signalType': eval_record.get('signal_type', 'PE'),
+                            'timestamp': timestamp,
+                            'candleTime': eval_record.get('candle_time'),
+                            'signalHigh': eval_record.get('high'),
+                            'signalLow': eval_record.get('low'),
+                            'emaValue': eval_record.get('ema'),
+                            'rsiValue': eval_record.get('rsi'),
+                            'reason': eval_record.get('reason'),
+                        },
+                        timestamp=timestamp,
+                    )
+                elif result == 'identified':
+                    # Add identified signal to history if not already in audit_trail
+                    timestamp = eval_record.get('timestamp') or eval_record.get('candle_start')
+                    
+                    append_history_entry(
+                        eval_record.get('reason', 'Signal identified'),
+                        level='info',
+                        category='signal_identified',
+                        meta={
+                            'eventType': 'signal_identified',
+                            'signalType': eval_record.get('signal_type', 'PE'),
+                            'timestamp': timestamp,
+                            'candleTime': eval_record.get('candle_time'),
+                            'signalHigh': eval_record.get('high'),
+                            'signalLow': eval_record.get('low'),
+                            'emaValue': eval_record.get('ema'),
+                            'rsiValue': eval_record.get('rsi'),
+                        },
+                        timestamp=timestamp,
+                    )
+            
+            state['signalEvalCursor'] = len(signal_evaluations)
         
         signal_status = strategy_status.get('signal_status')
         previous_signal_status = state.get('lastSignalStatus')
@@ -3325,6 +3464,27 @@ def callback():
         # Update stored token in database
         _update_user_access_token(session['user_id'], access_token)
         
+        # Fetch and store user name from Zerodha profile
+        try:
+            profile = execute_with_retries("fetching Kite profile for user name", lambda: kite.profile())
+            user_name = profile.get("user_name")
+            if user_name:
+                conn = get_db_connection()
+                try:
+                    conn.execute(
+                        'UPDATE users SET user_name = ? WHERE id = ?',
+                        (user_name, session['user_id'])
+                    )
+                    conn.commit()
+                    logging.info(f"Stored user name '{user_name}' for user {session['user_id']}")
+                except Exception as e:
+                    logging.error(f"Error storing user name: {e}", exc_info=True)
+                finally:
+                    conn.close()
+        except Exception as e:
+            logging.warning(f"Could not fetch user name from Zerodha profile: {e}")
+            # Continue even if we can't fetch the name
+        
         # Use helper function that works in both local and production
         frontend_url = _get_frontend_url()
         return redirect(f"{frontend_url}/dashboard")
@@ -3716,12 +3876,13 @@ def api_user_data():
         app_key = user.get('app_key')
         stored_token = user.get('zerodha_access_token')
         session_token = session.get('access_token')
+        stored_user_name = user.get('user_name')  # Get stored user name from database
 
         default_response = {
             'status': 'success',
             'authenticated': True,
             'user_id': user_id,
-            'user_name': 'Guest',
+            'user_name': stored_user_name or 'Guest',  # Use stored name if available
             'balance': 0,
             'access_token_present': False,
             'token_valid': False,
@@ -3751,6 +3912,32 @@ def api_user_data():
                     
                     # Get Zerodha Kite Client ID (user_id from profile, e.g., "RD2033")
                     kite_client_id = profile.get("user_id") or profile.get("client_id") or None
+                    
+                    # Store user name in database if we got it from Zerodha
+                    if user_name and user_name != "Guest":
+                        try:
+                            conn = get_db_connection()
+                            try:
+                                # Check if user_name is already stored
+                                existing = conn.execute(
+                                    'SELECT user_name FROM users WHERE id = ?',
+                                    (user_id,)
+                                ).fetchone()
+                                
+                                # Only update if not already stored or different
+                                if not existing or not existing['user_name'] or existing['user_name'] != user_name:
+                                    conn.execute(
+                                        'UPDATE users SET user_name = ? WHERE id = ?',
+                                        (user_name, user_id)
+                                    )
+                                    conn.commit()
+                                    logging.info(f"Stored user name '{user_name}' for user {user_id} from /api/user-data")
+                            except Exception as e:
+                                logging.warning(f"Could not store user name in database: {e}")
+                            finally:
+                                conn.close()
+                        except Exception as e:
+                            logging.warning(f"Error storing user name: {e}")
                     
                     default_response.update({
                         'user_name': user_name,

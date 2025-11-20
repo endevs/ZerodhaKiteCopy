@@ -27,12 +27,36 @@ const Navigation: React.FC<NavigationProps> = ({
 }) => {
   const [showDropdown, setShowDropdown] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const closeTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Clear timeout helper
+  const clearCloseTimeout = () => {
+    if (closeTimeoutRef.current) {
+      clearTimeout(closeTimeoutRef.current);
+      closeTimeoutRef.current = null;
+    }
+  };
+
+  // Close dropdown with delay
+  const scheduleClose = () => {
+    clearCloseTimeout();
+    closeTimeoutRef.current = setTimeout(() => {
+      setShowDropdown(false);
+    }, 200); // 200ms delay before closing
+  };
+
+  // Open dropdown immediately
+  const openDropdown = () => {
+    clearCloseTimeout();
+    setShowDropdown(true);
+  };
 
   // Close dropdown when clicking outside
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
         setShowDropdown(false);
+        clearCloseTimeout();
       }
     };
 
@@ -42,6 +66,7 @@ const Navigation: React.FC<NavigationProps> = ({
 
     return () => {
       document.removeEventListener('mousedown', handleClickOutside);
+      clearCloseTimeout();
     };
   }, [showDropdown]);
   const navItems = [
@@ -138,13 +163,23 @@ const Navigation: React.FC<NavigationProps> = ({
               </span>
             </li>
             <li className="nav-item">
-              <div className="position-relative" ref={dropdownRef}>
+              <div 
+                className="position-relative" 
+                ref={dropdownRef}
+                onMouseEnter={openDropdown}
+                onMouseLeave={scheduleClose}
+              >
                 <span 
                   className="nav-link text-light"
                   style={{ cursor: 'pointer' }}
-                  onMouseEnter={() => setShowDropdown(true)}
-                  onMouseLeave={() => setShowDropdown(false)}
-                  onClick={() => setShowDropdown(!showDropdown)}
+                  onClick={() => {
+                    if (showDropdown) {
+                      setShowDropdown(false);
+                      clearCloseTimeout();
+                    } else {
+                      openDropdown();
+                    }
+                  }}
                 >
                   <i className="bi bi-person-circle me-2"></i>
                   Welcome, <strong>{userName}</strong>
@@ -155,10 +190,13 @@ const Navigation: React.FC<NavigationProps> = ({
                 </span>
                 {showDropdown && (
                   <div 
-                    className="dropdown-menu show position-absolute end-0 mt-1"
-                    style={{ minWidth: '200px', zIndex: 1050 }}
-                    onMouseEnter={() => setShowDropdown(true)}
-                    onMouseLeave={() => setShowDropdown(false)}
+                    className="dropdown-menu show position-absolute end-0"
+                    style={{ 
+                      minWidth: '200px', 
+                      zIndex: 1050,
+                      marginTop: '0.25rem',
+                      padding: '0.5rem 0'
+                    }}
                   >
                     <button
                       className="dropdown-item"
