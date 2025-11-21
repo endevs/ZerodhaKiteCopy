@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# Environment files with secrets (NEVER commit)
+.env
+.env.local
+.env.*.local
+
+# But allow example files (safe to commit)
+!.env.example
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+database.db
+
+# Logs
+*.log
+logs/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+/database.db-shm
+/database.db-wal
+

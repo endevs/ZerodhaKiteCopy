@@ -59,6 +59,9 @@ from live_trade import (
     get_deployments_for_processing as live_get_deployments_for_processing,
     update_deployment as live_update_deployment,
     delete_deployment as live_delete_deployment,
+    get_archived_deployments,
+    get_archived_deployment_by_id,
+    delete_archived_deployment,
     STATUS_SCHEDULED,
     STATUS_ACTIVE,
     STATUS_PAUSED,
@@ -1306,8 +1309,51 @@ try:
     logging.getLogger('werkzeug').setLevel(logging.WARNING)  # Changed from ERROR to WARNING to see 404s
     logging.getLogger('engineio').setLevel(logging.ERROR)  # Only show errors, suppress INFO messages
     logging.getLogger('socketio').setLevel(logging.ERROR)  # Only show errors, suppress INFO messages
+    # Suppress connection reset errors from eventlet (common when clients disconnect)
+    logging.getLogger('eventlet.wsgi').setLevel(logging.WARNING)
+    logging.getLogger('eventlet.hubs').setLevel(logging.WARNING)
+    logging.getLogger('eventlet.greenthread').setLevel(logging.WARNING)
 except Exception:
     pass
+
+# Suppress ConnectionResetError and BrokenPipeError (common when clients disconnect)
+# These are normal and don't need to be logged as errors
+if ASYNC_MODE == 'eventlet':
+    import sys
+    import traceback
+    
+    # Store original excepthook
+    _original_excepthook = sys.excepthook
+    
+    def _suppress_connection_reset_excepthook(exc_type, exc_value, exc_traceback):
+        """Custom excepthook to suppress harmless connection reset errors"""
+        # Check if it's a connection reset error
+        if exc_type == ConnectionResetError:
+            # Check if it's from eventlet's WSGI layer (harmless client disconnect)
+            if exc_traceback:
+                tb_str = ''.join(traceback.format_tb(exc_traceback))
+                if 'eventlet' in tb_str and ('wsgi' in tb_str or 'hubs' in tb_str):
+                    # This is a harmless connection reset from eventlet, suppress it
+                    return
+        elif exc_type == BrokenPipeError:
+            # Broken pipe is also harmless (client disconnected)
+            if exc_traceback:
+                tb_str = ''.join(traceback.format_tb(exc_traceback))
+                if 'eventlet' in tb_str:
+                    return
+        elif exc_type == OSError:
+            # Check for Windows connection reset error (WinError 10054)
+            if hasattr(exc_value, 'winerror') and exc_value.winerror == 10054:
+                if exc_traceback:
+                    tb_str = ''.join(traceback.format_tb(exc_traceback))
+                    if 'eventlet' in tb_str:
+                        return
+        
+        # For all other errors, use the original handler
+        _original_excepthook(exc_type, exc_value, exc_traceback)
+    
+    # Install custom excepthook
+    sys.excepthook = _suppress_connection_reset_excepthook
 
 app = Flask(__name__)
 app.secret_key = config.SECRET_KEY
@@ -1482,7 +1528,7 @@ def _update_user_access_token(user_id: int, token: Optional[str]) -> None:
         if token:
             conn.execute(
                 'UPDATE users SET zerodha_access_token = ?, zerodha_token_created_at = ? WHERE id = ?',
-                (token, datetime.datetime.utcnow().isoformat(), user_id)
+                (token, datetime.datetime.now(datetime.timezone.utc).isoformat(), user_id)
             )
         else:
             conn.execute(
@@ -1490,6 +1536,45 @@ def _update_user_access_token(user_id: int, token: Optional[str]) -> None:
                 (user_id,)
             )
         conn.commit()
+    finally:
+        conn.close()
+
+
+def _get_user_name_from_zerodha(user_id: int) -> Optional[str]:
+    """Fetch user name from Zerodha Kite API if not stored in database."""
+    conn = get_db_connection()
+    try:
+        user = conn.execute(
+            'SELECT app_key, zerodha_access_token FROM users WHERE id = ?',
+            (user_id,)
+        ).fetchone()
+        
+        if not user or not user['app_key'] or not user['zerodha_access_token']:
+            return None
+        
+        try:
+            from kiteconnect import KiteConnect
+            kite_client = KiteConnect(api_key=user['app_key'])
+            kite_client.set_access_token(user['zerodha_access_token'])
+            profile = execute_with_retries(
+                "fetching Kite profile for user name",
+                lambda: kite_client.profile()
+            )
+            user_name = profile.get("user_name")
+            
+            # Store it in database for future use
+            if user_name:
+                conn.execute(
+                    'UPDATE users SET user_name = ? WHERE id = ?',
+                    (user_name, user_id)
+                )
+                conn.commit()
+                logging.info(f"Fetched and stored user name '{user_name}' for user {user_id}")
+            
+            return user_name
+        except Exception as e:
+            logging.warning(f"Could not fetch user name from Zerodha for user {user_id}: {e}")
+            return None
     finally:
         conn.close()
 
@@ -2122,12 +2207,133 @@ def _process_single_live_trade_deployment(deployment: Dict[str, Any], now: datet
             )
             state['eventStats'] = {
                 'signalsIdentified': int(counts.get('signal_identified', 0)),
-                'signalsIgnored': int(counts.get('entry_blocked', 0)),
+                'signalsIgnored': int(counts.get('signal_ignored', 0) + counts.get('entry_blocked', 0)),
                 'tradeEntries': int(counts.get('entry', 0)),
                 'tradeExits': int(counts.get('exit', 0) + counts.get('market_close_square_off', 0)),
                 'stopLoss': int(counts.get('stop_loss', 0)),
                 'targetHit': int(counts.get('target_hit', 0)),
             }
+        # Add signals from market open to history (only once, when initialized)
+        if strategy_status.get('historical_data_initialized') and not state.get('signals_from_market_open_added'):
+            import pandas as pd  # Local import for timestamp conversion
+            signals_from_open = strategy_status.get('signals_from_market_open', [])
+            ignored_from_open = strategy_status.get('ignored_signals_from_market_open', [])
+            
+            # Add identified signals to history
+            for signal in signals_from_open:
+                timestamp = signal.get('timestamp') or signal.get('candle_time')
+                if isinstance(timestamp, str):
+                    try:
+                        timestamp = datetime.datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                    except:
+                        timestamp = None
+                elif isinstance(timestamp, pd.Timestamp):
+                    timestamp = timestamp.to_pydatetime()
+                
+                append_history_entry(
+                    f"{signal.get('type', 'PE')} Signal: {', '.join(signal.get('reasons', []))}",
+                    level='info',
+                    category='signal_identified',
+                    meta={
+                        'eventType': 'signal_identified',
+                        'signalType': signal.get('type'),
+                        'timestamp': timestamp.isoformat() if timestamp else None,
+                        'candleTime': signal.get('candle_time'),
+                        'signalHigh': signal.get('signal_high'),
+                        'signalLow': signal.get('signal_low'),
+                        'emaValue': signal.get('ema_value'),
+                        'rsiValue': signal.get('rsi_value'),
+                        'price': signal.get('price'),
+                    },
+                    timestamp=timestamp.isoformat() if timestamp else None,
+                )
+            
+            # Add ignored signals to history
+            for ignored in ignored_from_open:
+                timestamp = ignored.get('timestamp') or ignored.get('candle_time')
+                if isinstance(timestamp, str):
+                    try:
+                        timestamp = datetime.datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                    except:
+                        timestamp = None
+                elif isinstance(timestamp, pd.Timestamp):
+                    timestamp = timestamp.to_pydatetime()
+                
+                append_history_entry(
+                    ignored.get('reason', 'Signal ignored'),
+                    level='warning',
+                    category='signal_ignored',
+                    meta={
+                        'eventType': 'signal_ignored',
+                        'signalType': ignored.get('type'),
+                        'timestamp': timestamp.isoformat() if timestamp else None,
+                        'candleTime': ignored.get('candle_time'),
+                        'emaValue': ignored.get('ema_value'),
+                        'rsiValue': ignored.get('rsi_value'),
+                        'price': ignored.get('price'),
+                    },
+                    timestamp=timestamp.isoformat() if timestamp else None,
+                )
+            
+            state['signals_from_market_open_added'] = True
+        
+        # Process signal_evaluations to ensure all ignored signals are captured
+        # This is important because some evaluations might not have been added to audit_trail
+        signal_evaluations = strategy_status.get('signal_evaluations', [])
+        if isinstance(signal_evaluations, list) and len(signal_evaluations) > 0:
+            eval_cursor = state.get('signalEvalCursor', 0)
+            if not isinstance(eval_cursor, int) or eval_cursor < 0 or eval_cursor > len(signal_evaluations):
+                eval_cursor = 0
+            
+            for eval_record in signal_evaluations[eval_cursor:]:
+                if not isinstance(eval_record, dict):
+                    continue
+                
+                result = eval_record.get('result')
+                if result == 'ignored':
+                    # Add ignored signal to history if not already in audit_trail
+                    timestamp = eval_record.get('timestamp') or eval_record.get('candle_start')
+                    
+                    append_history_entry(
+                        eval_record.get('reason', 'Signal ignored'),
+                        level='warning',
+                        category='signal_ignored',
+                        meta={
+                            'eventType': 'signal_ignored',
+                            'signalType': eval_record.get('signal_type', 'PE'),
+                            'timestamp': timestamp,
+                            'candleTime': eval_record.get('candle_time'),
+                            'signalHigh': eval_record.get('high'),
+                            'signalLow': eval_record.get('low'),
+                            'emaValue': eval_record.get('ema'),
+                            'rsiValue': eval_record.get('rsi'),
+                            'reason': eval_record.get('reason'),
+                        },
+                        timestamp=timestamp,
+                    )
+                elif result == 'identified':
+                    # Add identified signal to history if not already in audit_trail
+                    timestamp = eval_record.get('timestamp') or eval_record.get('candle_start')
+                    
+                    append_history_entry(
+                        eval_record.get('reason', 'Signal identified'),
+                        level='info',
+                        category='signal_identified',
+                        meta={
+                            'eventType': 'signal_identified',
+                            'signalType': eval_record.get('signal_type', 'PE'),
+                            'timestamp': timestamp,
+                            'candleTime': eval_record.get('candle_time'),
+                            'signalHigh': eval_record.get('high'),
+                            'signalLow': eval_record.get('low'),
+                            'emaValue': eval_record.get('ema'),
+                            'rsiValue': eval_record.get('rsi'),
+                        },
+                        timestamp=timestamp,
+                    )
+            
+            state['signalEvalCursor'] = len(signal_evaluations)
+        
         signal_status = strategy_status.get('signal_status')
         previous_signal_status = state.get('lastSignalStatus')
         if signal_status and signal_status != previous_signal_status:
@@ -2160,6 +2366,10 @@ def _process_single_live_trade_deployment(deployment: Dict[str, Any], now: datet
             'stopLossLevel': strategy_status.get('stop_loss_level'),
             'targetLevel': strategy_status.get('target_profit_level'),
             'pnl': strategy_status.get('pnl'),
+            'currentLtp': strategy_status.get('current_ltp', 0),
+            'historicalDataInitialized': strategy_status.get('historical_data_initialized', False),
+            'historicalCandlesLoaded': strategy_status.get('historical_candles_loaded', 0),
+            'exitConditions': strategy_status.get('exit_conditions'),  # Add exit conditions for display
         }
         state['strategyInsights'] = _simplify_for_json(insights)
 
@@ -3185,12 +3395,14 @@ def api_login():
                 'redirect': '/verify-otp'  # Relative path for React Router
             })
         else:
+            # Return 200 with error status instead of 404 to prevent Nginx/CloudFront
+            # from intercepting and serving HTML error pages
             response = jsonify({
                 'status': 'error',
                 'message': 'User not found. Please sign up.'
             })
             response.headers['Content-Type'] = 'application/json'
-            return response, 404
+            return response, 200
     except Exception as e:
         logging.error(f"Error in api_login: {e}")
         response = jsonify({
@@ -3251,6 +3463,27 @@ def callback():
         
         # Update stored token in database
         _update_user_access_token(session['user_id'], access_token)
+        
+        # Fetch and store user name from Zerodha profile
+        try:
+            profile = execute_with_retries("fetching Kite profile for user name", lambda: kite.profile())
+            user_name = profile.get("user_name")
+            if user_name:
+                conn = get_db_connection()
+                try:
+                    conn.execute(
+                        'UPDATE users SET user_name = ? WHERE id = ?',
+                        (user_name, session['user_id'])
+                    )
+                    conn.commit()
+                    logging.info(f"Stored user name '{user_name}' for user {session['user_id']}")
+                except Exception as e:
+                    logging.error(f"Error storing user name: {e}", exc_info=True)
+                finally:
+                    conn.close()
+        except Exception as e:
+            logging.warning(f"Could not fetch user name from Zerodha profile: {e}")
+            # Continue even if we can't fetch the name
         
         # Use helper function that works in both local and production
         frontend_url = _get_frontend_url()
@@ -3319,6 +3552,216 @@ def api_admin_check():
     
     is_admin = _require_admin()
     return jsonify({'is_admin': is_admin}), 200
+
+@app.route("/api/admin/subscriptions", methods=['GET'])
+def api_admin_get_subscriptions():
+    """Get all subscribed users with their subscription details (admin only)."""
+    if not _require_admin():
+        return jsonify({'status': 'error', 'message': 'Admin access required'}), 403
+    
+    conn = get_db_connection()
+    try:
+        # Get all active subscriptions with user and payment details
+        subscriptions = conn.execute("""
+            SELECT 
+                s.id as subscription_id,
+                s.user_id,
+                s.plan_type,
+                s.status as subscription_status,
+                s.start_date,
+                s.end_date,
+                s.trial_end_date,
+                s.created_at as subscription_created_at,
+                u.email,
+                u.mobile,
+                p.id as payment_id,
+                p.razorpay_payment_id,
+                p.razorpay_order_id,
+                p.amount,
+                p.payment_status,
+                p.payment_method,
+                p.transaction_date,
+                p.created_at as payment_created_at
+            FROM subscriptions s
+            INNER JOIN users u ON s.user_id = u.id
+            LEFT JOIN payments p ON s.id = p.subscription_id
+            WHERE s.status IN ('active', 'trial')
+            ORDER BY s.created_at DESC
+        """).fetchall()
+        
+        result = []
+        for sub in subscriptions:
+            sub_dict = dict(sub)
+            # Format dates
+            if sub_dict.get('start_date'):
+                try:
+                    sub_dict['start_date'] = datetime.datetime.fromisoformat(sub_dict['start_date']).isoformat()
+                except:
+                    pass
+            if sub_dict.get('end_date'):
+                try:
+                    sub_dict['end_date'] = datetime.datetime.fromisoformat(sub_dict['end_date']).isoformat()
+                except:
+                    pass
+            if sub_dict.get('trial_end_date'):
+                try:
+                    sub_dict['trial_end_date'] = datetime.datetime.fromisoformat(sub_dict['trial_end_date']).isoformat()
+                except:
+                    pass
+            result.append(sub_dict)
+        
+        return jsonify({
+            'status': 'success',
+            'subscriptions': result
+        })
+    except Exception as e:
+        logging.error(f"Error fetching subscriptions: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': 'Failed to fetch subscriptions'}), 500
+    finally:
+        conn.close()
+
+@app.route("/api/admin/plan-prices", methods=['GET'])
+def api_admin_get_plan_prices():
+    """Get all plan prices (admin only)."""
+    if not _require_admin():
+        return jsonify({'status': 'error', 'message': 'Admin access required'}), 403
+    
+    conn = get_db_connection()
+    try:
+        prices = conn.execute("""
+            SELECT plan_type, price, updated_at, updated_by
+            FROM plan_prices
+            ORDER BY plan_type
+        """).fetchall()
+        
+        result = {}
+        for price_row in prices:
+            result[price_row['plan_type']] = {
+                'price': float(price_row['price']),
+                'updated_at': price_row['updated_at'],
+                'updated_by': price_row['updated_by']
+            }
+        
+        return jsonify({
+            'status': 'success',
+            'prices': result
+        })
+    except Exception as e:
+        logging.error(f"Error fetching plan prices: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': 'Failed to fetch plan prices'}), 500
+    finally:
+        conn.close()
+
+@app.route("/api/admin/plan-prices", methods=['PUT'])
+def api_admin_update_plan_prices():
+    """Update plan prices (admin only)."""
+    if not _require_admin():
+        return jsonify({'status': 'error', 'message': 'Admin access required'}), 403
+    
+    try:
+        data = request.get_json()
+        if not data or 'prices' not in data:
+            return jsonify({'status': 'error', 'message': 'Invalid request data'}), 400
+        
+        prices = data['prices']  # Expected format: {'premium': 1499.0, 'super_premium': 3499.0, 'customization': 4899.0}
+        user_id = session.get('user_id')
+        
+        conn = get_db_connection()
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            
+            for plan_type, price in prices.items():
+                if plan_type not in ['premium', 'super_premium', 'customization']:
+                    continue
+                
+                try:
+                    price_float = float(price)
+                    if price_float < 0:
+                        continue
+                except (ValueError, TypeError):
+                    continue
+                
+                # Update or insert price
+                conn.execute("""
+                    INSERT INTO plan_prices (plan_type, price, updated_by)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(plan_type) DO UPDATE SET
+                        price = excluded.price,
+                        updated_at = CURRENT_TIMESTAMP,
+                        updated_by = excluded.updated_by
+                """, (plan_type, price_float, user_id))
+            
+            conn.commit()
+            
+            # Return updated prices
+            updated_prices = conn.execute("""
+                SELECT plan_type, price, updated_at, updated_by
+                FROM plan_prices
+                ORDER BY plan_type
+            """).fetchall()
+            
+            result = {}
+            for price_row in updated_prices:
+                result[price_row['plan_type']] = {
+                    'price': float(price_row['price']),
+                    'updated_at': price_row['updated_at'],
+                    'updated_by': price_row['updated_by']
+                }
+            
+            return jsonify({
+                'status': 'success',
+                'message': 'Plan prices updated successfully',
+                'prices': result
+            })
+        except Exception as e:
+            conn.rollback()
+            raise e
+        finally:
+            conn.close()
+    except Exception as e:
+        logging.error(f"Error updating plan prices: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': 'Failed to update plan prices'}), 500
+
+@app.route("/api/plan-prices", methods=['GET'])
+def api_get_plan_prices():
+    """Get plan prices for public display (all users)."""
+    conn = get_db_connection()
+    try:
+        prices = conn.execute("""
+            SELECT plan_type, price
+            FROM plan_prices
+            ORDER BY plan_type
+        """).fetchall()
+        
+        result = {}
+        for price_row in prices:
+            result[price_row['plan_type']] = float(price_row['price'])
+        
+        # Include default prices if not in database
+        if 'premium' not in result:
+            result['premium'] = 1499.0
+        if 'super_premium' not in result:
+            result['super_premium'] = 3499.0
+        if 'customization' not in result:
+            result['customization'] = 4899.0
+        
+        return jsonify({
+            'status': 'success',
+            'prices': result
+        })
+    except Exception as e:
+        logging.error(f"Error fetching plan prices: {e}", exc_info=True)
+        # Return default prices on error
+        return jsonify({
+            'status': 'success',
+            'prices': {
+                'premium': 1499.0,
+                'super_premium': 3499.0,
+                'customization': 4899.0
+            }
+        })
+    finally:
+        conn.close()
 
 @app.route("/api/admin/users", methods=['GET'])
 def api_admin_get_users():
@@ -3576,12 +4019,13 @@ def api_user_data():
         app_key = user.get('app_key')
         stored_token = user.get('zerodha_access_token')
         session_token = session.get('access_token')
+        stored_user_name = user.get('user_name')  # Get stored user name from database
 
         default_response = {
             'status': 'success',
             'authenticated': True,
             'user_id': user_id,
-            'user_name': 'Guest',
+            'user_name': stored_user_name or 'Guest',  # Use stored name if available
             'balance': 0,
             'access_token_present': False,
             'token_valid': False,
@@ -3611,6 +4055,32 @@ def api_user_data():
                     
                     # Get Zerodha Kite Client ID (user_id from profile, e.g., "RD2033")
                     kite_client_id = profile.get("user_id") or profile.get("client_id") or None
+                    
+                    # Store user name in database if we got it from Zerodha
+                    if user_name and user_name != "Guest":
+                        try:
+                            conn = get_db_connection()
+                            try:
+                                # Check if user_name is already stored
+                                existing = conn.execute(
+                                    'SELECT user_name FROM users WHERE id = ?',
+                                    (user_id,)
+                                ).fetchone()
+                                
+                                # Only update if not already stored or different
+                                if not existing or not existing['user_name'] or existing['user_name'] != user_name:
+                                    conn.execute(
+                                        'UPDATE users SET user_name = ? WHERE id = ?',
+                                        (user_name, user_id)
+                                    )
+                                    conn.commit()
+                                    logging.info(f"Stored user name '{user_name}' for user {user_id} from /api/user-data")
+                            except Exception as e:
+                                logging.warning(f"Could not store user name in database: {e}")
+                            finally:
+                                conn.close()
+                        except Exception as e:
+                            logging.warning(f"Error storing user name: {e}")
                     
                     default_response.update({
                         'user_name': user_name,
@@ -3698,6 +4168,39 @@ def api_contact():
     finally:
         conn.close()
 
+
+@app.route("/api/user/profile", methods=['GET'])
+def api_user_profile():
+    """Get user profile information including email and mobile"""
+    if 'user_id' not in session:
+        return jsonify({
+            'status': 'error',
+            'message': 'User not logged in'
+        }), 401
+    
+    try:
+        user_id = session['user_id']
+        user_row = _get_user_record(user_id)
+        
+        if not user_row:
+            return jsonify({
+                'status': 'error',
+                'message': 'User record not found'
+            }), 404
+        
+        user = dict(user_row)
+        
+        return jsonify({
+            'status': 'success',
+            'email': user.get('email', 'N/A'),
+            'mobile': user.get('mobile', 'N/A')
+        })
+    except Exception as e:
+        logging.error(f"Error fetching user profile: {e}", exc_info=True)
+        return jsonify({
+            'status': 'error',
+            'message': 'Failed to fetch profile'
+        }), 500
 
 @app.route("/api/user-credentials", methods=['GET', 'POST'])
 def api_user_credentials():
@@ -4691,28 +5194,27 @@ def api_backtest_mountain_signal():
                     ce_signal_candle = None
 
             # CE Signal: HIGH < 5 EMA AND RSI < 30
+            # NOTE: CE signals are IGNORED in live trading - only PE trades are allowed
+            # CE signals are detected but not processed for trade entry
             if previous_candle['high'] < previous_ema:
                 if previous_rsi is not None and previous_rsi < 30:
+                    # CE signal detected but ignored - clear any existing CE signal
                     if ce_signal_candle is not None:
                         ce_signal_price_below_high = False
                         if 'index' in ce_signal_candle:
                             signal_candles_with_entry.discard(ce_signal_candle['index'])
-                    ce_signal_candle = {
-                        'date': previous_candle['date'],
-                        'high': previous_candle['high'],
-                        'low': previous_candle['low'],
-                        'index': i - 1
-                    }
-                    pe_signal_candle = None
+                    ce_signal_candle = None  # Clear CE signal instead of setting it
+                    # Don't clear PE signal when CE is detected
 
             # Price action validation for re-entry
             if pe_signal_candle is not None and not trade_placed and not pe_signal_price_above_low:
                 if current_candle['high'] > pe_signal_candle['low']:
                     pe_signal_price_above_low = True
 
-            if ce_signal_candle is not None and not trade_placed and not ce_signal_price_below_high:
-                if current_candle['low'] < ce_signal_candle['high']:
-                    ce_signal_price_below_high = True
+            # CE price action validation disabled - CE signals are ignored
+            # if ce_signal_candle is not None and not trade_placed and not ce_signal_price_below_high:
+            #     if current_candle['low'] < ce_signal_candle['high']:
+            #         ce_signal_price_below_high = True
 
             # Entry Logic
             if not trade_placed:
@@ -4798,8 +5300,9 @@ def api_backtest_mountain_signal():
                         trades[trade_index]['target_price'] = float(target_price_abs)
                         active_option_trade = option_trade
 
-                # CE Entry
-                elif ce_signal_candle is not None and current_candle['close'] > ce_signal_candle['high']:
+                # CE Entry: DISABLED for live trading - only PE trades allowed
+                # CE signals are ignored and no trades are entered
+                elif False:  # Disabled: ce_signal_candle is not None and current_candle['close'] > ce_signal_candle['high']:
                     signal_candle_index = ce_signal_candle['index']
                     is_first_entry = signal_candle_index not in signal_candles_with_entry
                     entry_allowed = is_first_entry or ce_signal_price_below_high
@@ -8128,8 +8631,548 @@ def api_live_trade_delete():
         if info.get('live_deployment_id') == deployment['id']:
             del running_strategies[run_id]
 
-    live_delete_deployment(deployment['id'])
-    return jsonify({'status': 'success', 'message': 'Deployment deleted.'})
+    # Archive before deletion (default behavior)
+    live_delete_deployment(deployment['id'], archive=True)
+    return jsonify({'status': 'success', 'message': 'Deployment archived and deleted.'})
+
+
+@app.route("/api/live_trade/archived", methods=['GET'])
+def api_live_trade_archived():
+    """Get archived deployments for the current user."""
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+    
+    try:
+        limit = int(request.args.get('limit', 50))
+        offset = int(request.args.get('offset', 0))
+        strategy_id = request.args.get('strategy_id')
+        
+        user_id = session['user_id']
+        archived = get_archived_deployments(user_id, limit=limit, offset=offset)
+        
+        # Filter by strategy_id if provided
+        if strategy_id:
+            try:
+                strategy_id_int = int(strategy_id)
+                archived = [d for d in archived if d.get('strategy_id') == strategy_id_int]
+            except ValueError:
+                pass
+        
+        # Serialize archived deployments (similar to live deployments)
+        serialized = []
+        for arch in archived:
+            serialized.append(_serialize_live_deployment(arch))
+        
+        return jsonify({
+            'status': 'success',
+            'archived_deployments': serialized,
+            'count': len(serialized)
+        })
+    except Exception as e:
+        logging.error(f"Error fetching archived deployments: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route("/api/live_trade/archived/<int:archive_id>", methods=['GET'])
+def api_live_trade_archived_detail(archive_id: int):
+    """Get details of a specific archived deployment."""
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+    
+    try:
+        user_id = session['user_id']
+        archived = get_archived_deployment_by_id(archive_id, user_id)
+        
+        if not archived:
+            return jsonify({'status': 'error', 'message': 'Archived deployment not found'}), 404
+        
+        return jsonify({
+            'status': 'success',
+            'archived_deployment': _serialize_live_deployment(archived)
+        })
+    except Exception as e:
+        logging.error(f"Error fetching archived deployment {archive_id}: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route("/api/live_trade/archived/<int:archive_id>", methods=['DELETE'])
+def api_live_trade_archived_delete(archive_id: int):
+    """Delete an archived deployment. Only admin users can delete."""
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+    
+    # Check if user is admin
+    if not _is_admin(session['user_id']):
+        return jsonify({'status': 'error', 'message': 'Only admin users can delete archived deployments'}), 403
+    
+    try:
+        user_id = session['user_id']
+        # Admin can delete any archived deployment
+        success = delete_archived_deployment(archive_id, user_id)
+        
+        if success:
+            return jsonify({
+                'status': 'success',
+                'message': 'Archived deployment deleted successfully'
+            })
+        else:
+            return jsonify({'status': 'error', 'message': 'Archived deployment not found'}), 404
+    except Exception as e:
+        logging.error(f"Error deleting archived deployment {archive_id}: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route("/api/live_trade/replay_candles", methods=['GET'])
+def api_live_trade_replay_candles():
+    """Fetch historical candle data for replay mode"""
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+
+    try:
+        date_str = request.args.get('date')
+        strategy_id_str = request.args.get('strategy_id')
+
+        if not date_str or not strategy_id_str:
+            return jsonify({'status': 'error', 'message': 'Date and strategy_id are required'}), 400
+
+        try:
+            replay_date = datetime.datetime.strptime(date_str, '%Y-%m-%d').date()
+            strategy_id = int(strategy_id_str)
+        except ValueError:
+            return jsonify({'status': 'error', 'message': 'Invalid date or strategy_id format'}), 400
+
+        # Get strategy record
+        user_id = session['user_id']
+        strategy = _get_strategy_record_for_preview(strategy_id, user_id)
+        if not strategy:
+            return jsonify({'status': 'error', 'message': 'Strategy not found or access denied'}), 404
+
+        strategy_dict = dict(strategy)
+        instrument = strategy_dict.get('instrument', 'BANKNIFTY')
+        candle_time = strategy_dict.get('candle_time', '5')
+        ema_period = strategy_dict.get('ema_period')
+        # Ensure ema_period is not None, default to 5
+        if ema_period is None:
+            ema_period = 5
+        else:
+            try:
+                ema_period = int(ema_period)
+            except (ValueError, TypeError):
+                ema_period = 5
+
+        # Resolve instrument token
+        if instrument.upper() == 'NIFTY':
+            token = 256265
+        elif instrument.upper() == 'BANKNIFTY':
+            token = 260105
+        else:
+            return jsonify({'status': 'error', 'message': 'Invalid instrument'}), 400
+
+        # Check if date is a weekday
+        if replay_date.weekday() >= 5:  # Saturday=5, Sunday=6
+            return jsonify({
+                'status': 'success',
+                'candles': [],
+                'message': 'Selected date is a weekend. No trading data available.'
+            })
+
+        # Fetch historical candles using user's Kite client
+        def _fetch_candles(kite_client):
+            start_dt = datetime.datetime.combine(replay_date, datetime.time(9, 15))
+            end_dt = datetime.datetime.combine(replay_date, datetime.time(15, 30))
+            kite_interval = f"{candle_time}minute"
+
+            try:
+                historical_data = kite_client.historical_data(
+                    token,
+                    start_dt,
+                    end_dt,
+                    interval=kite_interval
+                )
+                return historical_data
+            except Exception as e:
+                logging.error(f"Error fetching historical data for replay: {e}", exc_info=True)
+                raise
+
+        user_id = session['user_id']
+        try:
+            historical_data = _with_valid_kite_client(
+                user_id,
+                f"fetch replay candles for {date_str}",
+                _fetch_candles
+            )
+        except kite_exceptions.TokenException:
+            return jsonify({
+                'status': 'error',
+                'message': 'Zerodha session expired. Please log in again.',
+                'authExpired': True
+            }), 401
+        except RuntimeError as err:
+            logging.error(f"Error preparing Zerodha session for replay candles: {err}")
+            return jsonify({
+                'status': 'error',
+                'message': str(err)
+            }), 400
+
+        if not historical_data:
+            return jsonify({
+                'status': 'success',
+                'candles': [],
+                'message': 'No historical data available for the selected date.'
+            })
+
+        # Process candles and calculate EMA5
+        candles = []
+        closes = []
+        
+        for candle in historical_data:
+            candle_time_str = candle['date'].strftime('%Y-%m-%d %H:%M:%S')
+            close_price = float(candle['close'])
+            closes.append(close_price)
+            
+            # Calculate EMA5
+            ema5 = None
+            if len(closes) >= ema_period:
+                if len(closes) == ema_period:
+                    # First EMA value is SMA
+                    ema5 = sum(closes) / ema_period
+                else:
+                    # Subsequent EMA values
+                    multiplier = 2 / (ema_period + 1)
+                    prev_ema = candles[-1].get('ema5', sum(closes[:-1][-ema_period:]) / ema_period)
+                    ema5 = (close_price - prev_ema) * multiplier + prev_ema
+            
+            candles.append({
+                'time': candle_time_str,
+                'open': float(candle['open']),
+                'high': float(candle['high']),
+                'low': float(candle['low']),
+                'close': close_price,
+                'ema5': round(ema5, 2) if ema5 is not None else None,
+                'volume': int(candle.get('volume', 0))
+            })
+
+        return jsonify({
+            'status': 'success',
+            'candles': candles,
+            'date': date_str,
+            'instrument': instrument,
+            'count': len(candles)
+        })
+
+    except Exception as e:
+        logging.error(f"Error in api_live_trade_replay_candles: {e}", exc_info=True)
+        return jsonify({
+            'status': 'error',
+            'message': f'Failed to fetch replay candles: {str(e)}'
+        }), 500
+
+
+@app.route("/api/live_trade/replay_data", methods=['GET'])
+def api_live_trade_replay_data():
+    """Fetch historical replay data (signals, trades, orders, etc.) for a specific date and time"""
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+
+    try:
+        date_str = request.args.get('date')
+        strategy_id_str = request.args.get('strategy_id')
+        current_time_str = request.args.get('current_time', '15:30:00')  # Default to end of day
+
+        if not date_str or not strategy_id_str:
+            return jsonify({'status': 'error', 'message': 'Date and strategy_id are required'}), 400
+
+        try:
+            replay_date = datetime.datetime.strptime(date_str, '%Y-%m-%d').date()
+            strategy_id = int(strategy_id_str)
+            # Parse current_time (format: HH:MM:SS or HH:MM)
+            time_parts = current_time_str.split(':')
+            current_hour = int(time_parts[0])
+            current_min = int(time_parts[1]) if len(time_parts) > 1 else 0
+            current_seconds = int(time_parts[2]) if len(time_parts) > 2 else 0
+            # Create timezone-aware datetime (IST)
+            IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+            current_datetime = datetime.datetime.combine(
+                replay_date, 
+                datetime.time(current_hour, current_min, current_seconds),
+                tzinfo=IST
+            )
+        except (ValueError, IndexError) as e:
+            return jsonify({'status': 'error', 'message': f'Invalid date or time format: {str(e)}'}), 400
+
+        # Get strategy record
+        user_id = session['user_id']
+        strategy = _get_strategy_record_for_preview(strategy_id, user_id)
+        if not strategy:
+            return jsonify({'status': 'error', 'message': 'Strategy not found or access denied'}), 404
+
+        strategy_dict = dict(strategy)
+        instrument = strategy_dict.get('instrument', 'BANKNIFTY')
+        candle_time = strategy_dict.get('candle_time', '5')
+
+        # Resolve instrument token
+        if instrument.upper() == 'NIFTY':
+            token = 256265
+        elif instrument.upper() == 'BANKNIFTY':
+            token = 260105
+        else:
+            return jsonify({'status': 'error', 'message': 'Invalid instrument'}), 400
+
+        # Check if date is a weekday
+        if replay_date.weekday() >= 5:
+            return jsonify({
+                'status': 'success',
+                'signals': [],
+                'trades': [],
+                'orders': [],
+                'positions': [],
+                'history': [],
+                'message': 'Selected date is a weekend. No trading data available.'
+            })
+
+        # Fetch historical candles and run strategy simulation
+        def _fetch_and_simulate(kite_client):
+            start_dt = datetime.datetime.combine(replay_date, datetime.time(9, 15))
+            end_dt = datetime.datetime.combine(replay_date, datetime.time(15, 30))
+            kite_interval = f"{candle_time}minute"
+
+            try:
+                historical_data = kite_client.historical_data(
+                    token,
+                    start_dt,
+                    end_dt,
+                    interval=kite_interval
+                )
+                return historical_data
+            except Exception as e:
+                logging.error(f"Error fetching historical data for replay: {e}", exc_info=True)
+                raise
+
+        user_id = session['user_id']
+        try:
+            historical_data = _with_valid_kite_client(
+                user_id,
+                f"fetch replay data for {date_str}",
+                _fetch_and_simulate
+            )
+        except kite_exceptions.TokenException:
+            return jsonify({
+                'status': 'error',
+                'message': 'Zerodha session expired. Please log in again.',
+                'authExpired': True
+            }), 401
+        except RuntimeError as err:
+            logging.error(f"Error preparing Zerodha session for replay data: {err}")
+            return jsonify({
+                'status': 'error',
+                'message': str(err)
+            }), 400
+
+        if not historical_data:
+            return jsonify({
+                'status': 'success',
+                'signals': [],
+                'trades': [],
+                'orders': [],
+                'positions': [],
+                'history': [],
+                'message': 'No historical data available for the selected date.'
+            })
+
+        # Convert to DataFrame and run strategy simulation
+        import pandas as pd
+        from strategies.capture_mountain_signal import CaptureMountainSignal
+        from utils.indicators import calculate_rsi
+
+        df = pd.DataFrame(historical_data)
+        df['date'] = pd.to_datetime(df['date'])
+        # Ensure all dates are timezone-aware (IST)
+        IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+        if df['date'].dt.tz is None:
+            # Make naive datetimes timezone-aware (assume IST)
+            df['date'] = df['date'].dt.tz_localize(IST)
+        df = df.sort_values('date').reset_index(drop=True)
+
+        # Calculate indicators
+        df['ema5'] = df['close'].ewm(span=5, adjust=False).mean()
+        df['rsi14'] = calculate_rsi(df['close'], period=14)
+
+        # Initialize strategy for replay
+        strategy_obj = CaptureMountainSignal(
+            None,  # No kite client for replay
+            instrument,
+            candle_time,
+            strategy_dict.get('start_time', '09:15:00'),
+            strategy_dict.get('end_time', '15:30:00'),
+            strategy_dict.get('stop_loss', 0),
+            strategy_dict.get('target_profit', 0),
+            strategy_dict.get('total_lot', 1),
+            strategy_dict.get('trailing_stop_loss', 0),
+            strategy_dict.get('segment', 'OPT'),
+            strategy_dict.get('trade_type', 'PE'),
+            strategy_dict.get('strike_price', 0),
+            strategy_dict.get('expiry_type', 'monthly'),
+            strategy_dict.get('strategy_name', 'Replay'),
+            paper_trade=True
+        )
+
+        # Simulate strategy execution up to current_time
+        signals = []
+        trades = []
+        orders = []
+        positions = []
+        history = []
+
+        # Ensure current_datetime is timezone-aware (IST)
+        IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+        if current_datetime.tzinfo is None:
+            # Make naive datetime timezone-aware (assume IST)
+            current_datetime = current_datetime.replace(tzinfo=IST)
+        
+        # Convert current_datetime to pandas Timestamp for comparison
+        import pandas as pd
+        current_timestamp = pd.Timestamp(current_datetime)
+        # Ensure both are timezone-aware
+        if current_timestamp.tz is None:
+            current_timestamp = current_timestamp.tz_localize(IST)
+        
+        for idx, row in df.iterrows():
+            candle_time = row['date']  # This is a pandas Timestamp
+            
+            # Ensure candle_time is timezone-aware for comparison
+            if candle_time.tz is None:
+                candle_time = candle_time.tz_localize(IST)
+            
+            # Normalize both to same timezone if needed
+            if candle_time.tz != current_timestamp.tz:
+                candle_time = candle_time.tz_convert(current_timestamp.tz)
+            
+            # Stop if we've reached the current replay time
+            if candle_time > current_timestamp:
+                break
+
+            # Process candle
+            candle_data = {
+                'date': candle_time,
+                'open': float(row['open']),
+                'high': float(row['high']),
+                'low': float(row['low']),
+                'close': float(row['close']),
+                'volume': int(row.get('volume', 0))
+            }
+
+            # Check for signals based on business rules
+            # PE Signal: LOW > 5 EMA AND RSI > 70
+            # CE Signal: HIGH < 5 EMA AND RSI < 30
+            ema5_value = float(row['ema5']) if pd.notna(row['ema5']) else None
+            rsi14_value = float(row['rsi14']) if pd.notna(row['rsi14']) else None
+            
+            signal_detected = False
+            signal_type = None
+            reasons = []
+            
+            if ema5_value is not None and rsi14_value is not None:
+                # Check PE signal: LOW > 5 EMA AND RSI > 70
+                if candle_data['low'] > ema5_value and rsi14_value > 70:
+                    signal_detected = True
+                    signal_type = 'PE'
+                    reasons = [
+                        f"PE Signal: Candle LOW ({candle_data['low']:.2f}) > 5 EMA ({ema5_value:.2f})",
+                        f"RSI ({rsi14_value:.2f}) > 70 (Overbought condition)"
+                    ]
+                # Check CE signal: HIGH < 5 EMA AND RSI < 30
+                elif candle_data['high'] < ema5_value and rsi14_value < 30:
+                    signal_detected = True
+                    signal_type = 'CE'
+                    reasons = [
+                        f"CE Signal: Candle HIGH ({candle_data['high']:.2f}) < 5 EMA ({ema5_value:.2f})",
+                        f"RSI ({rsi14_value:.2f}) < 30 (Oversold condition)"
+                    ]
+            
+            if signal_detected:
+                signals.append({
+                    'timestamp': candle_time.isoformat() if hasattr(candle_time, 'isoformat') else str(candle_time),
+                    'type': signal_type,
+                    'reasons': reasons,
+                    'candle_time': candle_time.isoformat() if hasattr(candle_time, 'isoformat') else str(candle_time),
+                    'signal_high': float(candle_data['high']),
+                    'signal_low': float(candle_data['low']),
+                    'ema_value': float(ema5_value) if ema5_value is not None else None,
+                    'rsi_value': float(rsi14_value) if rsi14_value is not None else None,
+                    'price': float(row['close'])
+                })
+                
+                # Add to strategy's audit trail for consistency
+                strategy_obj._add_audit_trail('signal_identified', f"{signal_type} Signal: {', '.join(reasons)}", {
+                    'signal_type': signal_type,
+                    'candle_time': str(candle_time),
+                    'high': candle_data['high'],
+                    'low': candle_data['low'],
+                    'ema': ema5_value,
+                    'rsi': rsi14_value
+                })
+
+            # Check entry conditions and simulate trades
+            # (This is a simplified simulation - full logic would be in strategy_obj.process_ticks)
+            # For now, we'll extract from audit trail if available
+
+        # Filter audit trail by time
+        filtered_audit = []
+        if hasattr(strategy_obj, 'status') and 'audit_trail' in strategy_obj.status:
+            for entry in strategy_obj.status.get('audit_trail', []):
+                entry_time_str = entry.get('timestamp', '')
+                try:
+                    if entry_time_str:
+                        # Parse timestamp and ensure it's timezone-aware
+                        if 'Z' in entry_time_str:
+                            entry_time = datetime.datetime.fromisoformat(entry_time_str.replace('Z', '+00:00'))
+                        elif '+' in entry_time_str or entry_time_str.endswith('00:00'):
+                            entry_time = datetime.datetime.fromisoformat(entry_time_str)
+                        else:
+                            # Assume naive datetime, make it timezone-aware (IST)
+                            entry_time = datetime.datetime.fromisoformat(entry_time_str)
+                            if entry_time.tzinfo is None:
+                                entry_time = entry_time.replace(tzinfo=IST)
+                        
+                        # Ensure both are timezone-aware for comparison
+                        if entry_time.tzinfo is None:
+                            entry_time = entry_time.replace(tzinfo=IST)
+                        if current_datetime.tzinfo is None:
+                            current_datetime = current_datetime.replace(tzinfo=IST)
+                        
+                        # Normalize to same timezone for comparison
+                        if entry_time.tzinfo != current_datetime.tzinfo:
+                            entry_time = entry_time.astimezone(current_datetime.tzinfo)
+                        
+                        if entry_time <= current_datetime:
+                            filtered_audit.append(entry)
+                except Exception as e:
+                    logging.debug(f"Error parsing audit trail timestamp {entry_time_str}: {e}")
+                    pass
+
+        # Categorize audit entries
+        signals_identified = [e for e in filtered_audit if e.get('type') == 'signal_identified']
+        signals_ignored = [e for e in filtered_audit if 'ignored' in e.get('type', '').lower() or 'blocked' in e.get('type', '').lower()]
+        trade_entries = [e for e in filtered_audit if e.get('type') in ['entry', 'exit', 'stop_loss', 'target_hit']]
+
+        return jsonify({
+            'status': 'success',
+            'signals': signals_identified[-20:],  # Last 20 signals
+            'signals_ignored': signals_ignored[-20:],  # Last 20 ignored
+            'trades': trade_entries[-20:],  # Last 20 trades
+            'orders': orders,
+            'positions': positions,
+            'history': filtered_audit[-50:],  # Last 50 history entries
+            'current_time': current_time_str,
+            'date': date_str
+        })
+
+    except Exception as e:
+        logging.error(f"Error in api_live_trade_replay_data: {e}", exc_info=True)
+        return jsonify({
+            'status': 'error',
+            'message': f'Failed to fetch replay data: {str(e)}'
+        }), 500
 
 
 # ========================= Reinforcement Learning =========================
@@ -8312,6 +9355,26 @@ def api_rl_status_compat():
 
 
 app.register_blueprint(chat_bp)
+
+# Register Razorpay routes
+try:
+    from razorpay_routes import register_razorpay_routes
+    register_razorpay_routes(app)
+    logging.info("Razorpay routes registered successfully")
+except ImportError as e:
+    logging.warning(f"Could not import Razorpay routes: {e}")
+except Exception as e:
+    logging.error(f"Error registering Razorpay routes: {e}", exc_info=True)
+
+# Register subscription routes
+try:
+    from subscription_routes import register_subscription_routes
+    register_subscription_routes(app)
+    logging.info("Subscription routes registered successfully")
+except ImportError as e:
+    logging.warning(f"Could not import subscription routes: {e}")
+except Exception as e:
+    logging.error(f"Error registering subscription routes: {e}", exc_info=True)
 
 # Log all registered routes on startup (for debugging)
 def log_routes():

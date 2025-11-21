@@ -1,0 +1,47 @@
+STRATEGY "Mean Reversal 5m" VERSION 1.0
+DESCRIPTION "Mean Reversal strategy for intraday trading in 5 minute interval candle stick data"
+EVALUATION
+  SCHEDULE every 5m candle
+  TIMING evaluate 2 candles before candle close
+RULES SECTION
+  INPUTS
+    - instrument: BANKNIFTY
+    - lot size: 1
+    - strike rounding: 0.01
+    - risk management: 2% stop loss, 3% target
+ENTRY SECTION
+  - SHORT ENTRY
+    - condition: 20-period EMA < 50-period EMA and price > 20-period EMA
+    - condition: RSI(14) > 70
+    - condition: Bollinger Bands (20, 2) price < lower band
+    - entry logic: SHORT at market price
+    - logging: "SHORT ENTRY: EMA crossover, RSI overbought, Bollinger Bands breakout"
+EXIT SECTION
+  - SHORT EXIT
+    - condition: price > 20-period EMA
+    - condition: RSI(14) < 30
+    - condition: Bollinger Bands (20, 2) price > upper band
+    - exit logic: CLOSE at market price
+    - priority: 1
+    - logging: "SHORT EXIT: EMA crossover, RSI oversold, Bollinger Bands breakout"
+  - RE-ENTRY RULES
+    - condition: price < 20-period EMA
+    - condition: RSI(14) > 50
+    - condition: Bollinger Bands (20, 2) price < lower band
+    - re-entry logic: SHORT at market price
+    - logging: "RE-ENTRY: EMA crossover, RSI overbought, Bollinger Bands breakout"
+  - STOP LOSS
+    - condition: price < 2% stop loss
+    - exit logic: CLOSE at market price
+    - priority: 2
+    - logging: "STOP LOSS: 2% stop loss triggered"
+  - TARGET
+    - condition: price > 3% target
+    - exit logic: CLOSE at market price
+    - priority: 3
+    - logging: "TARGET: 3% target achieved"
+  - POSITION MANAGEMENT
+    - condition: position size > 1 lot
+    - condition: risk management: 2% stop loss, 3% target
+    - re-entry logic: SHORT at market price
+    - logging: "POSITION MANAGEMENT: re-entry with adjusted risk management"

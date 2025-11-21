@@ -3,13 +3,17 @@ from utils.kite_utils import get_option_symbols
 from utils.indicators import calculate_rsi
 from rules import load_mountain_signal_pe_rules
 from kiteconnect import KiteConnect
+from kiteconnect.exceptions import TokenException, NetworkException, InputException
 import logging
 import datetime
 import re
 import pandas as pd
 import numpy as np
 import uuid
+import time
 from typing import Optional, Dict, Any
+import requests
+from requests.exceptions import ConnectionError as RequestsConnectionError
 
 
 def round_to_multiple(value, multiple):
@@ -81,6 +85,7 @@ class CaptureMountainSignal(BaseStrategy):
         self._live_kite_client: Optional[KiteConnect] = self.live_order_context.get('kite_client')
         self.instrument_token = self._get_instrument_token()
         self.historical_data = [] # Stores 5-minute candles
+        self._yesterday_candles = []  # Store yesterday's candles for EMA/RSI initialization
         self.pe_signal_candle = None
         self.ce_signal_candle = None
         self.trade_placed = False
@@ -95,9 +100,9 @@ class CaptureMountainSignal(BaseStrategy):
             option_lot_size = None
         if not option_lot_size or option_lot_size <= 0:
             if 'BANK' in (self.instrument or '').upper():
-                option_lot_size = 25
+                option_lot_size = 15  # BANKNIFTY lot size is 15
             elif 'NIFTY' in (self.instrument or '').upper():
-                option_lot_size = 50
+                option_lot_size = 50  # NIFTY lot size is 50
             else:
                 option_lot_size = 50
         self.option_lot_size = int(max(1, option_lot_size))
@@ -157,6 +162,8 @@ class CaptureMountainSignal(BaseStrategy):
         self.last_option_price_update = None  # Track when we last updated option prices
         # Track all potential signals identified today
         self.status['signal_history_today'] = []
+        # Track ALL signal evaluations (identified and ignored) with timestamps and reasons
+        self.status['signal_evaluations'] = []  # List of all evaluations with timestamp, result, reason
         # Track price action validation after trade exit (for re-entry)
         self.pe_signal_price_above_low = False  # After exit, need price HIGH > signal LOW before next entry
         self.ce_signal_price_below_high = False  # After exit, need price LOW < signal HIGH before next entry
@@ -230,8 +237,13 @@ class CaptureMountainSignal(BaseStrategy):
             return 260105
         return None
 
-    def _get_option_instruments_for_monitoring(self, ltp):
-        """Get instrument tokens and symbols for ATM, ATM+2, ATM-2 options (CE and PE)"""
+    def _get_option_instruments_for_monitoring(self, ltp, use_cache_only=False):
+        """Get instrument tokens and symbols for ATM, ATM+2, ATM-2 options (CE and PE)
+        
+        Args:
+            ltp: Current LTP for ATM calculation
+            use_cache_only: If True, only use cached data, don't fetch from API
+        """
         # Skip option monitoring during replay (when kite is None)
         if self.kite is None:
             return {}
@@ -244,14 +256,66 @@ class CaptureMountainSignal(BaseStrategy):
                 self._last_instruments_fetch is not None and
                 (now - self._last_instruments_fetch) < cache_ttl
             )
-            if reuse_cache:
-                instruments = self._instruments_cache
-            else:
-                instruments = self.kite.instruments('NFO')
-                self._instruments_cache = instruments
-                self._last_instruments_fetch = now
-                CaptureMountainSignal._GLOBAL_NFO_INSTRUMENTS = instruments
-                CaptureMountainSignal._GLOBAL_NFO_LAST_FETCH = now
+            instruments = None
+            if reuse_cache or use_cache_only:
+                if self._instruments_cache is not None:
+                    instruments = self._instruments_cache
+                elif use_cache_only:
+                    # Requested cache-only but no cache available
+                    return {}
+                # If reuse_cache is True but cache is None, fall through to fetch
+            
+            if instruments is None and not use_cache_only:
+                # Retry logic for connection errors (common when system is idle)
+                max_retries = 3
+                retry_delay = 1  # Start with 1 second
+                instruments = None
+                last_error = None
+                
+                for attempt in range(max_retries):
+                    try:
+                        instruments = self.kite.instruments('NFO')
+                        # Success - cache and break
+                        self._instruments_cache = instruments
+                        self._last_instruments_fetch = now
+                        CaptureMountainSignal._GLOBAL_NFO_INSTRUMENTS = instruments
+                        CaptureMountainSignal._GLOBAL_NFO_LAST_FETCH = now
+                        break
+                    except (ConnectionResetError, RequestsConnectionError, NetworkException) as e:
+                        last_error = e
+                        if attempt < max_retries - 1:
+                            # Wait before retry with exponential backoff
+                            time.sleep(retry_delay)
+                            retry_delay *= 2
+                        else:
+                            # All retries failed - use cached data if available
+                            if self._instruments_cache is not None:
+                                logging.warning(
+                                    f"[INSTRUMENTS] Failed to fetch instruments after {max_retries} attempts "
+                                    f"(connection reset). Using cached data from {self._last_instruments_fetch}."
+                                )
+                                instruments = self._instruments_cache
+                                # Extend cache validity since we're using stale data
+                                self._last_instruments_fetch = now - cache_ttl + datetime.timedelta(minutes=5)
+                            else:
+                                # No cache available - log error but don't crash
+                                logging.error(
+                                    f"[INSTRUMENTS] Failed to fetch instruments after {max_retries} attempts "
+                                    f"and no cached data available. Error: {type(e).__name__}"
+                                )
+                                return {}
+                    except Exception as e:
+                        # Other errors (TokenException, etc.) - don't retry
+                        logging.error(f"[INSTRUMENTS] Error fetching instruments: {type(e).__name__}: {e}")
+                        if self._instruments_cache is not None:
+                            instruments = self._instruments_cache
+                            logging.warning("[INSTRUMENTS] Using cached instruments due to error.")
+                        else:
+                            return {}
+                        break
+                
+                if instruments is None:
+                    return {}
             
             # Find expiry date
             all_expiries = sorted(list(set([
@@ -324,16 +388,46 @@ class CaptureMountainSignal(BaseStrategy):
                         option_data['atm_plus2_pe'] = {'token': inst['instrument_token'], 'symbol': inst['tradingsymbol'], 'strike': strike}
             
             return option_data
-        except kite_exceptions.TokenException as exc:
+        except TokenException as exc:
             logging.error(f"Token error while fetching option instruments: {exc}")
+            # Try to use cached data if available
+            if self._instruments_cache is not None:
+                logging.warning("[INSTRUMENTS] Using cached instruments due to token error.")
+                return self._get_option_instruments_for_monitoring(ltp, use_cache_only=True)  # Recursive call with cache
             return {}
-        except kite_exceptions.NetworkException as exc:
+        except (ConnectionResetError, RequestsConnectionError) as exc:
+            # Connection reset errors are common when system is idle - use cached data if available
+            if self._instruments_cache is not None:
+                logging.debug(
+                    f"[INSTRUMENTS] Connection reset (likely idle timeout). Using cached instruments. "
+                    f"Cache age: {(datetime.datetime.now() - self._last_instruments_fetch).total_seconds() / 60:.1f} minutes"
+                )
+                # Extend cache validity since we're using stale data
+                if self._last_instruments_fetch:
+                    self._last_instruments_fetch = datetime.datetime.now() - datetime.timedelta(minutes=10)
+                return self._get_option_instruments_for_monitoring(ltp, use_cache_only=True)  # Recursive call with cache
+            else:
+                # No cache - log at debug level to reduce noise
+                logging.debug(f"[INSTRUMENTS] Connection reset and no cache available: {type(exc).__name__}")
+                return {}
+        except NetworkException as exc:
             wait_seconds = getattr(exc, 'retry_after', None)
             logging.warning(f"Rate limited while fetching option instruments: {exc}. "
                             f"{'Retrying after ' + str(wait_seconds) + 's' if wait_seconds else 'Will retry later.'}")
-            return self._instruments_cache or {}
+            # Return cached instruments if available, otherwise empty dict
+            if self._instruments_cache is not None:
+                return self._get_option_instruments_for_monitoring(ltp, use_cache_only=True)  # Recursive call with cache
+            return {}
         except Exception as e:
-            logging.error(f"Error getting option instruments for monitoring: {e}", exc_info=True)
+            # Other errors - log but don't spam with full traceback for connection errors
+            if isinstance(e, (ConnectionResetError, RequestsConnectionError)):
+                logging.debug(f"[INSTRUMENTS] Connection error: {type(e).__name__}")
+            else:
+                logging.error(f"Error getting option instruments for monitoring: {type(e).__name__}: {e}")
+            # Try to use cached data if available
+            if self._instruments_cache is not None:
+                logging.warning("[INSTRUMENTS] Using cached instruments due to error.")
+                return self._get_option_instruments_for_monitoring(ltp, use_cache_only=True)  # Recursive call with cache
             return {}
     
     def _update_option_prices(self):
@@ -602,6 +696,11 @@ class CaptureMountainSignal(BaseStrategy):
             # Find the trading symbol and instrument token
             for inst in filtered_instruments:
                 if inst['strike'] == atm_strike:
+                    # Update lot size from instrument data if available
+                    if 'lot_size' in inst and inst['lot_size'] and inst['lot_size'] > 0:
+                        self.option_lot_size = int(inst['lot_size'])
+                        self.live_order_context['lot_size'] = self.option_lot_size
+                        logging.info(f"Updated lot size from instrument data: {self.option_lot_size}")
                     return inst['tradingsymbol'], inst['instrument_token']
             
             return None, None
@@ -616,9 +715,13 @@ class CaptureMountainSignal(BaseStrategy):
             return None, None, None
         
         try:
-            quantity = int(max(1, int(self.total_lot)) * max(1, int(self.option_lot_size)))
+            # Calculate base quantity
+            base_quantity = int(max(1, int(self.total_lot)) * max(1, int(self.option_lot_size)))
+            # Ensure quantity is a multiple of lot size (required by Kite API)
+            quantity = round_to_multiple(base_quantity, self.option_lot_size)
         except Exception:
-            quantity = max(1, int(self.total_lot)) * self.option_lot_size
+            base_quantity = max(1, int(self.total_lot)) * self.option_lot_size
+            quantity = round_to_multiple(base_quantity, self.option_lot_size)
 
         if self.paper_trade or not self.live_order_context.get('api_key') or not self.live_order_context.get('access_token'):
             order_id = str(uuid.uuid4())[:8]
@@ -668,12 +771,21 @@ class CaptureMountainSignal(BaseStrategy):
             )
             self.status['last_live_order_error'] = None
             return order_id, trading_symbol, instrument_token
-        except kite_exceptions.TokenException as exc:
+        except TokenException as exc:
             logging.error(f"[LIVE TRADE] Token error while placing {transaction_type} order for {trading_symbol}: {exc}")
             self.status['last_live_order_error'] = str(exc)
             return None, trading_symbol, instrument_token
-        except kite_exceptions.NetworkException as exc:
-            logging.warning(f"[LIVE TRADE] Network error while placing {transaction_type} order for {trading_symbol}: {exc}")
+        except NetworkException as exc:
+            wait_seconds = getattr(exc, 'retry_after', 5)  # Default to 5 seconds if not specified
+            logging.warning(f"[LIVE TRADE] Network error (rate limited?) while placing {transaction_type} order for {trading_symbol}: {exc}. "
+                          f"Will retry after {wait_seconds}s")
+            self.status['last_live_order_error'] = f"Rate limited: {exc}. Retry after {wait_seconds}s"
+            # Wait before returning to allow retry
+            time.sleep(min(wait_seconds, 10))  # Cap at 10 seconds
+            return None, trading_symbol, instrument_token
+        except InputException as exc:
+            logging.error(f"[LIVE TRADE] Input error while placing {transaction_type} order for {trading_symbol}: {exc}. "
+                         f"Quantity was {quantity}, lot size is {self.option_lot_size}")
             self.status['last_live_order_error'] = str(exc)
             return None, trading_symbol, instrument_token
         except Exception as exc:
@@ -684,16 +796,512 @@ class CaptureMountainSignal(BaseStrategy):
             self.status['last_live_order_error'] = str(exc)
             return None, trading_symbol, instrument_token
 
+    def _initialize_historical_data_from_market_open(self):
+        """
+        Fetch historical data from market open (9:15 AM) when strategy is deployed mid-day.
+        Uses yesterday's closing data to initialize EMA/RSI calculations.
+        Evaluates all signals from the beginning of the day.
+        """
+        if self.kite is None:
+            logging.warning("Kite client not available, skipping historical data initialization")
+            return
+        
+        try:
+            today = datetime.date.today()
+            market_open_time = datetime.time(9, 15)
+            market_close_time = datetime.time(15, 30)
+            now = datetime.datetime.now()
+            current_time = now.time()
+            
+            # Check if market is open (9:15 AM to 3:30 PM)
+            if current_time < market_open_time or current_time > market_close_time:
+                logging.info("Market is closed, skipping historical data initialization")
+                return
+            
+            # Calculate start time (market open today)
+            start_dt = datetime.datetime.combine(today, market_open_time)
+            # End time is current time (or market close if past 3:30 PM)
+            end_dt = min(now, datetime.datetime.combine(today, market_close_time))
+            
+            # Get previous trading day for EMA/RSI initialization
+            prev_date = today
+            days_back = 0
+            while days_back < 5:  # Max 5 days back to find a trading day
+                prev_date = prev_date - datetime.timedelta(days=1)
+                days_back += 1
+                # Skip weekends (Saturday=5, Sunday=6)
+                if prev_date.weekday() < 5:
+                    break
+            
+            # Fetch yesterday's closing data (last 20 candles for RSI initialization)
+            prev_start = datetime.datetime.combine(prev_date, market_open_time)
+            prev_end = datetime.datetime.combine(prev_date, market_close_time)
+            
+            logging.info(f"Fetching historical data from {start_dt} to {end_dt} for {self.instrument}")
+            self.status['signal_status'] = 'Initializing historical data from market open...'
+            
+            # Fetch yesterday's data for EMA/RSI initialization
+            try:
+                prev_candles = self.kite.historical_data(
+                    self.instrument_token,
+                    from_date=prev_start,
+                    to_date=prev_end,
+                    interval='5minute',
+                    continuous=False
+                )
+                
+                # Convert to DataFrame and calculate initial EMA/RSI
+                if prev_candles:
+                    prev_df = pd.DataFrame(prev_candles)
+                    prev_df['date'] = pd.to_datetime(prev_df['date'])
+                    prev_df = prev_df.sort_values('date')
+                    
+                    # Store last few candles for EMA/RSI continuity
+                    if len(prev_df) > 0:
+                        # Keep last 20 candles for RSI calculation
+                        # Convert to dict and ensure date is datetime
+                        yesterday_records = prev_df.tail(20).to_dict('records')
+                        for record in yesterday_records:
+                            if isinstance(record['date'], pd.Timestamp):
+                                record['date'] = record['date'].to_pydatetime()
+                        self._yesterday_candles = yesterday_records
+                        logging.info(f"Loaded {len(self._yesterday_candles)} candles from previous trading day")
+                    else:
+                        self._yesterday_candles = []
+                else:
+                    self._yesterday_candles = []
+            except Exception as e:
+                logging.warning(f"Could not fetch yesterday's data: {e}")
+                self._yesterday_candles = []
+            
+            # Fetch today's data from market open
+            try:
+                today_candles = self.kite.historical_data(
+                    self.instrument_token,
+                    from_date=start_dt,
+                    to_date=end_dt,
+                    interval='5minute',
+                    continuous=False
+                )
+                
+                if not today_candles:
+                    logging.info("No historical candles found for today")
+                    return
+                
+                # Convert to DataFrame
+                df = pd.DataFrame(today_candles)
+                df['date'] = pd.to_datetime(df['date'])
+                df = df.sort_values('date')
+                
+                # Combine yesterday's candles with today's for EMA/RSI calculation
+                combined_candles = []
+                if self._yesterday_candles:
+                    # Convert yesterday's candles to same format
+                    for candle in self._yesterday_candles:
+                        combined_candles.append({
+                            'date': candle['date'],
+                            'open': candle['open'],
+                            'high': candle['high'],
+                            'low': candle['low'],
+                            'close': candle['close'],
+                            'volume': candle.get('volume', 0)
+                        })
+                
+                # Add today's candles
+                for _, row in df.iterrows():
+                    combined_candles.append({
+                        'date': row['date'],
+                        'open': row['open'],
+                        'high': row['high'],
+                        'low': row['low'],
+                        'close': row['close'],
+                        'volume': row.get('volume', 0)
+                    })
+                
+                # Calculate EMA and RSI on combined data
+                combined_df = pd.DataFrame(combined_candles)
+                combined_df['ema5'] = combined_df['close'].ewm(span=self.ema_period, adjust=False).mean()
+                
+                # Calculate RSI 14
+                if len(combined_df) >= 15:
+                    combined_df['rsi14'] = calculate_rsi(combined_df['close'], period=14)
+                else:
+                    combined_df['rsi14'] = None
+                
+                # Process only today's candles and evaluate signals
+                today_df = combined_df[combined_df['date'].dt.date == today].copy()
+                
+                # Initialize historical_data with today's candles
+                self.historical_data = []
+                signals_identified = []
+                signals_ignored = []
+                
+                for idx, row in today_df.iterrows():
+                    candle_data = {
+                        'date': row['date'],
+                        'open': float(row['open']),
+                        'high': float(row['high']),
+                        'low': float(row['low']),
+                        'close': float(row['close']),
+                        'volume': float(row.get('volume', 0))
+                    }
+                    
+                    # Get corresponding EMA and RSI from combined_df
+                    ema5_value = float(row['ema5']) if pd.notna(row['ema5']) else None
+                    rsi14_value = float(row['rsi14']) if pd.notna(row['rsi14']) else None
+                    
+                    # Add to historical data
+                    self.historical_data.append(candle_data)
+                    
+                    # Evaluate signal for this candle (if we have EMA and RSI)
+                    if ema5_value is not None and rsi14_value is not None:
+                        # Check PE signal: LOW > 5 EMA AND RSI STRICTLY > 70
+                        # IMPORTANT: RSI must be STRICTLY > 70 (not >= 70) for PE signal
+                        candle_time_str = row['date'].strftime('%H:%M') if isinstance(row['date'], (datetime.datetime, pd.Timestamp)) else str(row['date'])
+                        low_above_ema = candle_data['low'] > ema5_value
+                        rsi_above_70 = rsi14_value > 70
+                        
+                        # Track evaluation for historical data
+                        eval_record = {
+                            'timestamp': row['date'].isoformat() if isinstance(row['date'], (datetime.datetime, pd.Timestamp)) else str(row['date']),
+                            'candle_time': candle_time_str,
+                            'candle_start': row['date'].isoformat() if isinstance(row['date'], (datetime.datetime, pd.Timestamp)) else str(row['date']),
+                            'low': float(candle_data['low']),
+                            'high': float(candle_data['high']),
+                            'close': float(candle_data['close']),
+                            'ema': float(ema5_value),
+                            'rsi': float(rsi14_value),
+                            'low_above_ema': low_above_ema,
+                            'rsi_above_70': rsi_above_70,
+                            'result': None,
+                            'reason': None,
+                            'signal_type': 'PE'
+                        }
+                        
+                        if low_above_ema and rsi_above_70:  # Strictly greater than 70
+                            eval_record['result'] = 'identified'
+                            eval_record['reason'] = f"PE Signal identified: LOW ({candle_data['low']:.2f}) > EMA ({ema5_value:.2f}) AND RSI ({rsi14_value:.2f}) > 70"
+                            signal_info = {
+                                'type': 'PE',
+                                'timestamp': row['date'],
+                                'candle_time': row['date'],
+                                'signal_high': candle_data['high'],
+                                'signal_low': candle_data['low'],
+                                'ema_value': ema5_value,
+                                'rsi_value': rsi14_value,
+                                'price': candle_data['close'],
+                                'reasons': [
+                                    f"PE Signal: Candle LOW ({candle_data['low']:.2f}) > 5 EMA ({ema5_value:.2f})",
+                                    f"RSI ({rsi14_value:.2f}) > 70 (Overbought condition)"
+                                ]
+                            }
+                            signals_identified.append(signal_info)
+                            self._add_audit_trail('signal_identified', 
+                                f"PE Signal identified at {candle_time_str}: {', '.join(signal_info['reasons'])}",
+                                signal_info
+                            )
+                        else:
+                            eval_record['result'] = 'ignored'
+                            if not low_above_ema:
+                                eval_record['reason'] = f"Signal ignored: LOW ({candle_data['low']:.2f}) <= EMA ({ema5_value:.2f})"
+                            else:
+                                eval_record['reason'] = f"Signal ignored: RSI ({rsi14_value:.2f}) <= 70 (required > 70)"
+                        
+                        # Add to evaluation history
+                        if 'signal_evaluations' not in self.status:
+                            self.status['signal_evaluations'] = []
+                        self.status['signal_evaluations'].append(eval_record)
+                        
+                        # Check CE signal: HIGH < 5 EMA AND RSI < 30
+                        # NOTE: CE signals are IGNORED in live trading - only PE trades are allowed
+                        if candle_data['high'] < ema5_value and rsi14_value < 30:
+                            # CE signal detected but ignored for live trading
+                            ignore_reason = f"CE signal detected but ignored (LIVE TRADING: Only PE trades allowed). HIGH ({candle_data['high']:.2f}) < EMA ({ema5_value:.2f}) AND RSI ({rsi14_value:.2f}) < 30"
+                            signals_ignored.append({
+                                'type': 'CE',
+                                'timestamp': row['date'],
+                                'candle_time': row['date'],
+                                'reason': ignore_reason,
+                                'ema_value': ema5_value,
+                                'rsi_value': rsi14_value,
+                                'price': candle_data['close']
+                            })
+                            self._add_audit_trail('signal_ignored', ignore_reason, {
+                                'candle_time': row['date'],
+                                'ema': ema5_value,
+                                'rsi': rsi14_value,
+                                'reason': 'CE signals disabled for live trading'
+                            })
+                        # Check if signal conditions were almost met but RSI didn't satisfy
+                        elif candle_data['low'] > ema5_value and rsi14_value <= 70:
+                            # PE condition met but RSI not satisfied
+                            ignore_reason = f"PE signal condition met (LOW {candle_data['low']:.2f} > EMA {ema5_value:.2f}) but RSI ({rsi14_value:.2f}) <= 70 (required > 70)"
+                            signals_ignored.append({
+                                'type': 'PE',
+                                'timestamp': row['date'],
+                                'candle_time': row['date'],
+                                'reason': ignore_reason,
+                                'ema_value': ema5_value,
+                                'rsi_value': rsi14_value,
+                                'price': candle_data['close']
+                            })
+                            self._add_audit_trail('signal_ignored', ignore_reason, {
+                                'candle_time': row['date'],
+                                'ema': ema5_value,
+                                'rsi': rsi14_value
+                            })
+                        elif candle_data['high'] < ema5_value and rsi14_value >= 30:
+                            # CE condition met but RSI not satisfied
+                            ignore_reason = f"CE signal condition met (HIGH {candle_data['high']:.2f} < EMA {ema5_value:.2f}) but RSI ({rsi14_value:.2f}) >= 30 (required < 30)"
+                            signals_ignored.append({
+                                'type': 'CE',
+                                'timestamp': row['date'],
+                                'candle_time': row['date'],
+                                'reason': ignore_reason,
+                                'ema_value': ema5_value,
+                                'rsi_value': rsi14_value,
+                                'price': candle_data['close']
+                            })
+                            self._add_audit_trail('signal_ignored', ignore_reason, {
+                                'candle_time': row['date'],
+                                'ema': ema5_value,
+                                'rsi': rsi14_value
+                            })
+                
+                # Update status with initialization results
+                self.status['historical_data_initialized'] = True
+                self.status['signals_from_market_open'] = signals_identified
+                self.status['ignored_signals_from_market_open'] = signals_ignored
+                self.status['historical_candles_loaded'] = len(self.historical_data)
+                
+                if len(self.historical_data) >= self.ema_period:
+                    self.status['signal_status'] = f'Historical data loaded: {len(self.historical_data)} candles from market open. {len(signals_identified)} signals identified, {len(signals_ignored)} ignored.'
+                else:
+                    self.status['signal_status'] = f'Building historical data ({len(self.historical_data)}/{self.ema_period} candles)'
+                
+                logging.info(f"Initialized {len(self.historical_data)} candles from market open. {len(signals_identified)} signals identified, {len(signals_ignored)} ignored.")
+                
+                # Set the most recent signal candle if any signals were identified
+                if signals_identified:
+                    latest_signal = signals_identified[-1]
+                    if latest_signal['type'] == 'PE':
+                        # Create a signal candle object for PE
+                        signal_date = latest_signal['candle_time']
+                        if isinstance(signal_date, pd.Timestamp):
+                            signal_date = signal_date.to_pydatetime()
+                        elif isinstance(signal_date, str):
+                            try:
+                                signal_date = datetime.datetime.fromisoformat(signal_date)
+                            except:
+                                signal_date = datetime.datetime.now()
+                        
+                        self.pe_signal_candle = pd.Series({
+                            'date': signal_date,
+                            'high': latest_signal['signal_high'],
+                            'low': latest_signal['signal_low'],
+                            'close': latest_signal['price']
+                        })
+                        
+                        # Update status fields to reflect the signal candle
+                        self.status['signal_candle_time'] = signal_date.strftime('%H:%M') + '-' + (signal_date + datetime.timedelta(minutes=int(self.candle_time))).strftime('%H:%M')
+                        self.status['signal_candle_high'] = float(latest_signal['signal_high'])
+                        self.status['signal_candle_low'] = float(latest_signal['signal_low'])
+                        self.status['signal_status'] = f"PE Signal Candle Identified (from historical data): {signal_date.strftime('%H:%M')} (H:{latest_signal['signal_high']:.2f}, L:{latest_signal['signal_low']:.2f})"
+                        
+                        logging.info(f"PE Signal candle set from historical data: {signal_date.strftime('%H:%M')} (H:{latest_signal['signal_high']:.2f}, L:{latest_signal['signal_low']:.2f})")
+                    elif latest_signal['type'] == 'CE':
+                        # Create a signal candle object for CE (but CE signals are ignored in live trading)
+                        signal_date = latest_signal['candle_time']
+                        if isinstance(signal_date, pd.Timestamp):
+                            signal_date = signal_date.to_pydatetime()
+                        elif isinstance(signal_date, str):
+                            try:
+                                signal_date = datetime.datetime.fromisoformat(signal_date)
+                            except:
+                                signal_date = datetime.datetime.now()
+                        
+                        # CE signals are ignored, but we still clear any existing CE signal candle
+                        self.ce_signal_candle = None
+                        logging.debug(f"CE Signal detected in historical data but ignored (only PE trades allowed): {signal_date.strftime('%H:%M')}")
+                
+            except Exception as e:
+                logging.error(f"Error initializing historical data: {e}", exc_info=True)
+                self.status['signal_status'] = f'Error loading historical data: {str(e)}'
+        
+        except Exception as e:
+            logging.error(f"Error in _initialize_historical_data_from_market_open: {e}", exc_info=True)
+            self.status['signal_status'] = f'Error initializing historical data: {str(e)}'
+
+    def _check_and_restore_existing_position(self):
+        """
+        Check for existing positions in Zerodha and restore strategy state if a position is found.
+        This prevents entering a new trade when one is already active after server restart.
+        """
+        if self.kite is None or self._live_kite_client is None:
+            return
+        
+        try:
+            # Get positions from Kite
+            positions = self._live_kite_client.positions()
+            
+            if not positions or not isinstance(positions, dict):
+                return
+            
+            # Check net positions (day positions)
+            net_positions = positions.get('net', [])
+            if not net_positions:
+                return
+            
+            # Find positions that match our strategy's option symbols
+            # We need to check if there's an active option position
+            for pos in net_positions:
+                quantity = pos.get('quantity', 0)
+                if quantity == 0:
+                    continue
+                
+                tradingsymbol = pos.get('tradingsymbol', '').upper()
+                product = pos.get('product', '').upper()
+                
+                # Check if this is an option position (PE or CE)
+                if 'PE' in tradingsymbol or 'CE' in tradingsymbol:
+                    # Check if it matches our strategy's instrument (BANKNIFTY or NIFTY)
+                    instrument_match = False
+                    if 'BANK' in self.instrument.upper() and 'BANKNIFTY' in tradingsymbol:
+                        instrument_match = True
+                    elif 'NIFTY' in self.instrument.upper() and 'NIFTY' in tradingsymbol and 'BANKNIFTY' not in tradingsymbol:
+                        instrument_match = True
+                    
+                    if instrument_match:
+                        # We have an active position - restore strategy state
+                        avg_price = pos.get('average_price', 0)
+                        last_price = pos.get('last_price', 0)
+                        instrument_token = pos.get('instrument_token', 0)
+                        
+                        # Determine position type (PE = short, CE = long)
+                        if 'PE' in tradingsymbol:
+                            self.position = -1  # Short position (PE)
+                            option_type = 'PE'
+                        elif 'CE' in tradingsymbol:
+                            self.position = 1  # Long position (CE)
+                            option_type = 'CE'
+                        else:
+                            continue  # Skip if not PE or CE
+                        
+                        # Restore entry price and trade state
+                        if avg_price > 0:
+                            self.entry_price = float(avg_price)
+                        else:
+                            self.entry_price = float(last_price) if last_price > 0 else 0
+                        
+                        # Restore option trade state
+                        option_entry_price = self.entry_price
+                        lot_size = abs(quantity)
+                        
+                        # Create a minimal option trade record for tracking
+                        restored_option_trade = {
+                            'signal_time': datetime.datetime.now().isoformat(),  # We don't have the original signal time
+                            'signal_type': option_type,
+                            'signal_high': 0,  # Will be updated when we get more data
+                            'signal_low': 0,  # Will be updated when we get more data
+                            'index_at_entry': 0,  # Will be updated
+                            'option_symbol': tradingsymbol,
+                            'entry_time': datetime.datetime.now().isoformat(),  # We don't have the original entry time
+                            'option_entry_price': float(option_entry_price),
+                            'stop_loss_price': 0,  # Will be calculated
+                            'target_price': 0,  # Will be calculated
+                            'lot_size': lot_size,
+                            'exit_time': None,
+                            'option_exit_price': None,
+                            'exit_type': None,
+                            'pnl': None,
+                            'status': 'open'
+                        }
+                        self.active_option_trade = restored_option_trade
+                        self.option_trade_history.append(restored_option_trade)
+                        
+                        self.trade_placed = True
+                        self.status['position'] = self.position
+                        self.status['entry_price'] = self.entry_price
+                        self.status['traded_instrument'] = tradingsymbol
+                        self.status['traded_instrument_token'] = instrument_token
+                        self.status['state'] = 'position_open'
+                        self.status['message'] = f'Restored existing position: {tradingsymbol} @ {self.entry_price:.2f}'
+                        
+                        # Calculate current P&L
+                        if last_price > 0:
+                            # For options, P&L calculation is different
+                            # PE: Profit when option price goes up (we bought at entry_price, current is last_price)
+                            # CE: Profit when option price goes up (we bought at entry_price, current is last_price)
+                            option_pnl = (float(last_price) - float(option_entry_price)) * lot_size
+                            self.status['pnl'] = option_pnl
+                        
+                        # Set stop loss and target levels (will be recalculated based on current market conditions)
+                        # For now, set conservative defaults
+                        if option_type == 'PE':
+                            # PE stop loss is typically 17% below entry
+                            self.status['stop_loss_level'] = float(option_entry_price) * 0.83
+                            # PE target is typically 45% above entry
+                            self.status['target_profit_level'] = float(option_entry_price) * 1.45
+                        else:  # CE
+                            # CE stop loss is typically 17% below entry
+                            self.status['stop_loss_level'] = float(option_entry_price) * 0.83
+                            # CE target is typically 45% above entry
+                            self.status['target_profit_level'] = float(option_entry_price) * 1.45
+                        
+                        logging.warning(
+                            f"Restored existing position for {self.instrument}: "
+                            f"{tradingsymbol}, Quantity: {quantity}, Entry: {self.entry_price:.2f}, "
+                            f"Current: {last_price:.2f}, Position: {option_type}, "
+                            f"P&L: {self.status.get('pnl', 0):.2f}"
+                        )
+                        
+                        # Mark that we have an active position so we don't enter a new trade
+                        self._add_audit_trail(
+                            'position_restored',
+                            f'Restored existing position after restart: {tradingsymbol} @ {self.entry_price:.2f}',
+                            {
+                                'tradingsymbol': tradingsymbol,
+                                'quantity': quantity,
+                                'entry_price': self.entry_price,
+                                'current_price': last_price,
+                                'position': option_type,
+                                'product': product,
+                                'pnl': self.status.get('pnl', 0),
+                                'instrument_token': instrument_token
+                            }
+                        )
+                        return  # Found and restored position, exit
+        
+        except Exception as e:
+            logging.error(f"Error checking for existing positions: {e}", exc_info=True)
+            # Don't fail strategy initialization if position check fails
+            # Just log the error and continue
+
     def run(self):
         logging.info(f"Running Capture Mountain Signal strategy for {self.instrument}")
         self.status['state'] = 'running'
         self.status['message'] = 'Strategy is running and waiting for ticks.'
+        
+        # Check for existing positions first (before initializing historical data)
+        # This prevents entering a new trade when one is already active after server restart
+        self._check_and_restore_existing_position()
+        
+        # Initialize historical data from market open if deployed during market hours
+        self._initialize_historical_data_from_market_open()
 
     def process_ticks(self, ticks):
         if not ticks:
             return
 
-        latest_tick = ticks[-1] # Assuming ticks are ordered by time
+        # Filter ticks to only process ticks for this strategy's instrument
+        # The strategy monitors the index (BANKNIFTY or NIFTY), not options
+        relevant_ticks = [tick for tick in ticks if tick.get('instrument_token') == self.instrument_token]
+        
+        if not relevant_ticks:
+            # No ticks for this instrument, but this is normal if we're subscribed to multiple instruments
+            return
+
+        latest_tick = relevant_ticks[-1] # Assuming ticks are ordered by time
         current_ltp = latest_tick['last_price']
         # Extract timestamp safely - handle different timestamp formats
         tick_timestamp = None
@@ -710,6 +1318,14 @@ class CaptureMountainSignal(BaseStrategy):
             return
 
         self.status['current_ltp'] = current_ltp
+        
+        # Update signal status to indicate we're receiving data
+        if self.status.get('signal_status') == 'Waiting for market data':
+            # Check if we have enough historical data to start evaluating
+            if len(self.historical_data) >= self.ema_period:
+                self.status['signal_status'] = 'Monitoring market for signals'
+            else:
+                self.status['signal_status'] = f'Building historical data ({len(self.historical_data)}/{self.ema_period} candles)'
         
         # Update option prices (every 5 seconds to avoid too many API calls)
         if self.last_option_price_update is None or \
@@ -786,12 +1402,7 @@ class CaptureMountainSignal(BaseStrategy):
 
         # Update status message
         self.status['message'] = f"Processing ticks. Current candle: {self.current_candle_data['date'].strftime('%H:%M')} - {current_ltp:.2f}"
-        # Update aligned last execution time (minute % 5 == 4, second == 40)
-        try:
-            self.status['last_execution_time'] = self._aligned_execution_time(tick_datetime).isoformat()
-        except Exception:
-            pass
-
+        
         # **SIGNAL EVALUATION TIMING: rule-driven seconds before candle close**
         # Calculate how many seconds we are from the candle end
         candle_duration_seconds = candle_interval_minutes * 60
@@ -799,23 +1410,126 @@ class CaptureMountainSignal(BaseStrategy):
         seconds_before_close = candle_duration_seconds - seconds_into_candle
         
         target_seconds = getattr(self, '_signal_evaluate_seconds', 20)
-        buffer_seconds = getattr(self, '_signal_evaluate_buffer', 2)
-        lower_bound = max(0, target_seconds - buffer_seconds)
-        upper_bound = target_seconds + buffer_seconds
+        # Use a very narrow window (20±0.5 seconds) to ensure evaluation happens only once
+        # This prevents multiple evaluations from different ticks arriving during the window
+        tolerance = 0.5  # Half second tolerance to account for tick timing variations
+        lower_bound = max(0, target_seconds - tolerance)
+        upper_bound = target_seconds + tolerance
 
-        # Evaluate signal close to candle completion while still prior to close
-        if lower_bound <= seconds_before_close <= upper_bound:
-            if not self.signal_evaluated_for_current_candle and len(self.historical_data) > self.ema_period:
-                self._evaluate_signal_candle()
-                self.signal_evaluated_for_current_candle = True
-                logging.info(
-                    f"Signal evaluation triggered at {tick_datetime.strftime('%H:%M:%S')} "
-                    f"({seconds_before_close:.1f}s before candle close; target {target_seconds}s ± {buffer_seconds}s)"
+        # Check if we're at the evaluation time (20 seconds before candle close)
+        # CRITICAL: Only evaluate ONCE per candle, exactly at 20 seconds before close
+        is_evaluation_time = (lower_bound <= seconds_before_close <= upper_bound and 
+                             not self.signal_evaluated_for_current_candle)
+
+        # Update "Last Check" timestamp ONLY at evaluation time (20 seconds before candle close)
+        # This ensures it shows the exact time when signal evaluation happens
+        if is_evaluation_time:
+            try:
+                self.status['last_check'] = tick_datetime.strftime('%Y-%m-%d %H:%M:%S')
+                self.status['last_execution_time'] = tick_datetime.isoformat()
+            except Exception:
+                pass
+
+        # Evaluate signal AND run strategy logic ONLY at the evaluation time (20 seconds before candle close)
+        # Example: For 12:15 candle (12:15:00 to 12:19:59), evaluation happens at 12:19:40 (20s before 12:20:00)
+        # IMPORTANT: This happens EXACTLY ONCE per candle - no fallback, no multiple evaluations
+        if is_evaluation_time and len(self.historical_data) > self.ema_period:
+            candle_time_str = self.current_candle_data['date'].strftime('%H:%M') if self.current_candle_data and 'date' in self.current_candle_data else 'N/A'
+            
+            # Double-check flag to prevent race conditions (shouldn't be needed but extra safety)
+            if self.signal_evaluated_for_current_candle:
+                logging.warning(
+                    f"[TIMING] Signal evaluation attempted but already evaluated for candle {candle_time_str} at {tick_datetime.strftime('%H:%M:%S')}. Skipping."
                 )
+            else:
+                logging.info(
+                    f"[TIMING] Signal evaluation at {tick_datetime.strftime('%H:%M:%S')} "
+                    f"for candle {candle_time_str} ({seconds_before_close:.1f}s before close; target {target_seconds}s ± {tolerance}s)"
+                )
+                # Set flag IMMEDIATELY before evaluation to prevent race conditions
+                self.signal_evaluated_for_current_candle = True
+                self._evaluate_signal_candle()
+            
+            # Run strategy logic (entry/exit decisions) ONLY at evaluation time (20 seconds before candle close)
+            # Entry decisions are made at this time, not continuously on every tick
+            if len(self.historical_data) > self.ema_period:
+                logging.debug(
+                    f"[TIMING] Strategy logic (entry/exit) evaluation at {tick_datetime.strftime('%H:%M:%S')} "
+                    f"for candle {candle_time_str} ({seconds_before_close:.1f}s before close)"
+                )
+                self._apply_strategy_logic()
+        else:
+            # Outside evaluation time: Only run exit logic if position is open (for stop loss/target monitoring)
+            # But do NOT check entry conditions outside evaluation time
+            # CRITICAL: Do NOT evaluate signals or make entry decisions outside the 20-second window
+            if len(self.historical_data) > self.ema_period and self.trade_placed:
+                # Only check exit conditions (SL/Target/Market Close) - not entry
+                self._check_exit_conditions_only()
 
-        # Only run strategy logic if we have enough historical data for EMA calculation
-        if len(self.historical_data) > self.ema_period:
-            self._apply_strategy_logic()
+    def _check_exit_conditions_only(self):
+        """
+        Check only exit conditions (SL/Target/Market Close) without checking entry conditions.
+        This is called outside the evaluation time window to continuously monitor exits.
+        """
+        if not self.trade_placed or self.position == 0:
+            return
+        
+        df = pd.DataFrame(self.historical_data)
+        if len(df) < 1:
+            return
+        
+        current_candle = df.iloc[-1]
+        current_ema = df['ema'].iloc[-1] if 'ema' in df.columns else None
+        
+        # Check for Market Close Square Off (15 minutes before market close at 3:30 PM)
+        current_candle_date = current_candle['date']
+        if isinstance(current_candle_date, datetime.datetime):
+            current_time = current_candle_date.time()
+        elif isinstance(current_candle_date, str):
+            try:
+                current_time = datetime.datetime.strptime(current_candle_date, '%Y-%m-%d %H:%M:%S').time()
+            except ValueError:
+                current_time = datetime.datetime.fromisoformat(current_candle_date).time()
+        else:
+            current_time = datetime.datetime.now().time()
+        
+        market_close_square_off_time = datetime.time(15, 15)  # 3:15 PM
+        market_close_time = datetime.time(15, 30)  # 3:30 PM
+        
+        if market_close_square_off_time <= current_time < market_close_time:
+            self.exit_price = current_candle['close']
+            self._add_audit_trail('market_close_square_off', f"Market close square off at {self.exit_price:.2f} (15 min before close)", {
+                'exit_price': self.exit_price,
+                'entry_price': self.entry_price,
+                'pnl': self.status.get('pnl', 0),
+                'position': 'PE',
+                'square_off_time': '15:15',
+                'candle_time': str(current_candle_date)
+            })
+            self._close_trade('MKT_CLOSE', current_candle_date if isinstance(current_candle_date, datetime.datetime) else datetime.datetime.now())
+            return
+        
+        # Check for Stop Loss (can happen anytime)
+        if self.position == -1 and current_candle['close'] >= self.status.get('stop_loss_level', float('inf')):
+            self.exit_price = current_candle['close']
+            self._add_audit_trail('stop_loss', f"Stop Loss hit at {self.exit_price:.2f}", {
+                'exit_price': self.exit_price,
+                'entry_price': self.entry_price,
+                'pnl': self.status.get('pnl', 0),
+                'position': 'PE'
+            })
+            self._close_trade('SL', current_candle['date'] if isinstance(current_candle['date'], datetime.datetime) else datetime.datetime.now())
+            return
+        
+        # Check for Target Profit (PE Logic) - only at evaluation time, but we can check the condition here
+        # The actual exit will happen at the next evaluation time
+        if self.position == -1 and self.pe_signal_candle is not None and current_ema is not None:
+            if current_candle['high'] < current_ema:
+                self.target_hit_candles += 1
+            else:
+                self.target_hit_candles = 0
+            
+            # Target exit will be checked at evaluation time in _apply_strategy_logic
 
     def _process_completed_candle(self, candle):
         # This method is called when a candle closes. 
@@ -827,7 +1541,16 @@ class CaptureMountainSignal(BaseStrategy):
         Evaluate signal candle conditions 20 seconds before candle close.
         This method checks if the CURRENT (forming) candle meets signal criteria.
         At 20 seconds before close, we have 99% complete candle data.
+        
+        IMPORTANT: This method should be called EXACTLY ONCE per candle at 20 seconds before close.
         """
+        # Safety check: If already evaluated for this candle, skip (shouldn't happen but prevents duplicates)
+        if self.signal_evaluated_for_current_candle:
+            logging.warning(
+                f"[TIMING] _evaluate_signal_candle called but already evaluated for current candle. Skipping duplicate evaluation."
+            )
+            return
+        
         df = pd.DataFrame(self.historical_data)
         df['ema'] = df['close'].ewm(span=self.ema_period, adjust=False).mean()
         
@@ -850,98 +1573,158 @@ class CaptureMountainSignal(BaseStrategy):
         timing_label = f"{int(timing_seconds)}s before close"
 
         # --- PE Signal Candle Identification: LOW > 5 EMA AND RSI > 70 ---
-        # Note: We evaluate the forming candle shortly before close per rules
-        if current_candle['low'] > current_ema:
-            # RSI condition must be met at signal identification time
-            if current_rsi is not None and current_rsi > 70:
-                # Signal Reset: If a newer candle meets the same criteria (LOW > 5 EMA + RSI > 70), 
-                # it REPLACES the previous PE signal candle
-                if self.pe_signal_candle is not None:
-                    # New PE signal candle replaces old one
-                    # Reset price action validation and entry tracking
-                    self.pe_signal_price_above_low = False
-                    # Clear entry tracking for old signal
-                    signal_candle_id = id(self.pe_signal_candle)
-                    if signal_candle_id in self.signal_candles_with_entry:
-                        self.signal_candles_with_entry.remove(signal_candle_id)
-                
-                self.pe_signal_candle = current_candle
-                self.status['signal_status'] = f"PE Signal Candle Identified ({timing_label}): {self.pe_signal_candle['date'].strftime('%H:%M')} (H:{self.pe_signal_candle['high']:.2f}, L:{self.pe_signal_candle['low']:.2f})"
-                self.status['signal_candle_time'] = self.pe_signal_candle['date'].strftime('%H:%M') + '-' + (self.pe_signal_candle['date'] + datetime.timedelta(minutes=int(self.candle_time))).strftime('%H:%M')
-                self.status['signal_candle_high'] = self.pe_signal_candle['high']
-                self.status['signal_candle_low'] = self.pe_signal_candle['low']
-                self.ce_signal_candle = None # Only one active signal type
-                self._add_audit_trail('signal_identified', self.status['signal_status'], {
-                    'signal_type': 'PE',
-                    'candle_time': self.status['signal_candle_time'],
-                    'high': self.pe_signal_candle['high'],
-                    'low': self.pe_signal_candle['low'],
-                    'ema': current_ema,
-                    'rsi': current_rsi,
-                    'evaluation_timing': f'{int(timing_seconds)}_seconds_before_close'
-                })
-                # Append to today's signal history
-                try:
-                    signal_date = self.pe_signal_candle['date'] if isinstance(self.pe_signal_candle['date'], datetime.datetime) else None
-                    if signal_date and signal_date.date() == datetime.date.today():
-                        self.status['signal_history_today'].append({
-                            'type': 'PE',
-                            'time': self.status['signal_candle_time'],
-                            'high': self.pe_signal_candle['high'],
-                            'low': self.pe_signal_candle['low']
-                        })
-                        if len(self.status['signal_history_today']) > 200:
-                            self.status['signal_history_today'] = self.status['signal_history_today'][-200:]
-                except Exception:
-                    pass
-                logging.info(self.status['signal_status'])
+        # Note: We evaluate the forming candle 20 seconds before close per rules
+        # IMPORTANT: RSI must be STRICTLY > 70 (not >= 70) for PE signal
+        # Following business rules: RULE "Identify PE Signal" and RULE "Reset PE Signal"
+        
+        candle_time_str = current_candle['date'].strftime('%H:%M') if 'date' in current_candle else 'N/A'
+        evaluation_timestamp = datetime.datetime.now()
+        
+        logging.debug(f"[SIGNAL EVAL] Checking PE signal for candle {candle_time_str}: LOW={current_candle['low']:.2f}, EMA={current_ema:.2f}, RSI={current_rsi}")
+        
+        # Check conditions according to rules
+        low_above_ema = current_candle['low'] > current_ema
+        rsi_above_70 = current_rsi is not None and current_rsi > 70
+        
+        # Track this evaluation
+        evaluation_record = {
+            'timestamp': evaluation_timestamp.isoformat(),
+            'candle_time': candle_time_str,
+            'candle_start': current_candle['date'].isoformat() if 'date' in current_candle else None,
+            'low': float(current_candle['low']),
+            'high': float(current_candle['high']),
+            'close': float(current_candle['close']),
+            'ema': float(current_ema),
+            'rsi': float(current_rsi) if current_rsi is not None else None,
+            'low_above_ema': low_above_ema,
+            'rsi_above_70': rsi_above_70,
+            'result': None,  # 'identified', 'ignored', 'reset', 'cleared'
+            'reason': None,
+            'signal_type': 'PE'
+        }
+        
+        if low_above_ema and rsi_above_70:
+            # Signal condition MET - Check if this is a new signal or reset
+            old_signal_time = None
+            if self.pe_signal_candle is not None:
+                old_signal_time = self.pe_signal_candle['date'].strftime('%H:%M') if 'date' in self.pe_signal_candle else 'N/A'
+                # RULE "Reset PE Signal": If existing signal and new candle meets criteria, replace it
+                evaluation_record['result'] = 'reset'
+                evaluation_record['reason'] = f"PE Signal reset: Newer candle {candle_time_str} replaces previous signal at {old_signal_time}"
+                logging.info(f"[SIGNAL EVAL] ✓ PE Signal RESET: Replacing signal from {old_signal_time} with new signal at {candle_time_str}")
+                # Reset price action validation and entry tracking
+                self.pe_signal_price_above_low = False
+                # Clear entry tracking for old signal
+                signal_candle_id = id(self.pe_signal_candle)
+                if signal_candle_id in self.signal_candles_with_entry:
+                    self.signal_candles_with_entry.remove(signal_candle_id)
+            else:
+                # RULE "Identify PE Signal": New signal identified
+                evaluation_record['result'] = 'identified'
+                evaluation_record['reason'] = f"PE Signal identified: LOW ({current_candle['low']:.2f}) > EMA ({current_ema:.2f}) AND RSI ({current_rsi:.2f}) > 70"
+                logging.info(f"[SIGNAL EVAL] ✓ PE Signal IDENTIFIED: {candle_time_str} (H:{current_candle['high']:.2f}, L:{current_candle['low']:.2f})")
+            
+            # Set the signal candle
+            self.pe_signal_candle = current_candle
+            self.status['signal_status'] = f"PE Signal Candle Identified ({timing_label}): {candle_time_str} - Waiting for Trade Entry (H:{current_candle['high']:.2f}, L:{current_candle['low']:.2f})"
+            self.status['signal_candle_time'] = candle_time_str + '-' + (current_candle['date'] + datetime.timedelta(minutes=int(self.candle_time))).strftime('%H:%M')
+            self.status['signal_candle_high'] = float(current_candle['high'])
+            self.status['signal_candle_low'] = float(current_candle['low'])
+            self.ce_signal_candle = None  # Only one active signal type
+            
+            # Add to audit trail for identified signals
+            self._add_audit_trail('signal_identified', self.status['signal_status'], {
+                'signal_type': 'PE',
+                'candle_time': self.status['signal_candle_time'],
+                'high': self.pe_signal_candle['high'],
+                'low': self.pe_signal_candle['low'],
+                'ema': current_ema,
+                'rsi': current_rsi,
+                'evaluation_timing': f'{int(timing_seconds)}_seconds_before_close',
+                'old_signal_time': old_signal_time
+            })
+            
+            # Append to today's signal history
+            try:
+                signal_date = self.pe_signal_candle['date'] if isinstance(self.pe_signal_candle['date'], datetime.datetime) else None
+                if signal_date and signal_date.date() == datetime.date.today():
+                    self.status['signal_history_today'].append({
+                        'type': 'PE',
+                        'time': self.status['signal_candle_time'],
+                        'high': self.pe_signal_candle['high'],
+                        'low': self.pe_signal_candle['low']
+                    })
+                    if len(self.status['signal_history_today']) > 200:
+                        self.status['signal_history_today'] = self.status['signal_history_today'][-200:]
+            except Exception:
+                pass
+            
+        elif self.pe_signal_candle is not None:
+            # RULE "Clear PE Signal": If signal exists but conditions no longer met, clear it
+            if not low_above_ema or not rsi_above_70:
+                evaluation_record['result'] = 'cleared'
+                if not low_above_ema:
+                    evaluation_record['reason'] = f"PE Signal cleared: LOW ({current_candle['low']:.2f}) <= EMA ({current_ema:.2f})"
+                else:
+                    evaluation_record['reason'] = f"PE Signal cleared: RSI ({current_rsi:.2f}) <= 70 (required > 70)"
+                logging.info(f"[SIGNAL EVAL] ✗ PE Signal CLEARED: {evaluation_record['reason']}")
+                self.pe_signal_candle = None
+                self.status['signal_status'] = 'No active signal - Waiting for next signal'
+                self.status['signal_candle_time'] = 'N/A'
+                self.status['signal_candle_high'] = 0
+                self.status['signal_candle_low'] = 0
+        else:
+            # No signal exists and conditions not met - log as ignored
+            evaluation_record['result'] = 'ignored'
+            if not low_above_ema:
+                evaluation_record['reason'] = f"Signal ignored: LOW ({current_candle['low']:.2f}) <= EMA ({current_ema:.2f})"
+                ignore_reason = f"PE Signal ignored: LOW ({current_candle['low']:.2f}) <= EMA ({current_ema:.2f})"
+            else:
+                evaluation_record['reason'] = f"Signal ignored: RSI ({current_rsi:.2f}) <= 70 (required > 70)"
+                ignore_reason = f"PE Signal ignored: RSI ({current_rsi:.2f}) <= 70 (required > 70)"
+            logging.debug(f"[SIGNAL EVAL] ✗ {evaluation_record['reason']}")
+            
+            # Add to audit trail so it appears in live trade history
+            self._add_audit_trail('signal_ignored', ignore_reason, {
+                'signal_type': 'PE',
+                'candle_time': candle_time_str,
+                'high': float(current_candle['high']),
+                'low': float(current_candle['low']),
+                'ema': float(current_ema),
+                'rsi': float(current_rsi) if current_rsi is not None else None,
+                'reason': evaluation_record['reason'],
+                'evaluation_timing': f'{int(timing_seconds)}_seconds_before_close'
+            })
+        
+        # Add evaluation record to history (keep last 500 evaluations)
+        if 'signal_evaluations' not in self.status:
+            self.status['signal_evaluations'] = []
+        self.status['signal_evaluations'].append(evaluation_record)
+        if len(self.status['signal_evaluations']) > 500:
+            self.status['signal_evaluations'] = self.status['signal_evaluations'][-500:]
 
         # --- CE Signal Candle Identification: HIGH < 5 EMA AND RSI < 30 ---
-        # Note: We evaluate the forming candle shortly before close per rules
+        # NOTE: CE signals are IGNORED in live trading - only PE trades are allowed
+        # CE signals are detected but not processed for trade entry
         if current_candle['high'] < current_ema:
             # RSI condition must be met at signal identification time
             if current_rsi is not None and current_rsi < 30:
-                # Signal Reset: If a newer candle meets the same criteria (HIGH < 5 EMA + RSI < 30), 
-                # it REPLACES the previous CE signal candle
-                if self.ce_signal_candle is not None:
-                    # New CE signal candle replaces old one
-                    # Reset price action validation and entry tracking
-                    self.ce_signal_price_below_high = False
-                    # Clear entry tracking for old signal
-                    signal_candle_id = id(self.ce_signal_candle)
-                    if signal_candle_id in self.signal_candles_with_entry:
-                        self.signal_candles_with_entry.remove(signal_candle_id)
-                
-                self.ce_signal_candle = current_candle
-                self.status['signal_status'] = f"CE Signal Candle Identified ({timing_label}): {self.ce_signal_candle['date'].strftime('%H:%M')} (H:{self.ce_signal_candle['high']:.2f}, L:{self.ce_signal_candle['low']:.2f})"
-                self.status['signal_candle_time'] = self.ce_signal_candle['date'].strftime('%H:%M') + '-' + (self.ce_signal_candle['date'] + datetime.timedelta(minutes=int(self.candle_time))).strftime('%H:%M')
-                self.status['signal_candle_high'] = self.ce_signal_candle['high']
-                self.status['signal_candle_low'] = self.ce_signal_candle['low']
-                self.pe_signal_candle = None # Only one active signal type
-                self._add_audit_trail('signal_identified', self.status['signal_status'], {
+                # CE signal detected but ignored - log as ignored signal
+                ignore_reason = f"CE signal detected but ignored (LIVE TRADING: Only PE trades allowed). HIGH ({current_candle['high']:.2f}) < EMA ({current_ema:.2f}) AND RSI ({current_rsi:.2f}) < 30"
+                self._add_audit_trail('signal_ignored', ignore_reason, {
                     'signal_type': 'CE',
-                    'candle_time': self.status['signal_candle_time'],
-                    'high': self.ce_signal_candle['high'],
-                    'low': self.ce_signal_candle['low'],
+                    'candle_time': current_candle['date'].strftime('%H:%M') if 'date' in current_candle else 'N/A',
+                    'high': current_candle['high'],
+                    'low': current_candle['low'],
                     'ema': current_ema,
                     'rsi': current_rsi,
-                    'evaluation_timing': f'{int(timing_seconds)}_seconds_before_close'
+                    'reason': 'CE signals disabled for live trading'
                 })
-                # Append to today's signal history
-                try:
-                    signal_date = self.ce_signal_candle['date'] if isinstance(self.ce_signal_candle['date'], datetime.datetime) else None
-                    if signal_date and signal_date.date() == datetime.date.today():
-                        self.status['signal_history_today'].append({
-                            'type': 'CE',
-                            'time': self.status['signal_candle_time'],
-                            'high': self.ce_signal_candle['high'],
-                            'low': self.ce_signal_candle['low']
-                        })
-                        if len(self.status['signal_history_today']) > 200:
-                            self.status['signal_history_today'] = self.status['signal_history_today'][-200:]
-                except Exception:
-                    pass
-                logging.info(self.status['signal_status'])
+                # Clear any existing CE signal candle
+                if self.ce_signal_candle is not None:
+                    self.ce_signal_candle = None
+                    self.ce_signal_price_below_high = False
+                logging.debug(ignore_reason)
 
     def _apply_strategy_logic(self):
         df = pd.DataFrame(self.historical_data)
@@ -955,7 +1738,10 @@ class CaptureMountainSignal(BaseStrategy):
 
         # Ensure we have at least two candles for signal/entry logic
         if len(df) < 2:
-            self.status['signal_status'] = 'Not enough candles for signal identification.'
+            if len(self.historical_data) < self.ema_period:
+                self.status['signal_status'] = f'Building historical data ({len(self.historical_data)}/{self.ema_period} candles needed)'
+            else:
+                self.status['signal_status'] = 'Not enough candles for signal identification.'
             return
 
         current_candle = df.iloc[-1]
@@ -972,11 +1758,12 @@ class CaptureMountainSignal(BaseStrategy):
                 self.pe_signal_price_above_low = True
                 logging.info(f"PE price action validation met: Price HIGH ({current_candle['high']:.2f}) > Signal LOW ({self.pe_signal_candle['low']:.2f})")
         
-        if self.ce_signal_candle is not None and not self.trade_placed and not self.ce_signal_price_below_high:
-            # Check if price (low) has traded below CE signal candle's high
-            if current_candle['low'] < self.ce_signal_candle['high']:
-                self.ce_signal_price_below_high = True
-                logging.info(f"CE price action validation met: Price LOW ({current_candle['low']:.2f}) < Signal HIGH ({self.ce_signal_candle['high']:.2f})")
+        # CE signal processing disabled for live trading - only PE trades allowed
+        # if self.ce_signal_candle is not None and not self.trade_placed and not self.ce_signal_price_below_high:
+        #     # Check if price (low) has traded below CE signal candle's high
+        #     if current_candle['low'] < self.ce_signal_candle['high']:
+        #         self.ce_signal_price_below_high = True
+        #         logging.info(f"CE price action validation met: Price LOW ({current_candle['low']:.2f}) < Signal HIGH ({self.ce_signal_candle['high']:.2f})")
 
         # --- Trade Entry Logic ---
         if not self.trade_placed:
@@ -987,7 +1774,9 @@ class CaptureMountainSignal(BaseStrategy):
                 
                 if not entry_condition_met:
                     # Entry condition not met yet - waiting for price to break below signal low
-                    self.status['signal_status'] = f"PE Signal Active - Waiting for Entry: Close must break below {self.pe_signal_candle['low']:.2f} (Current: {current_candle['close']:.2f})"
+                    # Following ENTRY "PE Breakout Entry" rule: TRIGGER when candle.close falls below signal.low
+                    signal_time_str = self.pe_signal_candle['date'].strftime('%H:%M') if 'date' in self.pe_signal_candle else 'N/A'
+                    self.status['signal_status'] = f"PE Signal Active ({signal_time_str}) - Waiting for Trade Entry: Close must break below {self.pe_signal_candle['low']:.2f} (Current: {current_candle['close']:.2f})"
                     logging.debug(f"PE Entry condition not met: Close ({current_candle['close']:.2f}) >= Signal Low ({self.pe_signal_candle['low']:.2f})")
                 else:
                     # Entry condition met - check if entry is allowed
@@ -1044,6 +1833,41 @@ class CaptureMountainSignal(BaseStrategy):
                         self.status['traded_instrument_token'] = instrument_token
                         self.status['stop_loss_level'] = self.pe_signal_candle['high']  # SL for PE is signal candle high
                         self.status['target_profit_level'] = np.nan  # Target calculated dynamically
+                        
+                        # Set exit conditions for display
+                        self.status['exit_conditions'] = {
+                            'option_stop_loss': {
+                                'type': 'Option Stop Loss',
+                                'condition': f'Option premium falls below {self.entry_price * 0.83:.2f} (17% below entry)',
+                                'priority': 1,
+                                'active': True
+                            },
+                            'option_target': {
+                                'type': 'Option Target',
+                                'condition': f'Option premium rises above {self.entry_price * 1.45:.2f} (45% above entry)',
+                                'priority': 2,
+                                'active': True
+                            },
+                            'index_stop_loss': {
+                                'type': 'Index Stop Loss',
+                                'condition': f'Index closes above {self.pe_signal_candle["high"]:.2f} (signal candle HIGH)',
+                                'priority': 3,
+                                'active': True
+                            },
+                            'index_target': {
+                                'type': 'Index Target',
+                                'condition': 'Index HIGH < 5 EMA for 1 candle, then 2 consecutive candles CLOSE > 5 EMA',
+                                'priority': 4,
+                                'active': True
+                            },
+                            'market_close': {
+                                'type': 'Market Close',
+                                'condition': 'Automatic square-off at 3:15 PM (15 minutes before market close)',
+                                'priority': 5,
+                                'active': True,
+                                'time': '15:15'
+                            }
+                        }
                         signal_time = (
                             self.pe_signal_candle['date'].strftime('%Y-%m-%d %H:%M:%S')
                             if 'date' in self.pe_signal_candle
@@ -1088,8 +1912,9 @@ class CaptureMountainSignal(BaseStrategy):
                         # Reset price action validation after entry (for next exit/entry cycle)
                         self.pe_signal_price_above_low = False
 
-            # CE Entry: After exit, require price action validation
-            elif self.ce_signal_candle is not None:
+            # CE Entry: DISABLED for live trading - only PE trades allowed
+            # CE signals are ignored and no trades are entered
+            elif False:  # Disabled: self.ce_signal_candle is not None:
                 # Check if entry condition is met: current candle close > signal candle high
                 entry_condition_met = current_candle['close'] > self.ce_signal_candle['high']
                 
@@ -1152,6 +1977,41 @@ class CaptureMountainSignal(BaseStrategy):
                         self.status['traded_instrument_token'] = instrument_token
                         self.status['stop_loss_level'] = self.ce_signal_candle['low']  # SL for CE is signal candle low
                         self.status['target_profit_level'] = np.nan  # Target calculated dynamically
+                        
+                        # Set exit conditions for display
+                        self.status['exit_conditions'] = {
+                            'option_stop_loss': {
+                                'type': 'Option Stop Loss',
+                                'condition': f'Option premium falls below {self.entry_price * 0.83:.2f} (17% below entry)',
+                                'priority': 1,
+                                'active': True
+                            },
+                            'option_target': {
+                                'type': 'Option Target',
+                                'condition': f'Option premium rises above {self.entry_price * 1.45:.2f} (45% above entry)',
+                                'priority': 2,
+                                'active': True
+                            },
+                            'index_stop_loss': {
+                                'type': 'Index Stop Loss',
+                                'condition': f'Index closes below {self.ce_signal_candle["low"]:.2f} (signal candle LOW)',
+                                'priority': 3,
+                                'active': True
+                            },
+                            'index_target': {
+                                'type': 'Index Target',
+                                'condition': 'Index LOW > 5 EMA for 1 candle, then 2 consecutive candles CLOSE < 5 EMA',
+                                'priority': 4,
+                                'active': True
+                            },
+                            'market_close': {
+                                'type': 'Market Close',
+                                'condition': 'Automatic square-off at 3:15 PM (15 minutes before market close)',
+                                'priority': 5,
+                                'active': True,
+                                'time': '15:15'
+                            }
+                        }
                         signal_time = (
                             self.ce_signal_candle['date'].strftime('%Y-%m-%d %H:%M:%S')
                             if 'date' in self.ce_signal_candle
@@ -1271,7 +2131,9 @@ class CaptureMountainSignal(BaseStrategy):
                         logging.info(self.status['message'])
 
             # Check for Target Profit (CE Logic)
-            elif self.position == 1 and self.ce_signal_candle is not None: # Long position (CE)
+            # NOTE: This should never execute in live trading since CE trades are disabled
+            # Only PE trades (position == -1) are allowed
+            elif self.position == 1 and self.ce_signal_candle is not None: # Long position (CE) - DISABLED
                 if current_candle['low'] > current_ema: # Wait for at least 1 candle where LOW > 5 EMA
                     self.target_hit_candles += 1
                 else:
@@ -1293,20 +2155,121 @@ class CaptureMountainSignal(BaseStrategy):
                         logging.info(self.status['message'])
 
     def _close_trade(self, exit_type, timestamp):
-        order_id, _, _ = self._place_order(self.exit_price, 'PE' if self.position == -1 else 'CE', 'SELL')
-        if order_id is None and not self.paper_trade:
-            failure_msg = f"Exit order failed at {self.exit_price:.2f}. Manual intervention required."
-            self.status['state'] = 'error'
-            self.status['message'] = failure_msg
-            self._add_audit_trail('exit_failed', failure_msg, {
-                'exit_type': exit_type,
-                'exit_price': self.exit_price,
-                'entry_price': self.entry_price,
-                'position': 'PE' if self.position == -1 else 'CE',
-                'reason': self.status.get('last_live_order_error'),
-            })
-            logging.error(failure_msg)
-            return
+        """
+        Close the current trade position.
+        For live trades, checks actual position from Zerodha and uses exact quantity to avoid margin issues.
+        """
+        if self.paper_trade or not self._live_kite_client:
+            # Paper trade or no live client - use standard method
+            order_id, _, _ = self._place_order(self.exit_price, 'PE' if self.position == -1 else 'CE', 'SELL')
+            if order_id is None:
+                failure_msg = f"Exit order failed at {self.exit_price:.2f}. Manual intervention required."
+                self.status['state'] = 'error'
+                self.status['message'] = failure_msg
+                self._add_audit_trail('exit_failed', failure_msg, {
+                    'exit_type': exit_type,
+                    'exit_price': self.exit_price,
+                    'entry_price': self.entry_price,
+                    'position': 'PE' if self.position == -1 else 'CE',
+                    'reason': self.status.get('last_live_order_error'),
+                })
+                logging.error(failure_msg)
+                return
+        else:
+            # Live trade - check actual position and use exact quantity
+            try:
+                positions = self._live_kite_client.positions()
+                net_positions = positions.get('net', []) if isinstance(positions, dict) else []
+                
+                # Find our position
+                traded_symbol = self.status.get('traded_instrument', '').upper()
+                actual_position = None
+                for pos in net_positions:
+                    if str(pos.get('tradingsymbol', '')).upper() == traded_symbol:
+                        qty = pos.get('quantity', 0)
+                        if qty != 0:
+                            actual_position = pos
+                            break
+                
+                if actual_position:
+                    # Use actual position details
+                    exit_qty = abs(int(actual_position.get('quantity', 0)))
+                    tradingsymbol = actual_position.get('tradingsymbol')
+                    exchange = actual_position.get('exchange') or 'NFO'
+                    product = actual_position.get('product') or self._live_kite_client.PRODUCT_MIS
+                    
+                    # Determine transaction type to close position
+                    # If quantity > 0, we need to SELL to close
+                    # If quantity < 0, we need to BUY to close
+                    qty = actual_position.get('quantity', 0)
+                    if qty > 0:
+                        transaction_type = self._live_kite_client.TRANSACTION_TYPE_SELL
+                    else:
+                        transaction_type = self._live_kite_client.TRANSACTION_TYPE_BUY
+                    
+                    # Convert product string to constant if needed
+                    if isinstance(product, str):
+                        if product.upper() == 'MIS':
+                            product_constant = self._live_kite_client.PRODUCT_MIS
+                        elif product.upper() == 'NRML':
+                            product_constant = self._live_kite_client.PRODUCT_NRML
+                        else:
+                            product_constant = product
+                    else:
+                        product_constant = product
+                    
+                    # Place order to close position
+                    order_id = self._live_kite_client.place_order(
+                        variety=self._live_kite_client.VARIETY_REGULAR,
+                        exchange=exchange,
+                        tradingsymbol=tradingsymbol,
+                        transaction_type=transaction_type,
+                        quantity=exit_qty,
+                        product=product_constant,
+                        order_type=self._live_kite_client.ORDER_TYPE_MARKET,
+                        validity=self._live_kite_client.VALIDITY_DAY,
+                        tag=self.live_order_context.get('tag', f"AIML-LIVE-{self.live_order_context.get('deployment_id', 'EXIT')}")
+                    )
+                    logging.info(
+                        f"[LIVE TRADE] Exit order {order_id} placed: {transaction_type} {tradingsymbol} qty={exit_qty} "
+                        f"(closing position, exit_type={exit_type})"
+                    )
+                    self.status['last_live_order_error'] = None
+                else:
+                    # Position not found in Zerodha - might already be closed
+                    logging.warning(f"Position {traded_symbol} not found in Zerodha. May already be closed.")
+                    # Try standard method as fallback
+                    order_id, _, _ = self._place_order(self.exit_price, 'PE' if self.position == -1 else 'CE', 'SELL')
+                    if order_id is None:
+                        failure_msg = f"Exit order failed: Position {traded_symbol} not found and fallback order failed."
+                        self.status['state'] = 'error'
+                        self.status['message'] = failure_msg
+                        self._add_audit_trail('exit_failed', failure_msg, {
+                            'exit_type': exit_type,
+                            'exit_price': self.exit_price,
+                            'entry_price': self.entry_price,
+                            'position': 'PE' if self.position == -1 else 'CE',
+                            'reason': 'Position not found in Zerodha',
+                        })
+                        logging.error(failure_msg)
+                        return
+            except Exception as exc:
+                logging.error(f"Error closing trade using actual position: {exc}", exc_info=True)
+                # Fallback to standard method
+                order_id, _, _ = self._place_order(self.exit_price, 'PE' if self.position == -1 else 'CE', 'SELL')
+                if order_id is None:
+                    failure_msg = f"Exit order failed at {self.exit_price:.2f}. Error: {str(exc)}"
+                    self.status['state'] = 'error'
+                    self.status['message'] = failure_msg
+                    self._add_audit_trail('exit_failed', failure_msg, {
+                        'exit_type': exit_type,
+                        'exit_price': self.exit_price,
+                        'entry_price': self.entry_price,
+                        'position': 'PE' if self.position == -1 else 'CE',
+                        'reason': str(exc),
+                    })
+                    logging.error(failure_msg)
+                    return
 
         self.status['state'] = 'position_closed'
         exit_type_display = 'Market Close' if exit_type == 'MKT_CLOSE' else exit_type

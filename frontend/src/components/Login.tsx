@@ -58,8 +58,8 @@ const Login: React.FC = () => {
         return;
       }
 
-      // Handle non-OK responses with JSON data
-      if (!response.ok) {
+      // Handle error responses (either non-OK status or error status in JSON)
+      if (!response.ok || data.status === 'error') {
         setMessage({ type: 'danger', text: data.message || 'Login failed.' });
         console.error('Login failed:', data);
         return;
@@ -76,9 +76,9 @@ const Login: React.FC = () => {
         setMessage({ type: 'info', text: data.message || 'Please verify the OTP sent to your email and try again.' });
         navigate('/verify-otp', { state: { email } });
       } else {
-        // This case should ideally be caught by !response.ok, but as a fallback
+        // Unknown status
         setMessage({ type: 'danger', text: data.message || 'Login failed.' });
-        console.error('Login failed with success status false:', data);
+        console.error('Login failed with unknown status:', data);
       }
     } catch (error) {
       console.error('Error during login:', error);

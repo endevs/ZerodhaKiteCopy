@@ -1,0 +1,29 @@
+STRATEGY "Open Range Breakout" VERSION 1.0
+DESCRIPTION "Intraday Open Range Breakout strategy for BankNifty on 5m candles"
+EVALUATION
+  SCHEDULE every 10m candle
+  TIMING evaluate 1m before candle close at 10:00 AM - 2:00 PM
+RULES SECTION
+  - Identify the highest high (HH) and lowest low (LL) of the first 5 candles after 10:00 AM
+  - If HH > LL, calculate the range (R) as HH - LL
+  - If R > 10% of the previous day's high-low range, consider it a valid breakout
+ENTRY SECTION
+  - Buy BankNifty option ATM contract at 10:05 AM if valid breakout condition is met
+  - Set initial stop loss at 5% below the entry price
+  - Set target at 10% above the entry price
+  - Lot size: 1 contract
+  - Strike rounding: round to nearest 50 (e.g., 46000, 46500, etc.)
+EXIT SECTION
+  - Exit the trade if the stop loss is hit
+  - Exit the trade if the target is reached
+  - Exit the trade if the market closes (2:00 PM)
+RE-ENTRY RULES
+  - If the stop loss is hit, wait for 5 candles and re-evaluate the breakout condition
+  - If the breakout condition is still valid, re-enter the trade with the same parameters
+POSITION MANAGEMENT
+  - Max open positions: 1
+  - Max daily loss: 5% of the account balance
+  - Max daily gain: 10% of the account balance
+LOGGING
+  - Log all trades with entry and exit prices, stop loss and target levels, and profit/loss
+  - Log all re-entry attempts with reasons for re-entry

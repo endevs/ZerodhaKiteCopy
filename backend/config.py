@@ -26,3 +26,8 @@ CORS_ORIGINS = [origin.strip() for origin in os.getenv('CORS_ORIGINS', 'http://l
 
 # Frontend URL Configuration
 FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:3000')
+
+# Razorpay Configuration
+RAZORPAY_KEY_ID = os.getenv('RAZORPAY_KEY_ID', '')
+RAZORPAY_KEY_SECRET = os.getenv('RAZORPAY_KEY_SECRET', '')
+RAZORPAY_WEBHOOK_SECRET = os.getenv('RAZORPAY_WEBHOOK_SECRET', '')

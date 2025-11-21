@@ -10,3 +10,5 @@ numpy
 scikit-learn
 torch
 groq
+razorpay
+cryptography

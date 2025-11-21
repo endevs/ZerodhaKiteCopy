@@ -9,6 +9,8 @@ import EnhancedRealTimeStrategyMonitor from './EnhancedRealTimeStrategyMonitor';
 import AIMLContent from './AIMLContent';
 import LiveTradeContent from './LiveTradeContent';
 import AdminContent from './AdminContent';
+import ProfileContent from './ProfileContent';
+import SubscribeContent from './SubscribeContent';
 import { apiUrl, SOCKET_BASE_URL } from '../config/api';
 
 const Dashboard: React.FC = () => {
@@ -67,18 +69,41 @@ const Dashboard: React.FC = () => {
           }
           
           // If access token was just set (user just logged in), request ticker startup via HTTP
-          if (hasAccessToken) {
+          // Only try if token is valid (not just present)
+          // token_valid may not be present in older API responses, so default to false
+          const isTokenValid = data.token_valid !== undefined ? data.token_valid : false;
+          if (hasAccessToken && isTokenValid) {
             fetch(apiUrl('/api/ticker/start'), {
               method: 'POST',
               credentials: 'include'
             })
-              .then(response => response.json())
+              .then(response => {
+                if (!response.ok) {
+                  // Don't log 401 errors as they're expected if token is invalid
+                  if (response.status !== 401) {
+                    return response.json().then(result => {
+                      console.warn('Failed to start ticker:', result.message);
+                    });
+                  }
+                  return Promise.resolve(); // Silently handle 401
+                }
+                return response.json();
+              })
               .then(result => {
-                if (result.status !== 'success') {
-                  console.error('Failed to start ticker:', result.message);
+                if (result && result.status !== 'success') {
+                  // Only log non-authentication errors
+                  if (!result.message?.includes('Invalid access token') && 
+                      !result.message?.includes('not connected')) {
+                    console.warn('Failed to start ticker:', result.message);
+                  }
                 }
               })
-              .catch(err => console.error('Error starting ticker:', err));
+              .catch(err => {
+                // Only log unexpected errors
+                if (!err.message?.includes('401')) {
+                  console.warn('Error starting ticker:', err);
+                }
+              });
           }
         } else {
           console.error('Error fetching user data:', data.message);
@@ -262,6 +287,14 @@ const Dashboard: React.FC = () => {
     }
   };
 
+  const handleProfileClick = () => {
+    setActiveTab('profile');
+  };
+
+  const handleSubscribeClick = () => {
+    setActiveTab('subscribe');
+  };
+
   const renderContent = () => {
     switch (activeTab) {
       case 'dashboard':
@@ -274,6 +307,10 @@ const Dashboard: React.FC = () => {
         return <AIMLContent />;
       case 'admin':
         return <AdminContent />;
+      case 'profile':
+        return <ProfileContent onSubscribeClick={handleSubscribeClick} />;
+      case 'subscribe':
+        return <SubscribeContent />;
       default:
         return <DashboardContent onViewLiveStrategy={handleViewLiveStrategy} />;
     }
@@ -290,6 +327,8 @@ const Dashboard: React.FC = () => {
         niftyPrice={niftyPrice}
         bankNiftyPrice={bankNiftyPrice}
         isAdmin={isAdmin}
+        onProfileClick={handleProfileClick}
+        onSubscribeClick={handleSubscribeClick}
       />
     }>
       {renderContent()}

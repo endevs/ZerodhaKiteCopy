@@ -1,0 +1,62 @@
+================================================================================
+RAZORPAY API KEYS SETUP INSTRUCTIONS
+================================================================================
+
+STEP 1: Create or Edit .env file
+----------------------------------
+Location: D:\WorkSpace\ZerodhaKiteGit\backend\.env
+
+STEP 2: Add These Lines to .env file
+-------------------------------------
+Add the following lines to your .env file:
+
+RAZORPAY_KEY_ID=your_key_id_here
+RAZORPAY_KEY_SECRET=your_key_secret_here
+RAZORPAY_WEBHOOK_SECRET=
+
+IMPORTANT:
+- Replace "your_key_id_here" with your actual key_id from Razorpay
+- Replace "your_key_secret_here" with your actual key_secret from Razorpay
+- Leave RAZORPAY_WEBHOOK_SECRET empty for now (optional, can add later)
+- No spaces around the = sign
+- No quotes needed around the values
+
+STEP 3: Example .env File
+--------------------------
+Your .env file should look something like this:
+
+SMTP_SERVER=smtp.gmail.com
+USERNAME_EMAIL=your_email@gmail.com
+PASSWORD_EMAIL=your_app_password
+EMAIL_FROM=your_email@gmail.com
+SECRET_KEY=your_secret_key_here
+DEBUG=False
+DATABASE_PATH=database.db
+SERVER_HOST=0.0.0.0
+SERVER_PORT=8000
+CORS_ORIGINS=http://localhost:3000
+FRONTEND_URL=http://localhost:3000
+
+# Razorpay Configuration
+RAZORPAY_KEY_ID=your_key_id_here
+RAZORPAY_KEY_SECRET=your_key_secret_here
+RAZORPAY_WEBHOOK_SECRET=
+
+STEP 4: Restart Backend Server
+-------------------------------
+After adding the keys, restart your backend server for changes to take effect.
+
+STEP 5: Verify
+-------------
+Check your backend logs for:
+"Razorpay client initialized successfully"
+
+If you see this message, your keys are configured correctly!
+
+================================================================================
+SECURITY REMINDER:
+- Never commit .env file to Git
+- Never share your secret keys
+- Keep your keys secure and private
+================================================================================
+

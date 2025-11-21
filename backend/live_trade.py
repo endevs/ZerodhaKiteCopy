@@ -5,6 +5,57 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from database import get_db_connection
 
+# Ensure archived_deployments table exists
+def ensure_archive_table() -> None:
+    """Create archived_deployments table if it doesn't exist."""
+    conn = get_db_connection()
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS archived_deployments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                original_deployment_id INTEGER,
+                user_id INTEGER NOT NULL,
+                strategy_id INTEGER,
+                strategy_name TEXT,
+                status TEXT NOT NULL,
+                initial_investment REAL NOT NULL,
+                scheduled_start DATETIME,
+                started_at DATETIME,
+                last_run_at DATETIME,
+                archived_at DATETIME,
+                state_json TEXT,
+                kite_access_token TEXT,
+                error_message TEXT,
+                created_at DATETIME,
+                updated_at DATETIME,
+                FOREIGN KEY (user_id) REFERENCES users(id),
+                FOREIGN KEY (strategy_id) REFERENCES strategies(id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_archived_deployments_user_id 
+            ON archived_deployments(user_id)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_archived_deployments_archived_at 
+            ON archived_deployments(archived_at DESC)
+            """
+        )
+        conn.commit()
+    except Exception as e:
+        logging.error(f"Error creating archived_deployments table: {e}", exc_info=True)
+        conn.rollback()
+    finally:
+        conn.close()
+
+# Initialize archive table on module import
+ensure_archive_table()
+
 
 STATUS_SCHEDULED = 'scheduled'
 STATUS_ACTIVE = 'active'
@@ -255,11 +306,168 @@ def get_deployments_for_processing(now: datetime.datetime) -> List[Dict[str, Any
     return deployments
 
 
-def delete_deployment(deployment_id: int) -> None:
+def archive_deployment(deployment_id: int) -> Optional[Dict[str, Any]]:
+    """Archive a deployment before deletion. Returns the archived deployment record."""
+    deployment = get_deployment_by_id(deployment_id)
+    if not deployment:
+        return None
+    
+    conn = get_db_connection()
+    try:
+        # Check if this deployment has already been archived
+        existing_archive = conn.execute(
+            """
+            SELECT * FROM archived_deployments 
+            WHERE original_deployment_id = ? 
+            ORDER BY archived_at DESC 
+            LIMIT 1
+            """,
+            (deployment_id,)
+        ).fetchone()
+        
+        if existing_archive:
+            # Already archived, return the existing archive record
+            logging.info(f"Deployment {deployment_id} already archived, skipping duplicate archive")
+            return _row_to_dict(existing_archive)
+        
+        # Insert into archived_deployments table
+        conn.execute(
+            """
+            INSERT INTO archived_deployments (
+                original_deployment_id, user_id, strategy_id, strategy_name,
+                status, initial_investment, scheduled_start, started_at,
+                last_run_at, archived_at, state_json, kite_access_token,
+                error_message, created_at, updated_at
+            )
+            SELECT 
+                id, user_id, strategy_id, strategy_name,
+                status, initial_investment, scheduled_start, started_at,
+                last_run_at, CURRENT_TIMESTAMP, state_json, NULL,  -- Don't archive access token for security
+                error_message, created_at, updated_at
+            FROM live_trade_deployments
+            WHERE id = ?
+            """,
+            (deployment_id,)
+        )
+        conn.commit()
+        
+        # Get the archived record
+        cursor = conn.execute(
+            "SELECT * FROM archived_deployments WHERE original_deployment_id = ? ORDER BY archived_at DESC LIMIT 1",
+            (deployment_id,)
+        )
+        archived_row = cursor.fetchone()
+        if archived_row:
+            return _row_to_dict(archived_row)
+    except Exception as e:
+        logging.error(f"Error archiving deployment {deployment_id}: {e}", exc_info=True)
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    
+    return None
+
+
+def delete_deployment(deployment_id: int, archive: bool = True) -> None:
+    """
+    Delete a deployment. If archive=True, archives the deployment first.
+    
+    Args:
+        deployment_id: ID of deployment to delete
+        archive: If True, archive the deployment before deleting (default: True)
+    """
+    if archive:
+        try:
+            archive_deployment(deployment_id)
+            logging.info(f"Deployment {deployment_id} archived before deletion")
+        except Exception as e:
+            logging.warning(f"Failed to archive deployment {deployment_id} before deletion: {e}")
+            # Continue with deletion even if archiving fails
+    
     conn = get_db_connection()
     try:
         conn.execute("DELETE FROM live_trade_deployments WHERE id = ?", (deployment_id,))
         conn.commit()
+    finally:
+        conn.close()
+
+
+def get_archived_deployments(user_id: int, limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
+    """Get archived deployments for a user, ordered by most recent first."""
+    conn = get_db_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM archived_deployments
+            WHERE user_id = ?
+            ORDER BY archived_at DESC
+            LIMIT ? OFFSET ?
+            """,
+            (user_id, limit, offset)
+        ).fetchall()
+    finally:
+        conn.close()
+    
+    deployments: List[Dict[str, Any]] = []
+    for row in rows:
+        deployment = _row_to_dict(row)
+        if deployment:
+            deployments.append(deployment)
+    return deployments
+
+
+def get_archived_deployment_by_id(archive_id: int, user_id: int) -> Optional[Dict[str, Any]]:
+    """Get a specific archived deployment by ID, ensuring it belongs to the user."""
+    conn = get_db_connection()
+    try:
+        row = conn.execute(
+            """
+            SELECT *
+            FROM archived_deployments
+            WHERE id = ? AND user_id = ?
+            """,
+            (archive_id, user_id)
+        ).fetchone()
+    finally:
+        conn.close()
+    
+    return _row_to_dict(row)
+
+
+def delete_archived_deployment(archive_id: int, user_id: int) -> bool:
+    """
+    Delete an archived deployment. Only admin users can delete any deployment.
+    Regular users can only delete their own archived deployments.
+    
+    Returns True if deletion was successful, False otherwise.
+    """
+    conn = get_db_connection()
+    try:
+        # First check if the archived deployment exists and belongs to the user
+        row = conn.execute(
+            """
+            SELECT user_id FROM archived_deployments WHERE id = ?
+            """,
+            (archive_id,)
+        ).fetchone()
+        
+        if not row:
+            return False
+        
+        # Check if user is admin (will be checked in the API endpoint)
+        # For now, allow deletion if it exists
+        conn.execute(
+            "DELETE FROM archived_deployments WHERE id = ?",
+            (archive_id,)
+        )
+        conn.commit()
+        return True
+    except Exception as e:
+        logging.error(f"Error deleting archived deployment {archive_id}: {e}", exc_info=True)
+        conn.rollback()
+        return False
     finally:
         conn.close()
 
