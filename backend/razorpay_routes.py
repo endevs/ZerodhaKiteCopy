@@ -19,7 +19,7 @@ from subscription_manager import (
     check_feature_access,
     get_user_subscription_info,
     PLAN_TYPES,
-    CUSTOMIZATION_PRICE
+    get_customization_price
 )
 
 # Initialize Razorpay client (use config module for consistency)
@@ -243,17 +243,17 @@ def register_razorpay_routes(app):
             
             # Handle customization plan separately
             if plan_type == 'customization':
-                from subscription_manager import CUSTOMIZATION_PRICE
-                plan_info = {'name': 'Strategy Customization', 'price': CUSTOMIZATION_PRICE}
+                plan_info = {'name': 'Strategy Customization', 'price': get_customization_price()}
                 if amount is None:
-                    amount = CUSTOMIZATION_PRICE
+                    amount = get_customization_price()
             elif not plan_type or plan_type not in PLAN_TYPES:
                 return jsonify({'status': 'error', 'message': 'Invalid plan type'}), 400
             else:
                 plan_info = PLAN_TYPES[plan_type]
                 # Use provided amount or plan price
                 if amount is None:
-                    amount = plan_info['price']
+                    from subscription_manager import get_plan_price
+                    amount = get_plan_price(plan_type)  # Get fresh price from DB
             
             # Convert to paise (Razorpay uses smallest currency unit)
             amount_paise = int(amount * 100)

@@ -9,6 +9,72 @@ import random
 from typing import Dict, List, Optional, Any
 from database import get_db_connection
 
+def _get_plan_price_from_db(plan_type: str, use_cache: bool = False) -> float:
+    """Get plan price from database, with fallback to defaults.
+    
+    Args:
+        plan_type: The plan type ('premium', 'super_premium', 'customization')
+        use_cache: If True, use cached value (for module-level initialization)
+    """
+    # Cache prices at module level to avoid repeated DB calls
+    if not hasattr(_get_plan_price_from_db, '_cache'):
+        _get_plan_price_from_db._cache = {}
+        _get_plan_price_from_db._cache_time = {}
+    
+    cache_ttl = 300  # 5 minutes cache
+    import time
+    now = time.time()
+    
+    # Check cache if enabled
+    if use_cache and plan_type in _get_plan_price_from_db._cache:
+        cache_time = _get_plan_price_from_db._cache_time.get(plan_type, 0)
+        if now - cache_time < cache_ttl:
+            return _get_plan_price_from_db._cache[plan_type]
+    
+    conn = get_db_connection()
+    try:
+        row = conn.execute(
+            "SELECT price FROM plan_prices WHERE plan_type = ?",
+            (plan_type,)
+        ).fetchone()
+        
+        if row:
+            price = float(row['price'])
+            # Update cache
+            _get_plan_price_from_db._cache[plan_type] = price
+            _get_plan_price_from_db._cache_time[plan_type] = now
+            return price
+        
+        # Fallback to defaults if not in database
+        defaults = {
+            'premium': 1499.0,
+            'super_premium': 3499.0,
+            'customization': 4899.0
+        }
+        price = defaults.get(plan_type, 0.0)
+        # Cache default value
+        _get_plan_price_from_db._cache[plan_type] = price
+        _get_plan_price_from_db._cache_time[plan_type] = now
+        return price
+    except Exception as e:
+        logging.warning(f"Error fetching plan price from DB for {plan_type}: {e}. Using default.")
+        defaults = {
+            'premium': 1499.0,
+            'super_premium': 3499.0,
+            'customization': 4899.0
+        }
+        price = defaults.get(plan_type, 0.0)
+        # Cache default value
+        _get_plan_price_from_db._cache[plan_type] = price
+        _get_plan_price_from_db._cache_time[plan_type] = now
+        return price
+    finally:
+        conn.close()
+
+def get_plan_price(plan_type: str) -> float:
+    """Get current plan price (always fetches fresh from DB, bypassing cache)."""
+    return _get_plan_price_from_db(plan_type, use_cache=False)
+
 PLAN_TYPES = {
     'freemium': {
         'name': 'Freemium',
@@ -27,7 +93,7 @@ PLAN_TYPES = {
     },
     'premium': {
         'name': 'Premium',
-        'price': 1.90,  # Testing price
+        'price': _get_plan_price_from_db('premium', use_cache=True),  # Dynamic price from DB
         'trial_days': 7,
         'features': {
             'ai_strategy_generation': True,
@@ -42,7 +108,7 @@ PLAN_TYPES = {
     },
     'super_premium': {
         'name': 'Super Premium',
-        'price': 1.90,  # Testing price
+        'price': _get_plan_price_from_db('super_premium', use_cache=True),  # Dynamic price from DB
         'trial_days': 7,
         'features': {
             'ai_strategy_generation': True,
@@ -57,7 +123,9 @@ PLAN_TYPES = {
     }
 }
 
-CUSTOMIZATION_PRICE = 1.90  # Testing price
+def get_customization_price() -> float:
+    """Get customization plan price from database (always fresh, no cache)."""
+    return _get_plan_price_from_db('customization', use_cache=False)
 
 
 def get_user_subscription(user_id: int) -> Optional[Dict[str, Any]]:
@@ -103,6 +171,10 @@ def create_subscription(
         start_date = datetime.datetime.now(datetime.timezone.utc)
     
     plan_info = PLAN_TYPES[plan_type]
+    # Refresh price from DB for paid plans (always get latest)
+    if plan_type in ['premium', 'super_premium']:
+        plan_info = dict(plan_info)  # Create a copy to avoid modifying the original
+        plan_info['price'] = get_plan_price(plan_type)  # Get fresh price from DB
     
     # Only Freemium plans get trial status and trial_end_date
     # Paid plans (Premium, Super Premium) are immediately 'active' with no trial

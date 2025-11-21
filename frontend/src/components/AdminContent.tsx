@@ -17,7 +17,7 @@ const AdminContent: React.FC = () => {
   const [users, setUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'user-management' | 'strategy-approvals' | 'subscriptions'>('user-management');
+  const [activeTab, setActiveTab] = useState<'user-management' | 'strategy-approvals' | 'subscriptions' | 'plan-prices'>('user-management');
   
   interface PendingStrategy {
     id: number;
@@ -58,14 +58,98 @@ const AdminContent: React.FC = () => {
   const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
   const [loadingSubscriptions, setLoadingSubscriptions] = useState(false);
 
+  const [planPrices, setPlanPrices] = useState<{[key: string]: {price: number, updated_at?: string}}>({});
+  const [loadingPrices, setLoadingPrices] = useState(false);
+  const [editingPrices, setEditingPrices] = useState<{[key: string]: number}>({});
+  const [savingPrices, setSavingPrices] = useState(false);
+
   useEffect(() => {
     loadUsers();
     if (activeTab === 'strategy-approvals') {
       loadPendingStrategies();
     } else if (activeTab === 'subscriptions') {
       loadSubscriptions();
+    } else if (activeTab === 'plan-prices') {
+      loadPlanPrices();
     }
   }, [activeTab]);
+  
+  const loadPlanPrices = async () => {
+    try {
+      setLoadingPrices(true);
+      const response = await fetch(apiUrl('/api/admin/plan-prices'), {
+        credentials: 'include',
+      });
+
+      if (response.status === 403) {
+        setError('You do not have admin access');
+        return;
+      }
+
+      if (!response.ok) {
+        throw new Error('Failed to load plan prices');
+      }
+
+      const data = await response.json();
+      if (data.status === 'success') {
+        setPlanPrices(data.prices || {});
+        // Initialize editing prices with current values
+        const editState: {[key: string]: number} = {};
+        Object.keys(data.prices || {}).forEach(key => {
+          editState[key] = data.prices[key].price;
+        });
+        setEditingPrices(editState);
+      } else {
+        setError(data.message || 'Failed to load plan prices');
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'An error occurred');
+    } finally {
+      setLoadingPrices(false);
+    }
+  };
+  
+  const handlePriceChange = (planType: string, value: string) => {
+    const numValue = parseFloat(value);
+    if (!isNaN(numValue) && numValue >= 0) {
+      setEditingPrices(prev => ({
+        ...prev,
+        [planType]: numValue
+      }));
+    }
+  };
+  
+  const handleSavePrices = async () => {
+    try {
+      setSavingPrices(true);
+      const response = await fetch(apiUrl('/api/admin/plan-prices'), {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        credentials: 'include',
+        body: JSON.stringify({
+          prices: editingPrices
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to update plan prices');
+      }
+
+      const data = await response.json();
+      if (data.status === 'success') {
+        setPlanPrices(data.prices || {});
+        alert('Plan prices updated successfully!');
+      } else {
+        alert(`Error: ${data.message}`);
+      }
+    } catch (err) {
+      alert(`Error saving prices: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    } finally {
+      setSavingPrices(false);
+    }
+  };
   
   const loadSubscriptions = async () => {
     try {
@@ -361,6 +445,15 @@ const AdminContent: React.FC = () => {
                 {subscriptions.length > 0 && (
                   <span className="badge bg-success ms-2">{subscriptions.length}</span>
                 )}
+              </button>
+            </li>
+            <li className="nav-item">
+              <button
+                className={`nav-link ${activeTab === 'plan-prices' ? 'active' : ''}`}
+                onClick={() => setActiveTab('plan-prices')}
+              >
+                <i className="bi bi-currency-rupee me-2"></i>
+                Plan Prices
               </button>
             </li>
           </ul>
@@ -694,6 +787,165 @@ const AdminContent: React.FC = () => {
                         ))}
                       </tbody>
                     </table>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Plan Prices Tab */}
+          {activeTab === 'plan-prices' && (
+            <div className="card">
+              <div className="card-header d-flex justify-content-between align-items-center">
+                <h5 className="mb-0">
+                  <i className="bi bi-currency-rupee me-2"></i>
+                  Manage Plan Prices
+                </h5>
+                <button
+                  className="btn btn-sm btn-outline-primary"
+                  onClick={loadPlanPrices}
+                  disabled={loadingPrices}
+                >
+                  <i className="bi bi-arrow-clockwise me-1"></i>
+                  Refresh
+                </button>
+              </div>
+              <div className="card-body">
+                {loadingPrices ? (
+                  <div className="text-center py-4">
+                    <div className="spinner-border text-primary" role="status">
+                      <span className="visually-hidden">Loading...</span>
+                    </div>
+                  </div>
+                ) : (
+                  <div>
+                    <div className="alert alert-info">
+                      <i className="bi bi-info-circle me-2"></i>
+                      Update plan prices below. Changes will be reflected immediately in the subscription page.
+                    </div>
+                    <div className="table-responsive">
+                      <table className="table table-hover">
+                        <thead>
+                          <tr>
+                            <th>Plan Type</th>
+                            <th>Current Price</th>
+                            <th>New Price (₹)</th>
+                            <th>Last Updated</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          <tr>
+                            <td>
+                              <strong>Premium</strong>
+                              <br />
+                              <small className="text-muted">Monthly subscription</small>
+                            </td>
+                            <td>
+                              <span className="badge bg-primary">
+                                ₹{planPrices.premium?.price?.toFixed(2) || '0.00'}
+                              </span>
+                            </td>
+                            <td>
+                              <div className="input-group" style={{maxWidth: '200px'}}>
+                                <span className="input-group-text">₹</span>
+                                <input
+                                  type="number"
+                                  className="form-control"
+                                  min="0"
+                                  step="0.01"
+                                  value={editingPrices.premium || planPrices.premium?.price || 0}
+                                  onChange={(e) => handlePriceChange('premium', e.target.value)}
+                                />
+                              </div>
+                            </td>
+                            <td>
+                              {planPrices.premium?.updated_at
+                                ? new Date(planPrices.premium.updated_at).toLocaleString()
+                                : 'Never'}
+                            </td>
+                          </tr>
+                          <tr>
+                            <td>
+                              <strong>Super Premium</strong>
+                              <br />
+                              <small className="text-muted">Monthly subscription</small>
+                            </td>
+                            <td>
+                              <span className="badge bg-success">
+                                ₹{planPrices.super_premium?.price?.toFixed(2) || '0.00'}
+                              </span>
+                            </td>
+                            <td>
+                              <div className="input-group" style={{maxWidth: '200px'}}>
+                                <span className="input-group-text">₹</span>
+                                <input
+                                  type="number"
+                                  className="form-control"
+                                  min="0"
+                                  step="0.01"
+                                  value={editingPrices.super_premium || planPrices.super_premium?.price || 0}
+                                  onChange={(e) => handlePriceChange('super_premium', e.target.value)}
+                                />
+                              </div>
+                            </td>
+                            <td>
+                              {planPrices.super_premium?.updated_at
+                                ? new Date(planPrices.super_premium.updated_at).toLocaleString()
+                                : 'Never'}
+                            </td>
+                          </tr>
+                          <tr>
+                            <td>
+                              <strong>Strategy Customization</strong>
+                              <br />
+                              <small className="text-muted">One-time payment</small>
+                            </td>
+                            <td>
+                              <span className="badge bg-warning text-dark">
+                                ₹{planPrices.customization?.price?.toFixed(2) || '0.00'}
+                              </span>
+                            </td>
+                            <td>
+                              <div className="input-group" style={{maxWidth: '200px'}}>
+                                <span className="input-group-text">₹</span>
+                                <input
+                                  type="number"
+                                  className="form-control"
+                                  min="0"
+                                  step="0.01"
+                                  value={editingPrices.customization || planPrices.customization?.price || 0}
+                                  onChange={(e) => handlePriceChange('customization', e.target.value)}
+                                />
+                              </div>
+                            </td>
+                            <td>
+                              {planPrices.customization?.updated_at
+                                ? new Date(planPrices.customization.updated_at).toLocaleString()
+                                : 'Never'}
+                            </td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+                    <div className="mt-3 d-flex justify-content-end">
+                      <button
+                        className="btn btn-primary"
+                        onClick={handleSavePrices}
+                        disabled={savingPrices}
+                      >
+                        {savingPrices ? (
+                          <>
+                            <span className="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>
+                            Saving...
+                          </>
+                        ) : (
+                          <>
+                            <i className="bi bi-save me-2"></i>
+                            Save Prices
+                          </>
+                        )}
+                      </button>
+                    </div>
                   </div>
                 )}
               </div>

@@ -3620,6 +3620,149 @@ def api_admin_get_subscriptions():
     finally:
         conn.close()
 
+@app.route("/api/admin/plan-prices", methods=['GET'])
+def api_admin_get_plan_prices():
+    """Get all plan prices (admin only)."""
+    if not _require_admin():
+        return jsonify({'status': 'error', 'message': 'Admin access required'}), 403
+    
+    conn = get_db_connection()
+    try:
+        prices = conn.execute("""
+            SELECT plan_type, price, updated_at, updated_by
+            FROM plan_prices
+            ORDER BY plan_type
+        """).fetchall()
+        
+        result = {}
+        for price_row in prices:
+            result[price_row['plan_type']] = {
+                'price': float(price_row['price']),
+                'updated_at': price_row['updated_at'],
+                'updated_by': price_row['updated_by']
+            }
+        
+        return jsonify({
+            'status': 'success',
+            'prices': result
+        })
+    except Exception as e:
+        logging.error(f"Error fetching plan prices: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': 'Failed to fetch plan prices'}), 500
+    finally:
+        conn.close()
+
+@app.route("/api/admin/plan-prices", methods=['PUT'])
+def api_admin_update_plan_prices():
+    """Update plan prices (admin only)."""
+    if not _require_admin():
+        return jsonify({'status': 'error', 'message': 'Admin access required'}), 403
+    
+    try:
+        data = request.get_json()
+        if not data or 'prices' not in data:
+            return jsonify({'status': 'error', 'message': 'Invalid request data'}), 400
+        
+        prices = data['prices']  # Expected format: {'premium': 1499.0, 'super_premium': 3499.0, 'customization': 4899.0}
+        user_id = session.get('user_id')
+        
+        conn = get_db_connection()
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            
+            for plan_type, price in prices.items():
+                if plan_type not in ['premium', 'super_premium', 'customization']:
+                    continue
+                
+                try:
+                    price_float = float(price)
+                    if price_float < 0:
+                        continue
+                except (ValueError, TypeError):
+                    continue
+                
+                # Update or insert price
+                conn.execute("""
+                    INSERT INTO plan_prices (plan_type, price, updated_by)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(plan_type) DO UPDATE SET
+                        price = excluded.price,
+                        updated_at = CURRENT_TIMESTAMP,
+                        updated_by = excluded.updated_by
+                """, (plan_type, price_float, user_id))
+            
+            conn.commit()
+            
+            # Return updated prices
+            updated_prices = conn.execute("""
+                SELECT plan_type, price, updated_at, updated_by
+                FROM plan_prices
+                ORDER BY plan_type
+            """).fetchall()
+            
+            result = {}
+            for price_row in updated_prices:
+                result[price_row['plan_type']] = {
+                    'price': float(price_row['price']),
+                    'updated_at': price_row['updated_at'],
+                    'updated_by': price_row['updated_by']
+                }
+            
+            return jsonify({
+                'status': 'success',
+                'message': 'Plan prices updated successfully',
+                'prices': result
+            })
+        except Exception as e:
+            conn.rollback()
+            raise e
+        finally:
+            conn.close()
+    except Exception as e:
+        logging.error(f"Error updating plan prices: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': 'Failed to update plan prices'}), 500
+
+@app.route("/api/plan-prices", methods=['GET'])
+def api_get_plan_prices():
+    """Get plan prices for public display (all users)."""
+    conn = get_db_connection()
+    try:
+        prices = conn.execute("""
+            SELECT plan_type, price
+            FROM plan_prices
+            ORDER BY plan_type
+        """).fetchall()
+        
+        result = {}
+        for price_row in prices:
+            result[price_row['plan_type']] = float(price_row['price'])
+        
+        # Include default prices if not in database
+        if 'premium' not in result:
+            result['premium'] = 1499.0
+        if 'super_premium' not in result:
+            result['super_premium'] = 3499.0
+        if 'customization' not in result:
+            result['customization'] = 4899.0
+        
+        return jsonify({
+            'status': 'success',
+            'prices': result
+        })
+    except Exception as e:
+        logging.error(f"Error fetching plan prices: {e}", exc_info=True)
+        # Return default prices on error
+        return jsonify({
+            'status': 'success',
+            'prices': {
+                'premium': 1499.0,
+                'super_premium': 3499.0,
+                'customization': 4899.0
+            }
+        })
+    finally:
+        conn.close()
+
 @app.route("/api/admin/users", methods=['GET'])
 def api_admin_get_users():
     """Get all users (admin only)"""

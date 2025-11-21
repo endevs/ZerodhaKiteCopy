@@ -32,6 +32,32 @@ const SubscribeContent: React.FC = () => {
   const [success, setSuccess] = useState<string | null>(null);
   const [showReceipt, setShowReceipt] = useState(false);
   const [receiptData, setReceiptData] = useState<any>(null);
+  const [planPrices, setPlanPrices] = useState<{[key: string]: number}>({
+    premium: 1499.0,
+    super_premium: 3499.0,
+    customization: 4899.0
+  });
+
+  useEffect(() => {
+    // Fetch plan prices from backend
+    const fetchPlanPrices = async () => {
+      try {
+        const response = await fetch(apiUrl('/api/plan-prices'), {
+          credentials: 'include',
+        });
+        if (response.ok) {
+          const data = await response.json();
+          if (data.status === 'success' && data.prices) {
+            setPlanPrices(data.prices);
+          }
+        }
+      } catch (err) {
+        console.error('Error fetching plan prices:', err);
+        // Use default prices on error
+      }
+    };
+    fetchPlanPrices();
+  }, []);
 
   const plans: SubscriptionPlan[] = [
     {
@@ -54,7 +80,7 @@ const SubscribeContent: React.FC = () => {
     {
       id: 'premium',
       name: 'Premium',
-      price: '₹1.90',  // Testing price
+      price: `₹${planPrices.premium?.toFixed(2) || '1,499.00'}`,
       priceNote: 'per month',
       description: 'Advanced features for serious traders',
       popular: true,
@@ -74,7 +100,7 @@ const SubscribeContent: React.FC = () => {
     {
       id: 'super-premium',
       name: 'Super Premium',
-      price: '₹1.90',  // Testing price
+      price: `₹${planPrices.super_premium?.toFixed(2) || '3,499.00'}`,
       priceNote: 'per month',
       description: 'Complete solution with AI/ML customization',
       features: [
@@ -257,7 +283,7 @@ const SubscribeContent: React.FC = () => {
         amount: order.amount,
         currency: order.currency,
         name: 'DRP Infotech Trading Platform',
-        description: 'Strategy Customization (One-time fee)',
+        description: `Strategy Customization (One-time fee: ₹${planPrices.customization?.toFixed(2) || '4,899.00'})`,
         order_id: order.id,
         handler: async function (response: any) {
           // Verify payment
@@ -445,7 +471,7 @@ const SubscribeContent: React.FC = () => {
                 </div>
                 <div className="col-md-4 text-md-end mt-3 mt-md-0">
                   <div className="mb-2">
-                    <span className="display-6 fw-bold text-warning">₹1.90</span>
+                    <span className="display-6 fw-bold text-warning">₹{planPrices.customization?.toFixed(2) || '4,899.00'}</span>
                     <span className="text-muted ms-2">one-time</span>
                   </div>
                   <button
