@@ -52,7 +52,8 @@ def calculate_wma(data: pd.Series, period: int) -> pd.Series:
 
 def calculate_rsi(data: pd.Series, period: int = 14) -> pd.Series:
     """
-    Relative Strength Index
+    Relative Strength Index using Wilder's Smoothing Method (standard RSI calculation)
+    This matches the RSI calculation used in trading platforms and charts.
     
     Args:
         data: Price series (typically close prices)
@@ -61,12 +62,45 @@ def calculate_rsi(data: pd.Series, period: int = 14) -> pd.Series:
     Returns:
         Series containing RSI values (0-100)
     """
-    delta = data.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    if len(data) < period + 1:
+        return pd.Series([None] * len(data), index=data.index)
     
-    rs = gain / loss
-    rsi = 100 - (100 / (1 + rs))
+    delta = data.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    
+    # Initialize RSI series with None values
+    rsi = pd.Series([None] * len(data), index=data.index)
+    
+    # Calculate initial average gain and loss (simple average of first 'period' values)
+    if len(data) > period:
+        avg_gain = gain.iloc[1:period+1].mean()  # Skip first NaN from diff()
+        avg_loss = loss.iloc[1:period+1].mean()
+        
+        # Calculate first RSI value
+        if avg_loss != 0:
+            rs = avg_gain / avg_loss
+            rsi.iloc[period] = 100 - (100 / (1 + rs))
+        else:
+            rsi.iloc[period] = 100.0  # All gains, no losses
+        
+        # Use Wilder's smoothing for subsequent values
+        # avg_gain = (prev_avg_gain * (period - 1) + current_gain) / period
+        # avg_loss = (prev_avg_loss * (period - 1) + current_loss) / period
+        for i in range(period + 1, len(data)):
+            current_gain = gain.iloc[i]
+            current_loss = loss.iloc[i]
+            
+            # Wilder's smoothing method
+            avg_gain = (avg_gain * (period - 1) + current_gain) / period
+            avg_loss = (avg_loss * (period - 1) + current_loss) / period
+            
+            if avg_loss != 0:
+                rs = avg_gain / avg_loss
+                rsi.iloc[i] = 100 - (100 / (1 + rs))
+            else:
+                rsi.iloc[i] = 100.0  # All gains, no losses
+    
     return rsi
 
 

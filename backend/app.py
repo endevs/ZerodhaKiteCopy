@@ -2230,19 +2230,62 @@ def _process_single_live_trade_deployment(deployment: Dict[str, Any], now: datet
                 elif isinstance(timestamp, pd.Timestamp):
                     timestamp = timestamp.to_pydatetime()
                 
+                # Validate RSI before adding to history (should be > 70 for PE signals)
+                signal_type = signal.get('type', 'PE')
+                rsi_value = signal.get('rsi_value')
+                ema_value = signal.get('ema_value')
+                signal_high = signal.get('signal_high', 0)
+                signal_low = signal.get('signal_low', 0)
+                
+                # Double-check RSI condition for PE signals
+                if signal_type == 'PE' and rsi_value is not None:
+                    if rsi_value <= 70:
+                        logging.warning(
+                            f"PE Signal from historical data has RSI ({rsi_value:.2f}) <= 70. "
+                            f"This should not have been identified. Adding as ignored signal instead."
+                        )
+                        # Add as ignored signal instead
+                        append_history_entry(
+                            f"PE Signal condition met but RSI ({rsi_value:.2f}) <= 70 (required > 70)",
+                            level='warning',
+                            category='signal_ignored',
+                            meta={
+                                'eventType': 'signal_ignored',
+                                'signalType': 'PE',
+                                'timestamp': timestamp.isoformat() if timestamp else None,
+                                'candleTime': signal.get('candle_time'),
+                                'signalHigh': signal_high,
+                                'signalLow': signal_low,
+                                'emaValue': ema_value,
+                                'rsiValue': rsi_value,
+                                'price': signal.get('price'),
+                                'reason': f'RSI ({rsi_value:.2f}) <= 70 (required > 70)',
+                            },
+                            timestamp=timestamp.isoformat() if timestamp else None,
+                        )
+                        continue  # Skip adding as identified signal
+                
+                # Validate that signal has proper values
+                if signal_high == 0 and signal_low == 0:
+                    logging.warning(
+                        f"Signal from historical data has zero high/low values. "
+                        f"Signal data: {signal}. Skipping."
+                    )
+                    continue  # Skip invalid signals
+                
                 append_history_entry(
-                    f"{signal.get('type', 'PE')} Signal: {', '.join(signal.get('reasons', []))}",
+                    f"{signal_type} Signal: {', '.join(signal.get('reasons', []))}",
                     level='info',
                     category='signal_identified',
                     meta={
                         'eventType': 'signal_identified',
-                        'signalType': signal.get('type'),
+                        'signalType': signal_type,
                         'timestamp': timestamp.isoformat() if timestamp else None,
                         'candleTime': signal.get('candle_time'),
-                        'signalHigh': signal.get('signal_high'),
-                        'signalLow': signal.get('signal_low'),
-                        'emaValue': signal.get('ema_value'),
-                        'rsiValue': signal.get('rsi_value'),
+                        'signalHigh': signal_high,
+                        'signalLow': signal_low,
+                        'emaValue': ema_value,
+                        'rsiValue': rsi_value,
                         'price': signal.get('price'),
                     },
                     timestamp=timestamp.isoformat() if timestamp else None,
@@ -2347,15 +2390,33 @@ def _process_single_live_trade_deployment(deployment: Dict[str, Any], now: datet
             elif 'waiting' in lowered:
                 status_category = 'signal_waiting'
                 status_level = 'info'
+                # For waiting signals, try to extract RSI/EMA from strategy status
+                signal_meta = {'eventType': 'signal_status'}
+                if strategy_status.get('signal_rsi') is not None:
+                    signal_meta['rsiValue'] = float(strategy_status['signal_rsi'])
+                if strategy_status.get('signal_ema') is not None:
+                    signal_meta['emaValue'] = float(strategy_status['signal_ema'])
+                if strategy_status.get('signal_candle_high') is not None:
+                    signal_meta['signalHigh'] = float(strategy_status['signal_candle_high'])
+                if strategy_status.get('signal_candle_low') is not None:
+                    signal_meta['signalLow'] = float(strategy_status['signal_candle_low'])
+                if strategy_status.get('signal_candle_time'):
+                    signal_meta['candleTime'] = strategy_status['signal_candle_time']
+                append_history_entry(
+                    signal_status,
+                    level=status_level,
+                    category=status_category,
+                    meta=signal_meta
+                )
             else:
                 status_category = 'signal_status'
                 status_level = 'info'
-            append_history_entry(
-                signal_status,
-                level=status_level,
-                category=status_category,
-                meta={'eventType': 'signal_status'}
-            )
+                append_history_entry(
+                    signal_status,
+                    level=status_level,
+                    category=status_category,
+                    meta={'eventType': 'signal_status'}
+                )
             state['lastSignalStatus'] = signal_status
         insights = {
             'signalStatus': signal_status,
