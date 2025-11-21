@@ -6322,15 +6322,32 @@ def connect(auth=None):
                                 except:
                                     pass
                             except Exception as e:
-                                try:
-                                    logging.error(f"SocketIO: Error starting ticker: {e}", exc_info=True)
-                                except:
-                                    pass  # Don't let logging errors break connection
-                                ticker = None
-                                try:
-                                    emit('error', {'message': 'Failed to start market data feed'})
-                                except:
-                                    pass
+                                error_str = str(e).lower()
+                                # Check if it's a token expiration error
+                                if ('token' in error_str and 'expired' in error_str) or '403' in error_str or 'forbidden' in error_str:
+                                    try:
+                                        logging.warning(f"SocketIO: Cannot start ticker - token expired: {e}")
+                                    except:
+                                        pass
+                                    ticker = None
+                                    try:
+                                        emit('ticker_error', {
+                                            'message': 'Zerodha session expired. Please log in again.',
+                                            'code': 403,
+                                            'reason': 'Token expired - re-authentication required'
+                                        })
+                                    except:
+                                        pass
+                                else:
+                                    try:
+                                        logging.error(f"SocketIO: Error starting ticker: {e}", exc_info=True)
+                                    except:
+                                        pass  # Don't let logging errors break connection
+                                    ticker = None
+                                    try:
+                                        emit('error', {'message': 'Failed to start market data feed'})
+                                    except:
+                                        pass
                 finally:
                     conn.close()
         else:
@@ -6434,9 +6451,23 @@ def handle_start_ticker(data=None):
                 return
             
             # Start ticker
-            ticker = Ticker(user['app_key'], access_token_from_session, running_strategies, socketio, kite)
-            ticker.start()
-            logging.info("SocketIO: Ticker started via start_ticker event")
+            try:
+                ticker = Ticker(user['app_key'], access_token_from_session, running_strategies, socketio, kite)
+                ticker.start()
+                logging.info("SocketIO: Ticker started via start_ticker event")
+            except Exception as ticker_error:
+                error_str = str(ticker_error).lower()
+                if 'token' in error_str and 'expired' in error_str or '403' in error_str or 'forbidden' in error_str:
+                    logging.warning(f"SocketIO: Cannot start ticker - token expired: {ticker_error}")
+                    ticker = None
+                    emit('ticker_error', {
+                        'message': 'Zerodha session expired. Please log in again.',
+                        'code': 403,
+                        'reason': 'Token expired - re-authentication required'
+                    })
+                    return
+                else:
+                    raise
             emit('info', {'message': 'Market data feed started successfully'})
         except Exception as e:
             logging.error(f"SocketIO: Error starting ticker via start_ticker event: {e}", exc_info=True)
@@ -6634,10 +6665,23 @@ def api_start_ticker():
                 return jsonify({'status': 'error', 'message': 'Zerodha credentials not configured'}), 400
             
             # Start ticker
-            ticker = Ticker(user['app_key'], session['access_token'], running_strategies, socketio, kite)
-            ticker.start()
-            logging.info("Ticker started via /api/ticker/start endpoint")
-            return jsonify({'status': 'success', 'message': 'Market data feed started successfully'})
+            try:
+                ticker = Ticker(user['app_key'], session['access_token'], running_strategies, socketio, kite)
+                ticker.start()
+                logging.info("Ticker started via /api/ticker/start endpoint")
+                return jsonify({'status': 'success', 'message': 'Market data feed started successfully'})
+            except Exception as ticker_error:
+                error_str = str(ticker_error).lower()
+                if ('token' in error_str and 'expired' in error_str) or '403' in error_str or 'forbidden' in error_str:
+                    logging.warning(f"Cannot start ticker - token expired: {ticker_error}")
+                    ticker = None
+                    return jsonify({
+                        'status': 'error',
+                        'message': 'Zerodha session expired. Please log in again.',
+                        'token_expired': True
+                    }), 401
+                else:
+                    raise
         except Exception as e:
             logging.error(f"Error starting ticker via /api/ticker/start: {e}", exc_info=True)
             ticker = None

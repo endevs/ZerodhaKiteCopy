@@ -11,9 +11,13 @@ class Ticker:
         self.running_strategies = running_strategies
         self.socketio = socketio
         self.kite = kite
+        self.api_key = api_key
+        self.access_token = access_token
+        self.token_expired = False  # Flag to track if token has expired
         self.kws.on_ticks = self.on_ticks
         self.kws.on_connect = self.on_connect
         self.kws.on_close = self.on_close
+        self.kws.on_error = self.on_error
         self.db_connection = get_db_connection() # Initialize DB connection here
 
     def on_ticks(self, ws, ticks):
@@ -500,8 +504,82 @@ class Ticker:
         except Exception as e:
             logging.error(f"Error populating tick_data_status table: {e}")
 
+    def on_error(self, ws, code, reason):
+        """Handle WebSocket errors, especially token expiration (403 Forbidden)."""
+        error_str = str(reason) if reason else ''
+        
+        # Check for token expiration (403 Forbidden)
+        if code == 403 or '403' in error_str or 'Forbidden' in error_str or 'forbidden' in error_str.lower():
+            self.token_expired = True
+            logging.warning(
+                f"Kite Ticker token expired (403 Forbidden). Stopping ticker. "
+                f"User needs to re-authenticate. Code: {code}, Reason: {reason}"
+            )
+            # Stop the ticker to prevent repeated reconnection attempts
+            try:
+                self.kws.close()
+            except Exception as e:
+                logging.debug(f"Error closing ticker after token expiration: {e}")
+            
+            # Clear global ticker instance
+            try:
+                import app
+                app.ticker = None
+            except Exception as e:
+                logging.debug(f"Error clearing global ticker: {e}")
+            
+            # Emit error to frontend so user knows to re-authenticate
+            try:
+                self.socketio.emit('ticker_error', {
+                    'message': 'Zerodha session expired. Please log in again.',
+                    'code': code,
+                    'reason': 'Token expired - re-authentication required'
+                }, namespace='/')
+            except Exception as e:
+                logging.debug(f"Error emitting ticker_error: {e}")
+        else:
+            # Other errors - log at debug level to reduce noise
+            logging.debug(f"Kite Ticker error: {code} - {reason}")
+
     def on_close(self, ws, code, reason):
-        logging.info(f"Kite Ticker connection closed: {code} - {reason}")
+        """Handle WebSocket connection close."""
+        error_str = str(reason) if reason else ''
+        
+        # Check for token expiration (403 Forbidden)
+        if code == 403 or '403' in error_str or 'Forbidden' in error_str or 'forbidden' in error_str.lower():
+            self.token_expired = True
+            logging.warning(
+                f"Kite Ticker connection closed due to token expiration (403 Forbidden). "
+                f"Code: {code}, Reason: {reason}. User needs to re-authenticate."
+            )
+            # Stop the ticker to prevent repeated reconnection attempts
+            try:
+                self.kws.close()
+            except Exception as e:
+                logging.debug(f"Error closing ticker after token expiration: {e}")
+            
+            # Clear global ticker instance
+            try:
+                import app
+                app.ticker = None
+            except Exception as e:
+                logging.debug(f"Error clearing global ticker: {e}")
+            
+            # Emit error to frontend so user knows to re-authenticate
+            try:
+                self.socketio.emit('ticker_error', {
+                    'message': 'Zerodha session expired. Please log in again.',
+                    'code': code,
+                    'reason': 'Token expired - re-authentication required'
+                }, namespace='/')
+            except Exception as e:
+                logging.debug(f"Error emitting ticker_error: {e}")
+        else:
+            # Normal close or other errors - log at info/debug level
+            if code == 1006:  # Connection closed uncleanly (common when idle)
+                logging.debug(f"Kite Ticker connection closed uncleanly: {code} - {reason}")
+            else:
+                logging.info(f"Kite Ticker connection closed: {code} - {reason}")
 
     def start(self):
         try:
