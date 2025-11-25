@@ -208,3 +208,4 @@ ALTER TABLE strategies ADD COLUMN rejection_reason TEXT;
 3. **Gradual Rollout**: Users can continue using approved strategies while new ones go through approval
 
 
+

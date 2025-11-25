@@ -32,3 +32,4 @@ def register_subscription_routes(app):
             logging.error(f"Error activating freemium: {e}", exc_info=True)
             return jsonify({'status': 'error', 'message': 'Failed to activate free trial'}), 500
 
+

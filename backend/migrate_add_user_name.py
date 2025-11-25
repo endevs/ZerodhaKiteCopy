@@ -36,3 +36,4 @@ def migrate_add_user_name():
 if __name__ == "__main__":
     migrate_add_user_name()
 
+

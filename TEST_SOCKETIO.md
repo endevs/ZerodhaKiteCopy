@@ -64,3 +64,4 @@ If you see connection errors, check:
 - Socket.IO path matches between frontend and backend
 
 
+

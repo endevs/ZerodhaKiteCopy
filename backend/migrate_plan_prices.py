@@ -62,3 +62,4 @@ def migrate_plan_prices():
 if __name__ == '__main__':
     migrate_plan_prices()
 
+
