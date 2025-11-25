@@ -176,6 +176,7 @@ const LiveTradeContent: React.FC = () => {
   const [currentLiveTime, setCurrentLiveTime] = useState<string>(new Date().toLocaleTimeString());
   // State to force re-render every minute to update current candle in table
   const [currentTime, setCurrentTime] = useState<Date>(new Date());
+  const [tableRefreshing, setTableRefreshing] = useState<boolean>(false);
   const selectedStrategyRef = React.useRef<string>('');
   // Chart data for replay mode
   const [candleData, setCandleData] = useState<Array<{
@@ -716,11 +717,18 @@ const LiveTradeContent: React.FC = () => {
   const fetchDeploymentStatus = useCallback(async () => {
     try {
       setStatusLoading(true);
-      const response = await fetch(apiUrl('/api/live_trade/status'), { credentials: 'include' });
+      // Add cache-busting parameter to ensure fresh data
+      const timestamp = new Date().getTime();
+      const response = await fetch(apiUrl(`/api/live_trade/status?t=${timestamp}`), { 
+        credentials: 'include',
+        cache: 'no-cache'
+      });
       const data = await response.json();
       if (!response.ok) {
         throw new Error(data.message || 'Failed to fetch live trade status');
       }
+      // Log for debugging
+      console.log('Fetched deployment status - History entries:', data.deployment?.state?.history?.length || 0);
       setDeployment(data.deployment ?? null);
     } catch (err) {
       console.error(err);
@@ -1090,6 +1098,7 @@ const LiveTradeContent: React.FC = () => {
       trades: [] as HistoryEntry[],
     };
     history.forEach((entry) => {
+      // Check category field (HistoryEntry uses category, not type)
       const category = (entry.category || '').toLowerCase();
       if (!category) {
         return;
@@ -3135,38 +3144,159 @@ const LiveTradeContent: React.FC = () => {
                                                   });
                                                 }
                                                 
-                                                // Use combined array of all ignored signals (from both signalsIgnored and history)
-                                                const allIgnoredSignals = Array.from(allIgnoredEntries.values());
+                                                // Build a comprehensive map of all signal evaluations by candle time (HH:MM format)
+                                                // This ensures we capture all evaluations, not just those in signalsIgnored
+                                                const allEvaluationsByCandle = new Map<string, any>();
                                                 
-                                                // Also check history for any candle evaluations that might have been missed
-                                                // Look for entries with signal-related messages or types
+                                                // First, add entries from signalsIgnored (already categorized)
+                                                (signalsIgnored || []).forEach((entry: any) => {
+                                                  const entryTime = entry.timestamp ? parseTime(entry.timestamp) : null;
+                                                  if (!entryTime || entryTime > now) return;
+                                                  
+                                                  // Extract candle time in HH:MM format
+                                                  const entryCandleTimeStr = entry.meta?.candle_time || entry.meta?.candleTime || entry.timestamp;
+                                                  let candleKey = '';
+                                                  
+                                                  if (entryCandleTimeStr) {
+                                                    const parsed = parseTime(entryCandleTimeStr);
+                                                    if (parsed && !isNaN(parsed.getTime())) {
+                                                      candleKey = `${String(parsed.getHours()).padStart(2, '0')}:${String(parsed.getMinutes()).padStart(2, '0')}`;
+                                                    } else if (entryCandleTimeStr.match(/^\d{2}:\d{2}/)) {
+                                                      candleKey = entryCandleTimeStr.substring(0, 5);
+                                                    }
+                                                  }
+                                                  
+                                                  // If we couldn't extract from meta, calculate from entryTime
+                                                  if (!candleKey && entryTime) {
+                                                    const entryDate = new Date(entryTime);
+                                                    const minutes = entryDate.getMinutes();
+                                                    const roundedMinutes = Math.floor(minutes / 5) * 5;
+                                                    candleKey = `${String(entryDate.getHours()).padStart(2, '0')}:${String(roundedMinutes).padStart(2, '0')}`;
+                                                  }
+                                                  
+                                                  if (candleKey) {
+                                                    allEvaluationsByCandle.set(candleKey, entry);
+                                                  }
+                                                });
+                                                
+                                                // Now scan ALL history entries for any signal evaluations we might have missed
+                                                // This is more comprehensive than relying solely on categorizedHistory
                                                 history.forEach((entry: any) => {
                                                   const entryTime = entry.timestamp ? parseTime(entry.timestamp) : null;
-                                                  if (entryTime && entryTime <= now) {
-                                                    // Check if this is a signal evaluation entry
-                                                    const isSignalEval = entry.type === 'signal_ignored' || 
-                                                      entry.type === 'signal_identified' ||
-                                                      entry.message?.toLowerCase().includes('signal') ||
-                                                      entry.message?.toLowerCase().includes('ignored') ||
-                                                      entry.message?.toLowerCase().includes('evaluation') ||
-                                                      (entry.message && (
-                                                        (entry.message.includes('LOW') && entry.message.includes('EMA')) ||
-                                                        (entry.message.includes('RSI') && entry.message.includes('70'))
-                                                      ));
-                                                      
-                                                    if (isSignalEval) {
-                                                      // Check if we already have this entry
-                                                      const key = entry.timestamp || entry.meta?.candle_time || entry.meta?.candleTime;
-                                                      const alreadyExists = allIgnoredSignals.some((existing: any) => 
-                                                        (existing.timestamp || existing.meta?.candle_time || existing.meta?.candleTime) === key
-                                                      );
-                                                      
-                                                      if (!alreadyExists && (entry.type === 'signal_ignored' || entry.message?.toLowerCase().includes('ignored'))) {
-                                                        allIgnoredSignals.push(entry);
+                                                  if (!entryTime || entryTime > now) return;
+                                                  
+                                                  // Check if this is a signal evaluation entry (broader check including category and message)
+                                                  // Note: HistoryEntry uses 'category' field, not 'type'
+                                                  const entryCategory = (entry.category || '').toLowerCase();
+                                                  const entryMessage = (entry.message || '').toLowerCase();
+                                                  
+                                                  const isSignalEval = 
+                                                    entryCategory === 'signal_ignored' ||
+                                                    entryCategory === 'signal_identified' ||
+                                                    (entryMessage && (
+                                                      entryMessage.includes('signal') ||
+                                                      entryMessage.includes('ignored') ||
+                                                      entryMessage.includes('evaluation') ||
+                                                      (entry.message && entry.message.includes('LOW') && entry.message.includes('EMA')) ||
+                                                      (entry.message && entry.message.includes('RSI') && (entry.message.includes('70') || entry.message.includes('> 70')))
+                                                    ));
+                                                  
+                                                  // For SIGNAL_IGNORED state, we only want ignored signals
+                                                  const isIgnoredSignal = 
+                                                    entryCategory === 'signal_ignored' ||
+                                                    entryMessage.includes('ignored');
+                                                  
+                                                  if (isSignalEval && isIgnoredSignal) {
+                                                    // Extract candle time in HH:MM format
+                                                    const entryCandleTimeStr = entry.meta?.candle_time || entry.meta?.candleTime || entry.timestamp;
+                                                    let candleKey = '';
+                                                    
+                                                    if (entryCandleTimeStr) {
+                                                      const parsed = parseTime(entryCandleTimeStr);
+                                                      if (parsed && !isNaN(parsed.getTime())) {
+                                                        candleKey = `${String(parsed.getHours()).padStart(2, '0')}:${String(parsed.getMinutes()).padStart(2, '0')}`;
+                                                      } else if (entryCandleTimeStr.match(/^\d{2}:\d{2}/)) {
+                                                        candleKey = entryCandleTimeStr.substring(0, 5);
+                                                      }
+                                                    }
+                                                    
+                                                    // If we couldn't extract from meta, calculate from entryTime
+                                                    if (!candleKey) {
+                                                      const entryDate = new Date(entryTime);
+                                                      const minutes = entryDate.getMinutes();
+                                                      const roundedMinutes = Math.floor(minutes / 5) * 5;
+                                                      candleKey = `${String(entryDate.getHours()).padStart(2, '0')}:${String(roundedMinutes).padStart(2, '0')}`;
+                                                    }
+                                                    
+                                                    // Add if we don't already have an entry for this candle
+                                                    // Prefer entries with more complete data (meta with rsi/ema)
+                                                    if (candleKey) {
+                                                      const existing = allEvaluationsByCandle.get(candleKey);
+                                                      if (!existing) {
+                                                        allEvaluationsByCandle.set(candleKey, entry);
+                                                      } else {
+                                                        // If existing entry has less data, replace it
+                                                        const existingHasData = existing.meta?.rsi !== undefined || existing.meta?.ema !== undefined;
+                                                        const newHasData = entry.meta?.rsi !== undefined || entry.meta?.ema !== undefined;
+                                                        if (newHasData && !existingHasData) {
+                                                          allEvaluationsByCandle.set(candleKey, entry);
+                                                        }
                                                       }
                                                     }
                                                   }
                                                 });
+                                                
+                                                // Convert map to array
+                                                const allIgnoredSignals = Array.from(allEvaluationsByCandle.values());
+                                                
+                                                // Debug: Log what we found vs what we expect
+                                                const expectedCandles = [];
+                                                const nowDate = new Date(now);
+                                                const startOfDay = new Date(nowDate);
+                                                startOfDay.setHours(9, 15, 0, 0);
+                                                
+                                                // Generate expected candle times from 9:15 to current
+                                                let expectedCandleTime = new Date(startOfDay);
+                                                while (expectedCandleTime <= now) {
+                                                  const hours = expectedCandleTime.getHours();
+                                                  const minutes = expectedCandleTime.getMinutes();
+                                                  expectedCandles.push(`${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`);
+                                                  expectedCandleTime.setMinutes(expectedCandleTime.getMinutes() + 5);
+                                                }
+                                                
+                                                const foundCandles = Array.from(allEvaluationsByCandle.keys()).sort();
+                                                const missingCandles = expectedCandles.filter(c => !foundCandles.includes(c));
+                                                
+                                                if (missingCandles.length > 0) {
+                                                  console.warn('Missing candle evaluations:', missingCandles);
+                                                  console.log('Total history entries:', history.length);
+                                                  console.log('Total found evaluations:', allIgnoredSignals.length);
+                                                  
+                                                  // Debug: Check if missing candles exist in history but weren't picked up
+                                                  missingCandles.forEach(missingCandle => {
+                                                    const entriesForCandle = history.filter((entry: any) => {
+                                                      const entryTime = entry.timestamp ? parseTime(entry.timestamp) : null;
+                                                      if (!entryTime) return false;
+                                                      
+                                                      // Calculate candle time from entry
+                                                      const entryDate = new Date(entryTime);
+                                                      const minutes = entryDate.getMinutes();
+                                                      const roundedMinutes = Math.floor(minutes / 5) * 5;
+                                                      const candleKey = `${String(entryDate.getHours()).padStart(2, '0')}:${String(roundedMinutes).padStart(2, '0')}`;
+                                                      
+                                                      return candleKey === missingCandle;
+                                                    });
+                                                    
+                                                    if (entriesForCandle.length > 0) {
+                                                      console.warn(`Found ${entriesForCandle.length} history entry/entries for missing candle ${missingCandle}:`, entriesForCandle.map((e: any) => ({
+                                                        timestamp: e.timestamp,
+                                                        category: e.category,
+                                                        type: e.type,
+                                                        message: e.message?.substring(0, 100)
+                                                      })));
+                                                    }
+                                                  });
+                                                }
                                                 
                                                 // Get current candle time string to filter out duplicates
                                                 const currentCandleTimeStr = currentCandleIgnored.candleTimeStr;
@@ -3448,22 +3578,66 @@ const LiveTradeContent: React.FC = () => {
                                         const lastUpdate = deployment?.state?.lastCheck || deployment?.lastRunAt || '';
                                         const tableKey = `${currentStateId}-${historyLength}-${lastUpdate}`;
 
+                                        // Refresh handler for the table
+                                        const handleRefreshTable = async () => {
+                                          setTableRefreshing(true);
+                                          try {
+                                            if (isReplayMode) {
+                                              // For replay mode, refresh replay data
+                                              if (replayDate && selectedStrategy && currentReplayTime) {
+                                                await fetchReplayData(replayDate, selectedStrategy, currentReplayTime);
+                                              }
+                                            } else {
+                                              // For live mode, refresh deployment status
+                                              await fetchDeploymentStatus();
+                                            }
+                                            // Force update currentTime to trigger re-render and recalculate current candle
+                                            setCurrentTime(new Date());
+                                            // Small delay to ensure state updates propagate
+                                            await new Promise(resolve => setTimeout(resolve, 100));
+                                          } catch (error) {
+                                            console.error('Error refreshing table:', error);
+                                          } finally {
+                                            setTableRefreshing(false);
+                                          }
+                                        };
+
                                         return (
                                           <div className="mt-3" key={tableKey}>
-                                            <h6 className="mb-2">
-                                              <i className="bi bi-table me-2"></i>
-                                              {currentStateId === 'SEARCHING_SIGNAL' 
-                                                ? 'Candle Evaluations (20 seconds before close)'
-                                                : currentStateId === 'SIGNAL_IGNORED'
-                                                ? 'Ignored Signals'
-                                                : currentStateId === 'SIGNAL_ACTIVE'
-                                                ? 'Active Signal Details'
-                                                : currentStateId === 'TRADE_EXECUTED'
-                                                ? 'Executed Trades'
-                                                : currentStateId === 'EXIT_CONDITION_EVALUATION'
-                                                ? 'Exit Condition Monitoring'
-                                                : 'Exit Events'}
-                                            </h6>
+                                            <div className="d-flex justify-content-between align-items-center mb-2">
+                                              <h6 className="mb-0">
+                                                <i className="bi bi-table me-2"></i>
+                                                {currentStateId === 'SEARCHING_SIGNAL' 
+                                                  ? 'Candle Evaluations (20 seconds before close)'
+                                                  : currentStateId === 'SIGNAL_IGNORED'
+                                                  ? 'Ignored Signals'
+                                                  : currentStateId === 'SIGNAL_ACTIVE'
+                                                  ? 'Active Signal Details'
+                                                  : currentStateId === 'TRADE_EXECUTED'
+                                                  ? 'Executed Trades'
+                                                  : currentStateId === 'EXIT_CONDITION_EVALUATION'
+                                                  ? 'Exit Condition Monitoring'
+                                                  : 'Exit Events'}
+                                              </h6>
+                                              <button
+                                                className="btn btn-sm btn-outline-primary"
+                                                onClick={handleRefreshTable}
+                                                disabled={tableRefreshing}
+                                                title="Refresh table data"
+                                              >
+                                                {tableRefreshing ? (
+                                                  <>
+                                                    <span className="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>
+                                                    Refreshing...
+                                                  </>
+                                                ) : (
+                                                  <>
+                                                    <i className="bi bi-arrow-clockwise me-1"></i>
+                                                    Refresh
+                                                  </>
+                                                )}
+                                              </button>
+                                            </div>
                                             {stateEvents.length === 0 ? (
                                               <div className="alert alert-secondary mb-0">
                                                 <i className="bi bi-info-circle me-2"></i>
@@ -3584,7 +3758,7 @@ const LiveTradeContent: React.FC = () => {
                                             <div className="mt-2 small text-muted d-flex justify-content-between align-items-center">
                                               <span>
                                                 <i className="bi bi-info-circle me-1"></i>
-                                                Table refreshes every 5 minutes (20 seconds before candle close). Showing {stateEvents.length} event(s).
+                                                Showing {stateEvents.length} event(s). Missing candles indicate evaluations not yet logged by backend.
                                               </span>
                                               <span className="text-primary">
                                                 <i className="bi bi-arrow-up me-1"></i>
