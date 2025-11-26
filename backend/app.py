@@ -547,10 +547,15 @@ def compute_drawdown_metrics(trades: List[Dict[str, Any]], initial_capital: floa
 
 
 def get_option_symbol_from_components(instrument_key: str, strike: int, option_type: str, candle_date: Any) -> str:
+    """
+    Generate option symbol from components. Uses next monthly expiry instead of candle date month.
+    """
     dt_obj = ensure_datetime(candle_date)
-    year = dt_obj.year % 100
+    # Use next monthly expiry instead of the month from candle_date
+    expiry_date = get_next_monthly_expiry(dt_obj.date() if isinstance(dt_obj, datetime.datetime) else dt_obj)
+    year = expiry_date.year % 100
     month_names = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC']
-    month = month_names[dt_obj.month - 1]
+    month = month_names[expiry_date.month - 1]
     strike_int = int(strike)
     return f"{instrument_key}{year:02d}{month}{strike_int}{option_type}"
 
@@ -1931,7 +1936,22 @@ def preview_option_trade(
     spot_price = get_spot_quote(kite_client, instrument)
     atm_strike = round_to_atm_price(spot_price, strike_step)
     today_ist = datetime.datetime.now(datetime.timezone.utc).astimezone(IST)
-    expiry_date = get_next_monthly_expiry(today_ist.date())
+    today = today_ist.date()
+    
+    # Get next monthly expiry that's at least 20 days away (similar to get_option_symbols logic)
+    # This ensures we use December expiry even if November expiry hasn't passed yet
+    expiry_date = get_next_monthly_expiry(today)
+    # If the expiry is less than 20 days away, get the next one
+    if (expiry_date - today).days < 20:
+        # Move to next month
+        if expiry_date.month == 12:
+            next_year = expiry_date.year + 1
+            next_month = 1
+        else:
+            next_year = expiry_date.year
+            next_month = expiry_date.month + 1
+        expiry_date = _last_thursday(next_year, next_month)
+    
     option_symbol = compose_option_symbol(instrument, expiry_date, atm_strike, option_type)
 
     quote = execute_with_retries(
