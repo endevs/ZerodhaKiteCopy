@@ -1,5 +1,6 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { apiUrl } from '../config/api';
+import React, { useCallback, useEffect, useMemo, useState, useRef } from 'react';
+import { apiUrl, SOCKET_BASE_URL } from '../config/api';
+import { io, Socket } from 'socket.io-client';
 import { ResponsiveContainer, ComposedChart, Line, XAxis, YAxis, Tooltip, Legend, ReferenceLine, CartesianGrid } from 'recharts';
 
 interface StrategyOption {
@@ -166,10 +167,16 @@ const LiveTradeContent: React.FC = () => {
   const [isReplayMode, setIsReplayMode] = useState<boolean>(false);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [currentReplayTime, setCurrentReplayTime] = useState<string>('09:15:00');
+  // Ref for state event table container to maintain scroll position
+  const stateEventTableRef = useRef<HTMLDivElement | null>(null);
+  const previousHistoryLengthRef = useRef<number>(0);
   const [replayDuration, setReplayDuration] = useState<string>('15:30:00');
   const [replayProgress, setReplayProgress] = useState<number>(0);
   const replayIntervalRef = React.useRef<NodeJS.Timeout | null>(null);
   const [currentLiveTime, setCurrentLiveTime] = useState<string>(new Date().toLocaleTimeString());
+  // State to force re-render every minute to update current candle in table
+  const [currentTime, setCurrentTime] = useState<Date>(new Date());
+  const [tableRefreshing, setTableRefreshing] = useState<boolean>(false);
   const selectedStrategyRef = React.useRef<string>('');
   // Chart data for replay mode
   const [candleData, setCandleData] = useState<Array<{
@@ -581,10 +588,23 @@ const LiveTradeContent: React.FC = () => {
   // Update live time when not in replay mode
   useEffect(() => {
     if (!isReplayMode) {
+      // Update display time every second
       const liveTimeInterval = setInterval(() => {
         setCurrentLiveTime(new Date().toLocaleTimeString());
       }, 1000);
-      return () => clearInterval(liveTimeInterval);
+      
+      // Update currentTime every 10 seconds to trigger table re-render with latest candle
+      const tableUpdateInterval = setInterval(() => {
+        setCurrentTime(new Date());
+      }, 10000); // Update every 10 seconds to refresh current candle
+      
+      // Also update immediately on mount
+      setCurrentTime(new Date());
+      
+      return () => {
+        clearInterval(liveTimeInterval);
+        clearInterval(tableUpdateInterval);
+      };
     }
   }, [isReplayMode]);
 
@@ -697,10 +717,28 @@ const LiveTradeContent: React.FC = () => {
   const fetchDeploymentStatus = useCallback(async () => {
     try {
       setStatusLoading(true);
-      const response = await fetch(apiUrl('/api/live_trade/status'), { credentials: 'include' });
+      // Add cache-busting parameter to ensure fresh data
+      const timestamp = new Date().getTime();
+      const response = await fetch(apiUrl(`/api/live_trade/status?t=${timestamp}`), { 
+        credentials: 'include',
+        cache: 'no-cache'
+      });
       const data = await response.json();
       if (!response.ok) {
         throw new Error(data.message || 'Failed to fetch live trade status');
+      }
+      // Log for debugging
+      const historyCount = data.deployment?.state?.history?.length || 0;
+      console.log('Fetched deployment status - History entries:', historyCount);
+      if (historyCount > 0) {
+        // Log first few entries to see what we're getting
+        const recentEntries = data.deployment.state.history.slice(-5);
+        console.log('Recent history entries:', recentEntries.map((e: any) => ({
+          timestamp: e.timestamp,
+          category: e.category,
+          message: e.message?.substring(0, 80),
+          hasMeta: !!e.meta
+        })));
       }
       setDeployment(data.deployment ?? null);
     } catch (err) {
@@ -716,12 +754,161 @@ const LiveTradeContent: React.FC = () => {
     fetchDeploymentStatus();
   }, [fetchStrategies, fetchDeploymentStatus]);
 
+  // Socket.IO connection for real-time updates
+  const socketRef = useRef<Socket | null>(null);
+
   useEffect(() => {
-    const interval = setInterval(() => {
-      fetchDeploymentStatus();
-    }, 15000);
-    return () => clearInterval(interval);
+    // Create Socket.IO connection for real-time strategy updates
+    const socket: Socket = io(SOCKET_BASE_URL, {
+      path: '/socket.io/',
+      transports: ['polling', 'websocket'],
+      reconnection: true,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,
+      reconnectionAttempts: Infinity,
+      timeout: 20000,
+      forceNew: false,
+      autoConnect: true
+    });
+
+    socketRef.current = socket;
+
+    socket.on('connect', () => {
+      console.log('LiveTrade: Connected to WebSocket for real-time updates');
+    });
+
+    socket.on('disconnect', (reason: string) => {
+      console.log('LiveTrade: WebSocket disconnected:', reason);
+    });
+
+    // Listen for strategy updates
+    socket.on('strategy_update', (data: any) => {
+      // Refresh deployment status when strategy update is received
+      if (data && (data.strategy_id || data.deployment_id)) {
+        fetchDeploymentStatus();
+      }
+    });
+
+    // Cleanup on unmount
+    return () => {
+      socket.disconnect();
+      socketRef.current = null;
+    };
   }, [fetchDeploymentStatus]);
+
+  // Smart polling: refresh at 20 seconds before each 5-minute candle close (when evaluations happen)
+  // This ensures we get fresh data right when candle evaluations occur
+  useEffect(() => {
+    if (!deployment || isReplayMode) return; // Only for live mode with active deployment
+    
+    let timeoutId: NodeJS.Timeout | null = null;
+    
+    const scheduleNextRefresh = () => {
+      const now = new Date();
+      const minutes = now.getMinutes();
+      const seconds = now.getSeconds();
+      
+      // Calculate next 5-minute candle close time
+      // Round up to next 5-minute interval (e.g., 12:03 -> 12:05, 12:07 -> 12:10)
+      const nextCandleMinutes = Math.ceil(minutes / 5) * 5;
+      const nextCandleClose = new Date(now);
+      nextCandleClose.setMinutes(nextCandleMinutes, 0, 0);
+      nextCandleClose.setSeconds(0, 0);
+      
+      // If we've already passed this candle close, move to next one
+      if (nextCandleClose <= now) {
+        nextCandleClose.setMinutes(nextCandleMinutes + 5, 0, 0);
+      }
+      
+      // Evaluation happens 20 seconds before candle close
+      const evaluationTime = new Date(nextCandleClose.getTime() - 20 * 1000);
+      
+      // Calculate milliseconds until evaluation time + 2 seconds buffer to ensure data is ready
+      const msUntilRefresh = evaluationTime.getTime() + 2000 - now.getTime();
+      
+      if (msUntilRefresh > 0 && msUntilRefresh < 6 * 60 * 1000) { // Only schedule if within next 6 minutes
+        timeoutId = setTimeout(() => {
+          fetchDeploymentStatus();
+          // Schedule next refresh after this one completes
+          scheduleNextRefresh();
+        }, msUntilRefresh);
+      } else {
+        // Fallback: if calculation fails, use 30-second polling
+        timeoutId = setTimeout(() => {
+          fetchDeploymentStatus();
+          scheduleNextRefresh();
+        }, 30000);
+      }
+    };
+    
+    // Schedule first refresh
+    scheduleNextRefresh();
+    
+    return () => {
+      if (timeoutId) clearTimeout(timeoutId);
+    };
+  }, [deployment, fetchDeploymentStatus, isReplayMode]);
+  
+  // Fallback polling interval (every 30 seconds) in case smart scheduling fails
+  useEffect(() => {
+    if (!deployment || isReplayMode) return;
+    
+    const fallbackInterval = setInterval(() => {
+      fetchDeploymentStatus();
+    }, 30000); // Every 30 seconds as fallback
+    
+    return () => clearInterval(fallbackInterval);
+  }, [deployment, fetchDeploymentStatus, isReplayMode]);
+
+  // Scroll table to top when new data arrives (latest entries are at top)
+  useEffect(() => {
+    if (stateEventTableRef.current) {
+      const container = stateEventTableRef.current;
+      // Store current scroll position and check if user was near the top (within 200px)
+      const currentScrollTop = container.scrollTop;
+      const currentScrollHeight = container.scrollHeight;
+      const currentClientHeight = container.clientHeight;
+      const distanceFromTop = currentScrollTop;
+      const wasNearTop = distanceFromTop < 200;
+      const isFirstLoad = previousHistoryLengthRef.current === 0;
+      
+      // Use requestAnimationFrame and setTimeout to ensure DOM has fully updated after re-render
+      requestAnimationFrame(() => {
+        setTimeout(() => {
+          if (stateEventTableRef.current) {
+            const updatedContainer = stateEventTableRef.current;
+            const newScrollHeight = updatedContainer.scrollHeight;
+            
+            // Only scroll to top if:
+            // 1. User was already near top (within 200px), OR
+            // 2. It's the first load, OR
+            // 3. New content was added (scrollHeight increased) AND user was near top
+            const hasNewContent = newScrollHeight > currentScrollHeight;
+            
+            if ((wasNearTop && hasNewContent) || isFirstLoad) {
+              updatedContainer.scrollTop = 0; // Scroll to top (latest entries)
+            } else if (!wasNearTop) {
+              // If user scrolled down, maintain their scroll position relative to the top
+              // Adjust for new content added at the top
+              const scrollDiff = newScrollHeight - currentScrollHeight;
+              updatedContainer.scrollTop = currentScrollTop + scrollDiff;
+            }
+            
+            // Update previous length for next comparison
+            const currentHistoryLength = deployment?.state?.history?.length || replayHistory?.length || 0;
+            previousHistoryLengthRef.current = currentHistoryLength;
+          }
+        }, 150);
+      });
+    }
+  }, [
+    deployment?.state?.history?.length, 
+    deployment?.state?.lastCheck, 
+    isReplayMode, 
+    currentReplayTime, 
+    candleData?.length,
+    replayHistory?.length
+  ]);
 
   // Auto-select deployed strategy when deployment exists
   useEffect(() => {
@@ -922,6 +1109,7 @@ const LiveTradeContent: React.FC = () => {
       trades: [] as HistoryEntry[],
     };
     history.forEach((entry) => {
+      // Check category field (HistoryEntry uses category, not type)
       const category = (entry.category || '').toLowerCase();
       if (!category) {
         return;
@@ -1598,6 +1786,2377 @@ const LiveTradeContent: React.FC = () => {
                             </span>
                           )}
                         </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* User Visibility States - Live Trade & Replay */}
+                  {(deployment || isReplayMode) && (
+                    <div className="card mb-4">
+                      <div className="card-header bg-primary text-white">
+                        <h6 className="mb-0">
+                          <i className="bi bi-diagram-3-fill me-2"></i>
+                          User Visibility States - Trading Process Flow
+                        </h6>
+                      </div>
+                      <div className="card-body">
+                        {(() => {
+                          // Define all states in order
+                          const allStates = [
+                            {
+                              id: 'SEARCHING_SIGNAL',
+                              name: 'Searching Signal',
+                              description: 'Monitoring for PE signal conditions',
+                              icon: 'bi-search',
+                              color: '#6c757d',
+                              details: (data: any) => ({
+                                'Status': data.signalStatus || 'Monitoring market',
+                                'Condition': 'LOW > EMA(5) AND RSI > 70',
+                                'Last Check': data.lastCheck || 'N/A',
+                                'Current LTP': data.currentLtp ? `₹${data.currentLtp.toFixed(2)}` : 'N/A',
+                                'Candle Interval': `${data.candleInterval || 5} minutes`,
+                                'Evaluation Time': `${data.evaluationSeconds || 20} seconds before candle close`
+                              })
+                            },
+                            {
+                              id: 'SIGNAL_IGNORED',
+                              name: 'Signal Ignored',
+                              description: 'Signal evaluated but ignored with reason',
+                              icon: 'bi-x-circle',
+                              color: '#dc3545',
+                              details: (data: any) => ({
+                                'Reason': data.ignoreReason || 'RSI or EMA condition not met',
+                                'RSI Value': data.rsi ? data.rsi.toFixed(2) : 'N/A',
+                                'EMA Value': data.ema ? `₹${data.ema.toFixed(2)}` : 'N/A',
+                                'Candle High': data.high ? `₹${data.high.toFixed(2)}` : 'N/A',
+                                'Candle Low': data.low ? `₹${data.low.toFixed(2)}` : 'N/A',
+                                'Time': data.timestamp || 'N/A',
+                                'Total Ignored': data.totalIgnored || 0
+                              })
+                            },
+                            {
+                              id: 'SIGNAL_ACTIVE',
+                              name: 'Signal Active',
+                              description: 'Identified PE signal, waiting for entry',
+                              icon: 'bi-bullseye',
+                              color: '#0d6efd',
+                              details: (data: any) => ({
+                                'Signal Type': 'PE',
+                                'Signal High': data.signalHigh ? `₹${data.signalHigh.toFixed(2)}` : 'N/A',
+                                'Signal Low': data.signalLow ? `₹${data.signalLow.toFixed(2)}` : 'N/A',
+                                'EMA(5)': data.ema ? `₹${data.ema.toFixed(2)}` : 'N/A',
+                                'RSI(14)': data.rsi ? data.rsi.toFixed(2) : 'N/A',
+                                'Signal Time': data.signalTime || 'N/A',
+                                'Entry Condition': 'Waiting for candle.close < signal.low',
+                                'Current Close': data.currentClose ? `₹${data.currentClose.toFixed(2)}` : 'N/A'
+                              })
+                            },
+                            {
+                              id: 'TRADE_EXECUTED',
+                              name: 'Trade Executed',
+                              description: 'Order posted, Position open',
+                              icon: 'bi-check-circle',
+                              color: '#198754',
+                              details: (data: any) => ({
+                                'Order ID': data.orderId || 'N/A',
+                                'Trading Symbol': data.tradingSymbol || data.optionSymbol || 'N/A',
+                                'Entry Price': data.entryPrice ? `₹${data.entryPrice.toFixed(2)}` : 'N/A',
+                                'Quantity': data.quantity || 'N/A',
+                                'Lot Size': data.lotSize || 'N/A',
+                                'Lot Count': data.lotCount || 'N/A',
+                                'Position': data.position || 'N/A',
+                                'Order Status': data.orderStatus || 'N/A',
+                                'Entry Time': data.entryTime || 'N/A'
+                              })
+                            },
+                            {
+                              id: 'EXIT_CONDITION_EVALUATION',
+                              name: 'Exit Condition Evaluation',
+                              description: 'Monitoring exit conditions',
+                              icon: 'bi-eye',
+                              color: '#ffc107',
+                              details: (data: any) => ({
+                                'Current LTP': data.currentLtp ? `₹${data.currentLtp.toFixed(2)}` : 'N/A',
+                                'Entry Price': data.entryPrice ? `₹${data.entryPrice.toFixed(2)}` : 'N/A',
+                                'Current P&L': data.currentPnl ? `₹${data.currentPnl.toFixed(2)}` : 'N/A',
+                                'P&L %': data.pnlPercent ? `${data.pnlPercent.toFixed(2)}%` : 'N/A',
+                                'Stop Loss': data.stopLoss ? `₹${data.stopLoss.toFixed(2)} (${data.stopLossPercent || -17}%)` : 'N/A',
+                                'Target': data.target ? `₹${data.target.toFixed(2)} (${data.targetPercent || 45}%)` : 'N/A',
+                                'Exit Conditions': 'Stop Loss (-17%), Target (+45%), Market Close (15:15), Index Stop/Target',
+                                'Monitoring Since': data.monitoringSince || 'N/A'
+                              })
+                            },
+                            {
+                              id: 'EXIT_EXECUTING',
+                              name: 'Exit Executing',
+                              description: 'Exit condition met, closing position',
+                              icon: 'bi-arrow-right-circle',
+                              color: '#ff9800',
+                              details: (data: any) => ({
+                                'Exit Reason': data.exitReason || 'N/A',
+                                'Exit Price': data.exitPrice ? `₹${data.exitPrice.toFixed(2)}` : 'N/A',
+                                'Entry Price': data.entryPrice ? `₹${data.entryPrice.toFixed(2)}` : 'N/A',
+                                'P&L': data.pnl ? `₹${data.pnl.toFixed(2)}` : 'N/A',
+                                'P&L %': data.pnlPercent ? `${data.pnlPercent.toFixed(2)}%` : 'N/A',
+                                'Exit Order ID': data.exitOrderId || 'N/A',
+                                'Exit Time': data.exitTime || 'N/A',
+                                'Status': 'Closing position...'
+                              })
+                            },
+                            {
+                              id: 'TRADE_COMPLETE',
+                              name: 'Trade Complete',
+                              description: 'Position closed, ready for next cycle',
+                              icon: 'bi-check2-all',
+                              color: '#6f42c1',
+                              details: (data: any) => ({
+                                'Exit Reason': data.exitReason || 'N/A',
+                                'Entry Price': data.entryPrice ? `₹${data.entryPrice.toFixed(2)}` : 'N/A',
+                                'Exit Price': data.exitPrice ? `₹${data.exitPrice.toFixed(2)}` : 'N/A',
+                                'Final P&L': data.pnl ? `₹${data.pnl.toFixed(2)}` : 'N/A',
+                                'P&L %': data.pnlPercent ? `${data.pnlPercent.toFixed(2)}%` : 'N/A',
+                                'Trade Duration': data.duration || 'N/A',
+                                'Status': 'Ready for next signal cycle',
+                                'Completed At': data.completedAt || 'N/A'
+                              })
+                            }
+                          ];
+
+                          // Determine current state based on deployment/replay data
+                          const determineCurrentState = () => {
+                            if (isReplayMode) {
+                              // For replay mode, use replay data
+                              if (replayTrades && replayTrades.length > 0) {
+                                const latestTrade = replayTrades[replayTrades.length - 1];
+                                const isEntry = latestTrade.type === 'entry' || latestTrade.data?.type === 'entry';
+                                const isExit = latestTrade.type === 'exit' || latestTrade.data?.exit_reason;
+                                
+                                if (isExit) {
+                                  // Check if exit is executing or complete
+                                  const exitTime = new Date(latestTrade.timestamp || latestTrade.data?.timestamp || '');
+                                  const now = parseTime(`${replayDate}T${currentReplayTime}`) || new Date();
+                                  const timeDiff = (now.getTime() - exitTime.getTime()) / 1000;
+                                  
+                                  if (timeDiff < 5) {
+                                    return 'EXIT_EXECUTING';
+                                  }
+                                  return 'TRADE_COMPLETE';
+                                } else if (isEntry) {
+                                  return 'EXIT_CONDITION_EVALUATION';
+                                }
+                              }
+                              
+                              if (replaySignals && replaySignals.length > 0) {
+                                return 'SIGNAL_ACTIVE';
+                              }
+                              
+                              if (replayIgnoredSignals && replayIgnoredSignals.length > 0) {
+                                return 'SIGNAL_IGNORED';
+                              }
+                              
+                              return 'SEARCHING_SIGNAL';
+                            } else {
+                              // For live mode, use deployment data
+                              if (!deployment || !deployment.state) {
+                                return 'SEARCHING_SIGNAL';
+                              }
+                              
+                              const state = deployment.state;
+                              const positions = state.positions || [];
+                              const orders = state.orders || [];
+                              const hasOpenPosition = positions.length > 0 && positions.some((p: any) => (p.quantity || 0) !== 0);
+                              const hasOpenOrder = orders.length > 0 && orders.some((o: any) => o.status === 'OPEN' || o.status === 'PENDING');
+                              
+                              // Check for exit execution
+                              if (state.squareOff && state.squareOff.length > 0) {
+                                return 'EXIT_EXECUTING';
+                              }
+                              
+                              // Check if trade is complete (recent exit)
+                              const history = state.history || [];
+                              const recentExit = history.find((h: any) => 
+                                h.type === 'exit' || h.message?.toLowerCase().includes('exit') || h.message?.toLowerCase().includes('closed')
+                              );
+                              
+                              if (recentExit && !hasOpenPosition) {
+                                return 'TRADE_COMPLETE';
+                              }
+                              
+                              // Check if in position (position exists and order is executed)
+                              if (hasOpenPosition) {
+                                // If we have a position, we're monitoring exit conditions
+                                return 'EXIT_CONDITION_EVALUATION';
+                              }
+                              
+                              // Check if order is placed but not yet executed (pending/executing)
+                              if (hasOpenOrder || (state.openOrdersCount && state.openOrdersCount > 0)) {
+                                return 'TRADE_EXECUTED';
+                              }
+                              
+                              // Check if we have executed orders but no position (order just executed)
+                              const executedOrderCheck = orders.find((o: any) => 
+                                o.status === 'COMPLETE' || o.status === 'EXECUTED'
+                              );
+                              if (executedOrderCheck && !hasOpenPosition) {
+                                // Order executed but position not yet reflected, still in TRADE_EXECUTED
+                                return 'TRADE_EXECUTED';
+                              }
+                              
+                              // Check for active signal
+                              const signalStatus = state.strategyInsights?.signalStatus || '';
+                              if (signalStatus.includes('Signal') || signalStatus.includes('signal')) {
+                                if (signalStatus.toLowerCase().includes('ignored')) {
+                                  return 'SIGNAL_IGNORED';
+                                }
+                                return 'SIGNAL_ACTIVE';
+                              }
+                              
+                              return 'SEARCHING_SIGNAL';
+                            }
+                          };
+
+                          const currentStateId = determineCurrentState();
+                          const currentStateIndex = allStates.findIndex(s => s.id === currentStateId);
+                          const processedStates = currentStateIndex + 1;
+                          const remainingStates = allStates.length - processedStates;
+
+                          // Get state data for current state
+                          const getStateData = () => {
+                            if (isReplayMode) {
+                              const latestSignal = replaySignals && replaySignals.length > 0 ? replaySignals[replaySignals.length - 1] : null;
+                              const latestIgnored = replayIgnoredSignals && replayIgnoredSignals.length > 0 ? replayIgnoredSignals[replayIgnoredSignals.length - 1] : null;
+                              const latestTrade = replayTrades && replayTrades.length > 0 ? replayTrades[replayTrades.length - 1] : null;
+                              
+                              switch (currentStateId) {
+                                case 'SIGNAL_IGNORED':
+                                  return {
+                                    ignoreReason: latestIgnored?.reason || latestIgnored?.data?.reason || 'RSI or EMA condition not met',
+                                    rsi: latestIgnored?.data?.rsi || latestIgnored?.rsi_value,
+                                    ema: latestIgnored?.data?.ema || latestIgnored?.ema_value,
+                                    high: latestIgnored?.data?.high || latestIgnored?.signal_high,
+                                    low: latestIgnored?.data?.low || latestIgnored?.signal_low,
+                                    timestamp: latestIgnored?.timestamp || latestIgnored?.candle_time,
+                                    totalIgnored: replayIgnoredSignals?.length || 0
+                                  };
+                                case 'SIGNAL_ACTIVE':
+                                  return {
+                                    signalHigh: latestSignal?.signal_high || latestSignal?.data?.signal_high,
+                                    signalLow: latestSignal?.signal_low || latestSignal?.data?.signal_low,
+                                    ema: latestSignal?.ema_value || latestSignal?.data?.ema,
+                                    rsi: latestSignal?.rsi_value || latestSignal?.data?.rsi,
+                                    signalTime: latestSignal?.timestamp || latestSignal?.candle_time,
+                                    currentClose: latestSignal?.price || latestSignal?.data?.price
+                                  };
+                                case 'TRADE_EXECUTED':
+                                case 'EXIT_CONDITION_EVALUATION':
+                                  return {
+                                    orderId: latestTrade?.data?.order_id || 'N/A',
+                                    tradingSymbol: latestTrade?.data?.option_symbol || latestTrade?.data?.tradingsymbol,
+                                    entryPrice: latestTrade?.data?.entry_price,
+                                    quantity: latestTrade?.data?.quantity || latestTrade?.data?.total_quantity,
+                                    lotSize: latestTrade?.data?.lot_size,
+                                    lotCount: latestTrade?.data?.lot_count,
+                                    position: latestTrade?.data?.position,
+                                    orderStatus: latestTrade?.data?.order_status || 'EXECUTED',
+                                    entryTime: latestTrade?.timestamp || latestTrade?.data?.timestamp,
+                                    currentLtp: latestTrade?.data?.current_ltp,
+                                    currentPnl: latestTrade?.data?.current_pnl || latestTrade?.data?.pnl,
+                                    pnlPercent: latestTrade?.data?.pnl_percent,
+                                    stopLoss: latestTrade?.data?.stop_loss,
+                                    stopLossPercent: latestTrade?.data?.stop_loss_percent || -17,
+                                    target: latestTrade?.data?.target,
+                                    targetPercent: latestTrade?.data?.target_percent || 45,
+                                    monitoringSince: latestTrade?.timestamp || latestTrade?.data?.entry_time
+                                  };
+                                case 'EXIT_EXECUTING':
+                                case 'TRADE_COMPLETE':
+                                  return {
+                                    exitReason: latestTrade?.data?.exit_reason || 'Market Close',
+                                    exitPrice: latestTrade?.data?.exit_price,
+                                    entryPrice: latestTrade?.data?.entry_price,
+                                    pnl: latestTrade?.data?.pnl,
+                                    pnlPercent: latestTrade?.data?.pnl_percent,
+                                    exitOrderId: latestTrade?.data?.exit_order_id || 'N/A',
+                                    exitTime: latestTrade?.timestamp || latestTrade?.data?.exit_time,
+                                    completedAt: latestTrade?.timestamp || latestTrade?.data?.exit_time
+                                  };
+                                default:
+                                  return {
+                                    signalStatus: 'Monitoring market for signals',
+                                    lastCheck: currentReplayTime,
+                                    currentLtp: null,
+                                    candleInterval: 5,
+                                    evaluationSeconds: 20
+                                  };
+                              }
+                            } else {
+                              // Live mode data
+                              const state = deployment?.state || {};
+                              const insights = state.strategyInsights || {};
+                              const positions = state.positions || [];
+                              const orders = state.orders || [];
+                              
+                              switch (currentStateId) {
+                                case 'SIGNAL_IGNORED':
+                                  const ignoredCount = state.eventStats?.signalsIgnored || 0;
+                                  return {
+                                    ignoreReason: 'RSI or EMA condition not met',
+                                    totalIgnored: ignoredCount
+                                  };
+                                case 'SIGNAL_ACTIVE':
+                                  return {
+                                    signalHigh: insights.signalCandleHigh,
+                                    signalLow: insights.signalCandleLow,
+                                    ema: insights.ema5,
+                                    rsi: insights.rsi14,
+                                    signalTime: insights.signalCandleTime,
+                                    currentClose: state.currentLtp
+                                  };
+                                case 'TRADE_EXECUTED':
+                                  // Get the most recent executed order (COMPLETE status) or pending order
+                                  const executedOrder = orders.find((o: any) => 
+                                    o.status === 'COMPLETE' || o.status === 'EXECUTED'
+                                  ) || orders.find((o: any) => 
+                                    o.status === 'OPEN' || o.status === 'PENDING'
+                                  );
+                                  const execPosition = positions.find((p: any) => (p.quantity || 0) !== 0);
+                                  const execQuantity = execPosition?.quantity || 0;
+                                  return {
+                                    orderId: executedOrder?.order_id || execPosition?.tradingsymbol?.split('-')[0] || 'N/A',
+                                    tradingSymbol: executedOrder?.tradingsymbol || execPosition?.tradingsymbol || insights.tradedInstrument,
+                                    entryPrice: executedOrder?.average_price || execPosition?.buy_price || insights.entryPrice,
+                                    quantity: executedOrder?.filled_quantity || execQuantity || state.config?.totalQuantity,
+                                    lotSize: state.config?.lotSize,
+                                    lotCount: state.config?.lotCount,
+                                    position: execPosition ? `${execQuantity > 0 ? 'LONG' : 'SHORT'} ${Math.abs(execQuantity)}` : 'N/A',
+                                    orderStatus: executedOrder?.status || (execPosition ? 'EXECUTED' : 'PENDING'),
+                                    entryTime: executedOrder?.order_timestamp || execPosition?.buy_price ? 'Position Active' : 'N/A'
+                                  };
+                                case 'EXIT_CONDITION_EVALUATION':
+                                  const evalPosition = positions.find((p: any) => (p.quantity || 0) !== 0);
+                                  return {
+                                    currentLtp: state.currentLtp,
+                                    entryPrice: insights.entryPrice,
+                                    currentPnl: state.livePnl,
+                                    pnlPercent: insights.currentPnlPercent,
+                                    stopLoss: insights.stopLossLevel,
+                                    stopLossPercent: state.config?.stopLossPercent || -17,
+                                    target: insights.targetLevel,
+                                    targetPercent: state.config?.targetPercent || 45,
+                                    monitoringSince: evalPosition?.buy_price ? 'Position open' : 'N/A'
+                                  };
+                                case 'EXIT_EXECUTING':
+                                  const squareOff = state.squareOff?.[0];
+                                  return {
+                                    exitReason: squareOff?.status || 'Market Close',
+                                    exitPrice: state.currentLtp || insights.entryPrice,
+                                    entryPrice: insights.entryPrice,
+                                    exitOrderId: squareOff?.order_id || 'N/A',
+                                    exitTime: new Date().toLocaleTimeString()
+                                  };
+                                case 'TRADE_COMPLETE':
+                                  const recentExit = state.history?.find((h: any) => 
+                                    h.type === 'exit' || h.message?.toLowerCase().includes('exit')
+                                  );
+                                  const exitMeta = recentExit?.meta || {};
+                                  return {
+                                    exitReason: exitMeta.exit_reason || recentExit?.message || 'Trade Closed',
+                                    entryPrice: insights.entryPrice,
+                                    exitPrice: exitMeta.exit_price,
+                                    pnl: state.livePnl || exitMeta.pnl,
+                                    completedAt: recentExit?.timestamp || new Date().toLocaleTimeString()
+                                  };
+                                default:
+                                  return {
+                                    signalStatus: insights.signalStatus || state.message || 'Monitoring market',
+                                    lastCheck: state.lastCheck || 'N/A',
+                                    currentLtp: state.currentLtp,
+                                    candleInterval: state.config?.candleIntervalMinutes || 5,
+                                    evaluationSeconds: state.config?.evaluationSecondsBeforeClose || 20
+                                  };
+                              }
+                            }
+                          };
+
+                          const stateData = getStateData();
+                          const currentState = allStates.find(s => s.id === currentStateId) || allStates[0];
+                          const stateDetails = currentState.details(stateData);
+
+                          // Helper function to parse time
+                          const parseTime = (timeStr: string): Date | null => {
+                            if (!timeStr) return null;
+                            try {
+                              if (timeStr.includes('T') || timeStr.includes('Z') || timeStr.includes('+')) {
+                                return new Date(timeStr);
+                              }
+                              if (replayDate && timeStr.includes(':')) {
+                                return new Date(`${replayDate}T${timeStr}`);
+                              }
+                              return new Date(timeStr);
+                            } catch {
+                              return null;
+                            }
+                          };
+
+                          return (
+                            <div>
+                              {/* Progress Summary */}
+                              <div className="alert alert-info mb-4">
+                                <div className="row align-items-center">
+                                  <div className="col-md-6">
+                                    <h6 className="mb-2">
+                                      <i className="bi bi-activity me-2"></i>
+                                      Progress: {processedStates} of {allStates.length} states processed
+                                    </h6>
+                                    <div className="progress" style={{ height: '25px' }}>
+                                      <div 
+                                        className="progress-bar progress-bar-striped progress-bar-animated" 
+                                        role="progressbar" 
+                                        style={{ width: `${(processedStates / allStates.length) * 100}%` }}
+                                        aria-valuenow={processedStates} 
+                                        aria-valuemin={0} 
+                                        aria-valuemax={allStates.length}
+                                      >
+                                        {Math.round((processedStates / allStates.length) * 100)}%
+                                      </div>
+                                    </div>
+                                  </div>
+                                  <div className="col-md-6 text-end">
+                                    <span className="badge bg-success me-2">Processed: {processedStates}</span>
+                                    <span className="badge bg-secondary">Remaining: {remainingStates}</span>
+                                  </div>
+                                </div>
+                              </div>
+
+                              {/* State Flow Visualization */}
+                              <div className="mb-4">
+                                <div className="d-flex flex-wrap justify-content-between align-items-center gap-2">
+                                  {allStates.map((state, idx) => {
+                                    const isCompleted = idx < currentStateIndex;
+                                    const isCurrent = state.id === currentStateId;
+                                    const isPending = idx > currentStateIndex;
+                                    
+                                    return (
+                                      <React.Fragment key={state.id}>
+                                        <div 
+                                          className="flex-fill text-center p-3 rounded border"
+                                          style={{
+                                            backgroundColor: isCurrent ? `${state.color}15` : isCompleted ? `${state.color}08` : '#f8f9fa',
+                                            borderColor: isCurrent ? state.color : isCompleted ? state.color : '#dee2e6',
+                                            borderWidth: isCurrent ? '3px' : '1px',
+                                            opacity: isPending ? 0.5 : 1,
+                                            minWidth: '120px',
+                                            maxWidth: '180px'
+                                          }}
+                                        >
+                                          <i 
+                                            className={`bi ${state.icon} mb-2`} 
+                                            style={{ 
+                                              fontSize: '2rem', 
+                                              color: isCurrent ? state.color : isCompleted ? state.color : '#6c757d' 
+                                            }}
+                                          ></i>
+                                          <div className="small fw-bold" style={{ color: isCurrent ? state.color : '#212529' }}>
+                                            {state.name}
+                                          </div>
+                                          {isCurrent && (
+                                            <span className="badge mt-1" style={{ backgroundColor: state.color }}>
+                                              CURRENT
+                                            </span>
+                                          )}
+                                          {isCompleted && (
+                                            <span className="badge bg-success mt-1">
+                                              <i className="bi bi-check"></i>
+                                            </span>
+                                          )}
+                                        </div>
+                                        {idx < allStates.length - 1 && (
+                                          <i 
+                                            className="bi bi-arrow-right" 
+                                            style={{ 
+                                              fontSize: '1.5rem', 
+                                              color: isCompleted ? state.color : '#dee2e6' 
+                                            }}
+                                          ></i>
+                                        )}
+                                      </React.Fragment>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+
+                              {/* Current State Details */}
+                              <div className="card border-primary mb-3">
+                                <div 
+                                  className="card-header text-white"
+                                  style={{ backgroundColor: currentState.color }}
+                                >
+                                  <h6 className="mb-0">
+                                    <i className={`bi ${currentState.icon} me-2`}></i>
+                                    Current State: {currentState.name}
+                                  </h6>
+                                </div>
+                                <div className="card-body">
+                                  <p className="mb-3">{currentState.description}</p>
+                                  <div className="row">
+                                    {Object.entries(stateDetails).map(([key, value], idx) => (
+                                      <div key={idx} className="col-md-6 mb-2">
+                                        <strong>{key}:</strong> <span className="text-muted">{String(value)}</span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              </div>
+
+                              {/* Real-Time Activity in Current State */}
+                              {(() => {
+                                // Helper function to parse time
+                                const parseTime = (timeStr: string): Date | null => {
+                                  if (!timeStr) return null;
+                                  try {
+                                    if (timeStr.includes('T') || timeStr.includes('Z') || timeStr.includes('+')) {
+                                      return new Date(timeStr);
+                                    }
+                                    if (replayDate && timeStr.includes(':')) {
+                                      return new Date(`${replayDate}T${timeStr}`);
+                                    }
+                                    return new Date(timeStr);
+                                  } catch {
+                                    return null;
+                                  }
+                                };
+
+                                // Helper function to format time
+                                const formatTime = (date: Date | null): string => {
+                                  if (!date || isNaN(date.getTime())) return 'N/A';
+                                  return date.toLocaleTimeString('en-US', { 
+                                    hour: '2-digit', 
+                                    minute: '2-digit', 
+                                    second: '2-digit', 
+                                    hour12: false 
+                                  });
+                                };
+
+                                // Get state entry time and recent activities
+                                const getStateActivity = () => {
+                                  const now = isReplayMode 
+                                    ? (parseTime(`${replayDate}T${currentReplayTime}`) || new Date())
+                                    : currentTime; // Use currentTime state which updates every minute
+                                  const oneMinuteAgo = new Date(now.getTime() - 60 * 1000);
+                                  
+                                  let stateEntryTime: Date | null = null;
+                                  const recentActivities: Array<{
+                                    time: string;
+                                    message: string;
+                                    type: string;
+                                    details?: any;
+                                  }> = [];
+
+                                  if (isReplayMode) {
+                                    // For replay mode, find when we entered this state
+                                    if (currentStateId === 'SEARCHING_SIGNAL') {
+                                      stateEntryTime = parseTime(`${replayDate}T09:15:00`) || now;
+                                    } else if (currentStateId === 'SIGNAL_IGNORED' && replayIgnoredSignals && replayIgnoredSignals.length > 0) {
+                                      const latest = replayIgnoredSignals[replayIgnoredSignals.length - 1];
+                                      stateEntryTime = parseTime(latest.timestamp || latest.candle_time || latest.data?.timestamp) || now;
+                                    } else if (currentStateId === 'SIGNAL_ACTIVE' && replaySignals && replaySignals.length > 0) {
+                                      const latest = replaySignals[replaySignals.length - 1];
+                                      stateEntryTime = parseTime(latest.timestamp || latest.candle_time || latest.data?.timestamp) || now;
+                                    } else if (currentStateId === 'TRADE_EXECUTED' && replayTrades && replayTrades.length > 0) {
+                                      const entry = replayTrades.find((t: any) => t.type === 'entry' || t.data?.type === 'entry');
+                                      if (entry) {
+                                        stateEntryTime = parseTime(entry.timestamp || entry.data?.timestamp || entry.data?.entry_time) || now;
+                                      }
+                                    } else if (currentStateId === 'EXIT_CONDITION_EVALUATION' && replayTrades && replayTrades.length > 0) {
+                                      const entry = replayTrades.find((t: any) => t.type === 'entry' || t.data?.type === 'entry');
+                                      if (entry) {
+                                        stateEntryTime = parseTime(entry.timestamp || entry.data?.timestamp || entry.data?.entry_time) || now;
+                                      }
+                                    } else if (currentStateId === 'EXIT_EXECUTING' && replayTrades && replayTrades.length > 0) {
+                                      const exit = replayTrades.find((t: any) => t.type === 'exit' || t.data?.exit_reason);
+                                      if (exit) {
+                                        stateEntryTime = parseTime(exit.timestamp || exit.data?.timestamp || exit.data?.exit_time) || now;
+                                      }
+                                    } else if (currentStateId === 'TRADE_COMPLETE' && replayTrades && replayTrades.length > 0) {
+                                      const exit = replayTrades.find((t: any) => t.type === 'exit' || t.data?.exit_reason);
+                                      if (exit) {
+                                        stateEntryTime = parseTime(exit.timestamp || exit.data?.timestamp || exit.data?.exit_time) || now;
+                                      }
+                                    }
+
+                                    // Get recent activities from history (last minute)
+                                    if (replayHistory && replayHistory.length > 0) {
+                                      replayHistory.forEach((entry: any) => {
+                                        const entryTime = parseTime(entry.timestamp || entry.data?.timestamp);
+                                        if (entryTime && entryTime >= oneMinuteAgo && entryTime <= now) {
+                                          recentActivities.push({
+                                            time: formatTime(entryTime),
+                                            message: entry.message || entry.data?.message || entry.type || 'Activity',
+                                            type: entry.type || entry.data?.type || 'info',
+                                            details: entry.meta || entry.data
+                                          });
+                                        }
+                                      });
+                                    }
+                                  } else {
+                                    // For live mode
+                                    const state = deployment?.state || {};
+                                    const history = state.history || [];
+                                    
+                                    // Find state entry time based on state type
+                                    if (currentStateId === 'SEARCHING_SIGNAL') {
+                                      const startTime = deployment?.startedAt || deployment?.scheduledStart;
+                                      stateEntryTime = startTime ? parseTime(startTime) || now : now;
+                                    } else if (currentStateId === 'SIGNAL_IGNORED') {
+                                      const ignoredEvent = history.find((h: any) => 
+                                        h.type === 'signal_ignored' || h.message?.toLowerCase().includes('ignored')
+                                      );
+                                      stateEntryTime = ignoredEvent && ignoredEvent.timestamp 
+                                        ? parseTime(ignoredEvent.timestamp) || now 
+                                        : now;
+                                    } else if (currentStateId === 'SIGNAL_ACTIVE') {
+                                      const signalEvent = history.find((h: any) => 
+                                        h.type === 'signal_identified' || h.message?.toLowerCase().includes('signal identified')
+                                      );
+                                      stateEntryTime = signalEvent && signalEvent.timestamp 
+                                        ? parseTime(signalEvent.timestamp) || now 
+                                        : now;
+                                    } else if (currentStateId === 'TRADE_EXECUTED') {
+                                      const entryEvent = history.find((h: any) => 
+                                        h.type === 'entry' || h.message?.toLowerCase().includes('entry') || h.message?.toLowerCase().includes('order')
+                                      );
+                                      stateEntryTime = entryEvent && entryEvent.timestamp 
+                                        ? parseTime(entryEvent.timestamp) || now 
+                                        : now;
+                                    } else if (currentStateId === 'EXIT_CONDITION_EVALUATION') {
+                                      const entryEvent = history.find((h: any) => 
+                                        h.type === 'entry' || h.message?.toLowerCase().includes('entry')
+                                      );
+                                      stateEntryTime = entryEvent && entryEvent.timestamp 
+                                        ? parseTime(entryEvent.timestamp) || now 
+                                        : now;
+                                    } else if (currentStateId === 'EXIT_EXECUTING') {
+                                      const exitEvent = history.find((h: any) => 
+                                        h.type === 'exit' || h.message?.toLowerCase().includes('exit') || state.squareOff
+                                      );
+                                      stateEntryTime = exitEvent && exitEvent.timestamp 
+                                        ? parseTime(exitEvent.timestamp) || now 
+                                        : now;
+                                    } else if (currentStateId === 'TRADE_COMPLETE') {
+                                      const exitEvent = history.find((h: any) => 
+                                        h.type === 'exit' || h.message?.toLowerCase().includes('exit')
+                                      );
+                                      stateEntryTime = exitEvent && exitEvent.timestamp 
+                                        ? parseTime(exitEvent.timestamp) || now 
+                                        : now;
+                                    }
+
+                                    // Get recent activities from history (last minute)
+                                    history.forEach((entry: any) => {
+                                      const entryTime = parseTime(entry.timestamp);
+                                      if (entryTime && entryTime >= oneMinuteAgo && entryTime <= now) {
+                                        recentActivities.push({
+                                          time: formatTime(entryTime),
+                                          message: entry.message || entry.type || 'Activity',
+                                          type: entry.type || 'info',
+                                          details: entry.meta
+                                        });
+                                      }
+                                    });
+
+                                    // Add real-time status updates
+                                    if (state.message && state.lastCheck) {
+                                      const lastCheckTime = parseTime(state.lastCheck);
+                                      if (lastCheckTime && lastCheckTime >= oneMinuteAgo) {
+                                        recentActivities.push({
+                                          time: formatTime(lastCheckTime),
+                                          message: state.message,
+                                          type: 'status',
+                                          details: { lastCheck: state.lastCheck }
+                                        });
+                                      }
+                                    }
+
+                                    // Add current LTP updates if available
+                                    if (state.currentLtp && state.lastCheck) {
+                                      const lastCheckTime = parseTime(state.lastCheck);
+                                      if (lastCheckTime && lastCheckTime >= oneMinuteAgo) {
+                                        recentActivities.push({
+                                          time: formatTime(lastCheckTime),
+                                          message: `Current LTP: ₹${state.currentLtp.toFixed(2)}`,
+                                          type: 'ltp',
+                                          details: { ltp: state.currentLtp }
+                                        });
+                                      }
+                                    }
+                                  }
+
+                                  // Sort activities by time (most recent first)
+                                  recentActivities.sort((a, b) => {
+                                    const timeA = parseTime(a.time) || new Date(0);
+                                    const timeB = parseTime(b.time) || new Date(0);
+                                    return timeB.getTime() - timeA.getTime();
+                                  });
+
+                                  return { stateEntryTime, recentActivities, now };
+                                };
+
+                                const { stateEntryTime, recentActivities, now } = getStateActivity();
+
+                                const getActivityIcon = (type: string) => {
+                                  switch (type) {
+                                    case 'entry': return 'bi-play-circle-fill text-success';
+                                    case 'exit': return 'bi-stop-circle-fill text-danger';
+                                    case 'signal_identified': return 'bi-bullseye text-primary';
+                                    case 'signal_ignored': return 'bi-x-circle text-warning';
+                                    case 'ltp': return 'bi-graph-up text-info';
+                                    case 'status': return 'bi-info-circle text-secondary';
+                                    default: return 'bi-circle text-muted';
+                                  }
+                                };
+
+                                return (
+                                  <div className="card border-info">
+                                    <div className="card-header bg-info text-white">
+                                      <h6 className="mb-0">
+                                        <i className="bi bi-activity me-2"></i>
+                                        Real-Time Activity in Current State
+                                      </h6>
+                                    </div>
+                                    <div className="card-body">
+                                      {/* State Entry Time */}
+                                      <div className="mb-3 p-2 bg-light rounded">
+                                        <div className="d-flex justify-content-between align-items-center">
+                                          <div>
+                                            <strong>State Entered At:</strong>{' '}
+                                            <span className="text-primary">
+                                              {stateEntryTime ? formatTime(stateEntryTime) : 'N/A'}
+                                            </span>
+                                          </div>
+                                          <div>
+                                            <strong>Duration in State:</strong>{' '}
+                                            <span className="text-info">
+                                              {stateEntryTime 
+                                                ? `${Math.floor((now.getTime() - stateEntryTime.getTime()) / 1000)}s`
+                                                : 'N/A'}
+                                            </span>
+                                          </div>
+                                        </div>
+                                      </div>
+
+                                      {/* State-Specific Event Table */}
+                                      {(() => {
+                                        const getStateEventTable = () => {
+                                          // Get signalsIgnored from categorizedHistory (available in scope)
+                                          const allIgnoredSignals = signalsIgnored || [];
+                                          
+                                          // Calculate 'now' for live mode - use currentTime state which updates every 30 seconds
+                                          const now = isReplayMode 
+                                            ? (parseTime(`${replayDate}T${currentReplayTime}`) || new Date())
+                                            : currentTime;
+                                          
+                                          const events: Array<{
+                                            time: string;
+                                            evaluationTime: string; // Time when evaluated (20 sec before close)
+                                            candle?: string;
+                                            details: Record<string, any>;
+                                            status?: string;
+                                            isCurrent?: boolean;
+                                          }> = [];
+
+                                          // First, build ALL candle evaluations (for SEARCHING_SIGNAL)
+                                          const allCandleEvaluations: Array<{
+                                            candleTime: Date;
+                                            evaluationTime: Date; // 20 seconds before candle close
+                                            candle: any;
+                                            rsi: number | null;
+                                            ema: number | null;
+                                            high: number;
+                                            low: number;
+                                            close: number;
+                                            hasSignal: boolean;
+                                            wasIgnored: boolean;
+                                            signalData?: any;
+                                            ignoredData?: any;
+                                          }> = [];
+
+                                          if (isReplayMode && candleData && candleData.length > 0) {
+                                            candleData.forEach((candle: any) => {
+                                              const candleTime = parseTime(candle.time || candle.date);
+                                              if (candleTime && candleTime <= now) {
+                                                // Evaluation happens 20 seconds before candle close
+                                                // For 5-minute candles, close is at :00, :05, :10, etc.
+                                                // So evaluation is at :19:40, :24:40, :29:40, etc.
+                                                const candleCloseTime = new Date(candleTime);
+                                                candleCloseTime.setSeconds(0, 0);
+                                                const evaluationTime = new Date(candleCloseTime.getTime() - 20 * 1000);
+                                                
+                                                // Get RSI and EMA
+                                                let rsi = candle.rsi || null;
+                                                let ema = candle.ema5 || null;
+                                                
+                                                // Check for signal
+                                                let hasSignal = false;
+                                                let signalData = null;
+                                                if (replaySignals && replaySignals.length > 0) {
+                                                  const matchingSignal = replaySignals.find((sig: any) => {
+                                                    const sigTime = parseTime(sig.timestamp || sig.candle_time || sig.data?.timestamp);
+                                                    if (sigTime) {
+                                                      // Check if signal is for this candle (within 5 minutes)
+                                                      const timeDiff = Math.abs(sigTime.getTime() - candleTime.getTime());
+                                                      return timeDiff < 5 * 60 * 1000;
+                                                    }
+                                                    return false;
+                                                  });
+                                                  
+                                                  if (matchingSignal) {
+                                                    hasSignal = true;
+                                                    signalData = matchingSignal;
+                                                    rsi = matchingSignal.rsi_value || matchingSignal.data?.rsi || rsi;
+                                                    ema = matchingSignal.ema_value || matchingSignal.data?.ema || ema;
+                                                  }
+                                                }
+                                                
+                                                // Check if ignored
+                                                let wasIgnored = false;
+                                                let ignoredData = null;
+                                                if (replayIgnoredSignals && replayIgnoredSignals.length > 0) {
+                                                  const matchingIgnored = replayIgnoredSignals.find((sig: any) => {
+                                                    const sigTime = parseTime(sig.timestamp || sig.candle_time || sig.data?.timestamp);
+                                                    if (sigTime) {
+                                                      const timeDiff = Math.abs(sigTime.getTime() - candleTime.getTime());
+                                                      return timeDiff < 5 * 60 * 1000;
+                                                    }
+                                                    return false;
+                                                  });
+                                                  
+                                                  if (matchingIgnored) {
+                                                    wasIgnored = true;
+                                                    ignoredData = matchingIgnored;
+                                                    rsi = matchingIgnored.rsi_value || matchingIgnored.data?.rsi || rsi;
+                                                    ema = matchingIgnored.ema_value || matchingIgnored.data?.ema || ema;
+                                                  }
+                                                }
+                                                
+                                                allCandleEvaluations.push({
+                                                  candleTime,
+                                                  evaluationTime,
+                                                  candle,
+                                                  rsi: rsi,
+                                                  ema: ema,
+                                                  high: candle.high || 0,
+                                                  low: candle.low || 0,
+                                                  close: candle.close || 0,
+                                                  hasSignal,
+                                                  wasIgnored,
+                                                  signalData,
+                                                  ignoredData
+                                                });
+                                              }
+                                            });
+                                          }
+
+                                          // Now filter based on current state
+                                          if (isReplayMode) {
+                                            switch (currentStateId) {
+                                            case 'SEARCHING_SIGNAL':
+                                              // Show ALL candle evaluations (each row = one 5-minute candle evaluated at 20 seconds before close)
+                                              allCandleEvaluations.forEach((candleEval) => {
+                                                let result = 'No Signal';
+                                                if (candleEval.hasSignal) {
+                                                  result = 'PE Signal Found';
+                                                } else if (candleEval.wasIgnored) {
+                                                  result = 'Signal Ignored';
+                                                } else if (candleEval.rsi && candleEval.ema) {
+                                                  if (candleEval.low > candleEval.ema && candleEval.rsi > 70) {
+                                                    result = 'Signal Condition Met';
+                                                  } else {
+                                                    result = 'No Signal';
+                                                  }
+                                                }
+                                                
+                                                events.push({
+                                                  time: formatTime(candleEval.candleTime),
+                                                  evaluationTime: formatTime(candleEval.evaluationTime),
+                                                  candle: candleEval.candle.time || candleEval.candle.date || 'N/A',
+                                                  details: {
+                                                    'RSI': candleEval.rsi ? candleEval.rsi.toFixed(2) : 'N/A',
+                                                    'EMA': candleEval.ema ? `₹${candleEval.ema.toFixed(2)}` : 'N/A',
+                                                    'High': `₹${candleEval.high.toFixed(2)}`,
+                                                    'Low': `₹${candleEval.low.toFixed(2)}`,
+                                                    'Close': `₹${candleEval.close.toFixed(2)}`,
+                                                    'Result': result
+                                                  },
+                                                  status: candleEval.hasSignal ? 'signal_found' : candleEval.wasIgnored ? 'ignored' : 'no_signal'
+                                                });
+                                              });
+                                              break;
+                                            case 'SIGNAL_IGNORED':
+                                              // Show ONLY candles that were ignored (filtered from SEARCHING_SIGNAL)
+                                              allCandleEvaluations
+                                                .filter(candleEval => candleEval.wasIgnored)
+                                                .forEach((candleEval) => {
+                                                  const reason = candleEval.ignoredData?.reason || candleEval.ignoredData?.data?.reason || 
+                                                    (candleEval.rsi && candleEval.rsi <= 70 ? 'RSI <= 70' : 
+                                                     candleEval.low && candleEval.ema && candleEval.low <= candleEval.ema ? 'LOW <= EMA(5)' : 
+                                                     'RSI or EMA condition not met');
+                                                  
+                                                  events.push({
+                                                    time: formatTime(candleEval.candleTime),
+                                                    evaluationTime: formatTime(candleEval.evaluationTime),
+                                                    candle: candleEval.candle.time || candleEval.candle.date || 'N/A',
+                                                    details: {
+                                                      'Reason': reason,
+                                                      'RSI': candleEval.rsi ? candleEval.rsi.toFixed(2) : 'N/A',
+                                                      'EMA': candleEval.ema ? `₹${candleEval.ema.toFixed(2)}` : 'N/A',
+                                                      'High': `₹${candleEval.high.toFixed(2)}`,
+                                                      'Low': `₹${candleEval.low.toFixed(2)}`,
+                                                      'Close': `₹${candleEval.close.toFixed(2)}`,
+                                                      'Condition': 'LOW > EMA(5) AND RSI > 70 (Not Met)'
+                                                    },
+                                                    status: 'ignored'
+                                                  });
+                                                });
+                                              break;
+                                            case 'SIGNAL_ACTIVE':
+                                              // Show ONLY candles that triggered active signal (filtered from SEARCHING_SIGNAL)
+                                              allCandleEvaluations
+                                                .filter(candleEval => candleEval.hasSignal && !candleEval.wasIgnored)
+                                                .forEach((candleEval) => {
+                                                  events.push({
+                                                    time: formatTime(candleEval.candleTime),
+                                                    evaluationTime: formatTime(candleEval.evaluationTime),
+                                                    candle: candleEval.candle.time || candleEval.candle.date || 'N/A',
+                                                    details: {
+                                                      'Signal Type': candleEval.signalData?.type || 'PE',
+                                                      'Signal High': `₹${candleEval.high.toFixed(2)}`,
+                                                      'Signal Low': `₹${candleEval.low.toFixed(2)}`,
+                                                      'EMA(5)': candleEval.ema ? `₹${candleEval.ema.toFixed(2)}` : 'N/A',
+                                                      'RSI(14)': candleEval.rsi ? candleEval.rsi.toFixed(2) : 'N/A',
+                                                      'Close': `₹${candleEval.close.toFixed(2)}`,
+                                                      'Status': 'Waiting for entry: candle.close < signal.low'
+                                                    },
+                                                    status: 'active'
+                                                  });
+                                                });
+                                              break;
+                                            case 'TRADE_EXECUTED':
+                                            case 'EXIT_CONDITION_EVALUATION':
+                                              // Show candle where trade was executed (filtered from SIGNAL_ACTIVE)
+                                              if (replayTrades && replayTrades.length > 0) {
+                                                replayTrades.forEach((trade: any) => {
+                                                  const tradeTime = parseTime(trade.timestamp || trade.data?.timestamp || trade.data?.entry_time);
+                                                  if (tradeTime && tradeTime <= now) {
+                                                    const isEntry = trade.type === 'entry' || trade.data?.type === 'entry';
+                                                    if (isEntry) {
+                                                      // Find the candle that triggered this entry
+                                                      const entryCandle = allCandleEvaluations.find(candleEval => {
+                                                        const timeDiff = Math.abs(candleEval.candleTime.getTime() - tradeTime.getTime());
+                                                        return timeDiff < 5 * 60 * 1000;
+                                                      });
+                                                      
+                                                      events.push({
+                                                        time: formatTime(tradeTime),
+                                                        evaluationTime: entryCandle ? formatTime(entryCandle.evaluationTime) : formatTime(tradeTime),
+                                                        candle: entryCandle ? (entryCandle.candle.time || entryCandle.candle.date || 'N/A') : (trade.data?.candle_time || trade.timestamp || 'N/A'),
+                                                        details: {
+                                                          'Order ID': trade.data?.order_id || 'N/A',
+                                                          'Symbol': trade.data?.option_symbol || trade.data?.tradingsymbol || 'N/A',
+                                                          'Entry Price': `₹${trade.data?.entry_price?.toFixed(2) || 'N/A'}`,
+                                                          'Quantity': trade.data?.quantity || trade.data?.total_quantity || 'N/A',
+                                                          'Signal Low': entryCandle ? `₹${entryCandle.low.toFixed(2)}` : 'N/A',
+                                                          'Close': entryCandle ? `₹${entryCandle.close.toFixed(2)}` : 'N/A',
+                                                          'Status': currentStateId === 'TRADE_EXECUTED' ? 'Position Open' : 'Monitoring Exit'
+                                                        },
+                                                        status: 'executed'
+                                                      });
+                                                    }
+                                                  }
+                                                });
+                                              }
+                                              break;
+                                            case 'EXIT_EXECUTING':
+                                            case 'TRADE_COMPLETE':
+                                              // Show exit candle (filtered from EXIT_CONDITION_EVALUATION)
+                                              if (replayTrades && replayTrades.length > 0) {
+                                                replayTrades.forEach((trade: any) => {
+                                                  const tradeTime = parseTime(trade.timestamp || trade.data?.timestamp || trade.data?.exit_time);
+                                                  if (tradeTime && tradeTime <= now) {
+                                                    const isExit = trade.type === 'exit' || trade.data?.exit_reason;
+                                                    if (isExit) {
+                                                      // Find the candle where exit happened
+                                                      const exitCandle = allCandleEvaluations.find(candleEval => {
+                                                        const timeDiff = Math.abs(candleEval.candleTime.getTime() - tradeTime.getTime());
+                                                        return timeDiff < 5 * 60 * 1000;
+                                                      });
+                                                      
+                                                      events.push({
+                                                        time: formatTime(tradeTime),
+                                                        evaluationTime: exitCandle ? formatTime(exitCandle.evaluationTime) : formatTime(tradeTime),
+                                                        candle: exitCandle ? (exitCandle.candle.time || exitCandle.candle.date || 'N/A') : (trade.data?.candle_time || trade.timestamp || 'N/A'),
+                                                        details: {
+                                                          'Exit Reason': trade.data?.exit_reason || 'Market Close',
+                                                          'Exit Price': `₹${trade.data?.exit_price?.toFixed(2) || 'N/A'}`,
+                                                          'Entry Price': `₹${trade.data?.entry_price?.toFixed(2) || 'N/A'}`,
+                                                          'P&L': `₹${trade.data?.pnl?.toFixed(2) || 'N/A'}`,
+                                                          'P&L %': trade.data?.pnl_percent ? `${trade.data.pnl_percent.toFixed(2)}%` : 'N/A',
+                                                          'Status': currentStateId === 'EXIT_EXECUTING' ? 'Closing...' : 'Completed'
+                                                        },
+                                                        status: 'exit'
+                                                      });
+                                                    }
+                                                  }
+                                                });
+                                              }
+                                              break;
+                                            }
+                                          } else {
+                                            // For live mode
+                                            // Calculate 'now' for live mode - use currentTime state which updates every 30 seconds
+                                            const now = currentTime;
+                                            const state = deployment?.state || {};
+                                            const history = state.history || [];
+                                            
+                                            switch (currentStateId) {
+                                              case 'SEARCHING_SIGNAL':
+                                                // Show all evaluations from history
+                                                // Helper to format numeric values (handles 0 correctly)
+                                                const formatNumericForSearch = (val: any, prefix: string = ''): string => {
+                                                  if (val === null || val === undefined || (typeof val !== 'number' && isNaN(Number(val)))) {
+                                                    return 'N/A';
+                                                  }
+                                                  const numVal = typeof val === 'number' ? val : Number(val);
+                                                  return prefix ? `${prefix}${numVal.toFixed(2)}` : numVal.toFixed(2);
+                                                };
+                                                
+                                                // Calculate current in-progress candle
+                                                const getCurrentCandle = () => {
+                                                  const nowDate = new Date(now);
+                                                  const minutes = nowDate.getMinutes();
+                                                  const seconds = nowDate.getSeconds();
+                                                  
+                                                  // Round down to nearest 5-minute interval (e.g., 11:13 -> 11:10)
+                                                  const candleStartMinutes = Math.floor(minutes / 5) * 5;
+                                                  const candleStart = new Date(nowDate);
+                                                  candleStart.setMinutes(candleStartMinutes, 0, 0);
+                                                  
+                                                  // Candle close is 5 minutes after start (e.g., 11:10 -> 11:15)
+                                                  const candleClose = new Date(candleStart);
+                                                  candleClose.setMinutes(candleStartMinutes + 5, 0, 0);
+                                                  
+                                                  // Evaluation time is 20 seconds before candle close
+                                                  const evaluationTime = new Date(candleClose.getTime() - 20 * 1000);
+                                                  
+                                                  return {
+                                                    candleStart,
+                                                    candleClose,
+                                                    evaluationTime,
+                                                    candleTimeStr: `${String(candleStart.getHours()).padStart(2, '0')}:${String(candleStartMinutes).padStart(2, '0')}`
+                                                  };
+                                                };
+                                                
+                                                const currentCandle = getCurrentCandle();
+                                                const insights = state.strategyInsights || {};
+                                                
+                                                // Try to get the most recent RSI, EMA, High, Low, Close from multiple sources
+                                                // Priority: 1. Latest history entry with these values, 2. strategyInsights, 3. state directly
+                                                let currentRsi = insights.rsi14 ?? null;
+                                                let currentEma = insights.ema5 ?? null;
+                                                let currentLtp = state.currentLtp ?? insights.currentLtp ?? null;
+                                                let currentHigh = insights.currentCandleHigh ?? null;
+                                                let currentLow = insights.currentCandleLow ?? null;
+                                                
+                                                // Look for the most recent history entry that has RSI/EMA/High/Low values
+                                                // This ensures we get the latest updated values
+                                                if (history && history.length > 0) {
+                                                  // Sort history by timestamp descending to get most recent first
+                                                  const sortedHistory = [...history].sort((a: any, b: any) => {
+                                                    const timeA = parseTime(a.timestamp) || new Date(0);
+                                                    const timeB = parseTime(b.timestamp) || new Date(0);
+                                                    return timeB.getTime() - timeA.getTime();
+                                                  });
+                                                  
+                                                  // Find the most recent entry with RSI/EMA/High/Low data
+                                                  for (const entry of sortedHistory) {
+                                                    const entryTime = entry.timestamp ? parseTime(entry.timestamp) : null;
+                                                    if (entryTime && entryTime <= now) {
+                                                      // Check if this entry has RSI/EMA data in meta
+                                                      const entryRsi = entry.meta?.rsi ?? entry.meta?.rsi14 ?? null;
+                                                      const entryEma = entry.meta?.ema ?? entry.meta?.ema5 ?? null;
+                                                      const entryHigh = entry.meta?.high ?? null;
+                                                      const entryLow = entry.meta?.low ?? null;
+                                                      const entryClose = entry.meta?.close ?? entry.meta?.currentLtp ?? null;
+                                                      
+                                                      // If we found values, use them (they're more recent)
+                                                      if (entryRsi !== null && entryRsi !== undefined && typeof entryRsi === 'number') currentRsi = entryRsi;
+                                                      if (entryEma !== null && entryEma !== undefined && typeof entryEma === 'number') currentEma = entryEma;
+                                                      if (entryHigh !== null && entryHigh !== undefined && typeof entryHigh === 'number') currentHigh = entryHigh;
+                                                      if (entryLow !== null && entryLow !== undefined && typeof entryLow === 'number') currentLow = entryLow;
+                                                      if (entryClose !== null && entryClose !== undefined && typeof entryClose === 'number') currentLtp = entryClose;
+                                                      
+                                                      // If we found at least RSI or EMA, this is likely a recent evaluation
+                                                      if ((entryRsi !== null && entryRsi !== undefined) || (entryEma !== null && entryEma !== undefined)) {
+                                                        break; // Use this entry's values
+                                                      }
+                                                    }
+                                                  }
+                                                }
+                                                
+                                                // Fallback: if still no values, try to get from strategyInsights
+                                                if (currentRsi === null && insights.rsi14 !== undefined && typeof insights.rsi14 === 'number') currentRsi = insights.rsi14;
+                                                if (currentEma === null && insights.ema5 !== undefined && typeof insights.ema5 === 'number') currentEma = insights.ema5;
+                                                if (currentHigh === null && insights.currentCandleHigh !== undefined && typeof insights.currentCandleHigh === 'number') currentHigh = insights.currentCandleHigh;
+                                                if (currentLow === null && insights.currentCandleLow !== undefined && typeof insights.currentCandleLow === 'number') currentLow = insights.currentCandleLow;
+                                                
+                                                // Use currentLtp as fallback for High/Low if not available
+                                                if (currentHigh === null) currentHigh = currentLtp;
+                                                if (currentLow === null) currentLow = currentLtp;
+                                                
+                                                // Add current in-progress candle as first row if we have any data
+                                                if (currentRsi !== null || currentEma !== null || currentLtp !== null) {
+                                                  // Determine if evaluation has happened yet
+                                                  const evaluationHasHappened = now >= currentCandle.evaluationTime;
+                                                  const secondsUntilEvaluation = Math.max(0, Math.floor((currentCandle.evaluationTime.getTime() - now.getTime()) / 1000));
+                                                  
+                                                  events.push({
+                                                    time: formatTime(now),
+                                                    evaluationTime: formatTime(currentCandle.evaluationTime),
+                                                    candle: currentCandle.candleTimeStr,
+                                                    details: {
+                                                      'Status': evaluationHasHappened 
+                                                        ? 'Evaluation completed' 
+                                                        : `Waiting for evaluation (${secondsUntilEvaluation}s)`,
+                                                      'RSI': formatNumericForSearch(currentRsi),
+                                                      'EMA': formatNumericForSearch(currentEma, '₹'),
+                                                      'High': formatNumericForSearch(currentHigh, '₹'),
+                                                      'Low': formatNumericForSearch(currentLow, '₹'),
+                                                      'Close': formatNumericForSearch(currentLtp, '₹'),
+                                                      'Result': evaluationHasHappened ? 'Pending evaluation' : 'In Progress'
+                                                    },
+                                                    status: 'in_progress',
+                                                    isCurrent: true
+                                                  });
+                                                }
+                                                
+                                                history.forEach((entry: any) => {
+                                                  const entryTime = parseTime(entry.timestamp);
+                                                  if (entryTime && entryTime <= now) {
+                                                    const evalType = entry.type || '';
+                                                    if (evalType.includes('signal') || evalType.includes('evaluation') || entry.message?.toLowerCase().includes('candle')) {
+                                                      // Calculate evaluation time (20 seconds before candle close)
+                                                      const candleTime = parseTime(entry.meta?.candle_time || entry.timestamp);
+                                                      let evaluationTime = entryTime;
+                                                      if (candleTime) {
+                                                        const candleCloseTime = new Date(candleTime);
+                                                        candleCloseTime.setSeconds(0, 0);
+                                                        evaluationTime = new Date(candleCloseTime.getTime() - 20 * 1000);
+                                                      }
+                                                      
+                                                      // Extract RSI and EMA from multiple possible locations
+                                                      const rsiValue = entry.meta?.rsi ?? entry.meta?.rsi_value ?? entry.data?.rsi ?? entry.data?.rsi_value ?? 
+                                                                       (typeof entry.rsi === 'number' ? entry.rsi : null);
+                                                      const emaValue = entry.meta?.ema ?? entry.meta?.ema_value ?? entry.data?.ema ?? entry.data?.ema_value ?? 
+                                                                       (typeof entry.ema === 'number' ? entry.ema : null);
+                                                      const highValue = entry.meta?.high ?? entry.data?.high ?? (typeof entry.high === 'number' ? entry.high : null);
+                                                      const lowValue = entry.meta?.low ?? entry.data?.low ?? (typeof entry.low === 'number' ? entry.low : null);
+                                                      const closeValue = entry.meta?.close ?? entry.data?.close ?? (typeof entry.close === 'number' ? entry.close : null);
+                                                      
+                                                      events.push({
+                                                        time: formatTime(entryTime),
+                                                        evaluationTime: formatTime(evaluationTime),
+                                                        candle: entry.meta?.candle_time || entry.timestamp || 'N/A',
+                                                        details: {
+                                                          'Status': entry.message || 'Candle evaluated',
+                                                          'RSI': formatNumericForSearch(rsiValue),
+                                                          'EMA': formatNumericForSearch(emaValue, '₹'),
+                                                          'High': formatNumericForSearch(highValue, '₹'),
+                                                          'Low': formatNumericForSearch(lowValue, '₹'),
+                                                          'Close': formatNumericForSearch(closeValue, '₹'),
+                                                          'Result': entry.message || 'No signal'
+                                                        },
+                                                        status: entry.type || 'evaluated'
+                                                      });
+                                                    }
+                                                  }
+                                                });
+                                                break;
+                                              case 'SIGNAL_IGNORED':
+                                                // Also check history for any signal_ignored entries that might not be in signalsIgnored array
+                                                // This ensures we capture all evaluations, even if they weren't properly categorized
+                                                const allHistoryIgnored = history.filter((entry: any) => 
+                                                  entry.type === 'signal_ignored' || 
+                                                  entry.message?.toLowerCase().includes('ignored') ||
+                                                  entry.category === 'signal_ignored' ||
+                                                  (entry.message && (
+                                                    entry.message.includes('LOW') && entry.message.includes('EMA') ||
+                                                    entry.message.includes('RSI') && entry.message.includes('70')
+                                                  ))
+                                                );
+                                                
+                                                // Combine signalsIgnored with history entries to ensure we don't miss any
+                                                const allIgnoredEntries = new Map();
+                                                
+                                                // First, add entries from signalsIgnored
+                                                (signalsIgnored || []).forEach((entry: any) => {
+                                                  const key = entry.timestamp || entry.meta?.candle_time || entry.meta?.candleTime;
+                                                  if (key) allIgnoredEntries.set(key, entry);
+                                                });
+                                                
+                                                // Then, add entries from history that aren't already in the map
+                                                allHistoryIgnored.forEach((entry: any) => {
+                                                  const key = entry.timestamp || entry.meta?.candle_time || entry.meta?.candleTime;
+                                                  if (key && !allIgnoredEntries.has(key)) {
+                                                    allIgnoredEntries.set(key, entry);
+                                                  }
+                                                });
+                                                
+                                                // First, add current in-progress candle if we have data
+                                                const getCurrentCandleForIgnored = () => {
+                                                  const nowDate = new Date(now);
+                                                  const minutes = nowDate.getMinutes();
+                                                  
+                                                  // Round down to nearest 5-minute interval (e.g., 11:46 -> 11:45)
+                                                  const candleStartMinutes = Math.floor(minutes / 5) * 5;
+                                                  const candleStart = new Date(nowDate);
+                                                  candleStart.setMinutes(candleStartMinutes, 0, 0);
+                                                  
+                                                  // Candle close is 5 minutes after start (e.g., 11:45 -> 11:50)
+                                                  const candleClose = new Date(candleStart);
+                                                  candleClose.setMinutes(candleStartMinutes + 5, 0, 0);
+                                                  
+                                                  // Evaluation time is 20 seconds before candle close
+                                                  const evaluationTime = new Date(candleClose.getTime() - 20 * 1000);
+                                                  
+                                                  return {
+                                                    candleStart,
+                                                    candleClose,
+                                                    evaluationTime,
+                                                    candleTimeStr: `${String(candleStart.getHours()).padStart(2, '0')}:${String(candleStartMinutes).padStart(2, '0')}`
+                                                  };
+                                                };
+                                                
+                                                const currentCandleIgnored = getCurrentCandleForIgnored();
+                                                const insightsIgnored = state.strategyInsights || {};
+                                                
+                                                // Get the most recent RSI, EMA, High, Low, Close values
+                                                let currentRsiIgnored = insightsIgnored.rsi14 ?? null;
+                                                let currentEmaIgnored = insightsIgnored.ema5 ?? null;
+                                                let currentLtpIgnored = state.currentLtp ?? insightsIgnored.currentLtp ?? null;
+                                                let currentHighIgnored = insightsIgnored.currentCandleHigh ?? null;
+                                                let currentLowIgnored = insightsIgnored.currentCandleLow ?? null;
+                                                
+                                                // Look for the most recent history entry with RSI/EMA/High/Low values
+                                                if (history && history.length > 0) {
+                                                  const sortedHistoryIgnored = [...history].sort((a: any, b: any) => {
+                                                    const timeA = parseTime(a.timestamp) || new Date(0);
+                                                    const timeB = parseTime(b.timestamp) || new Date(0);
+                                                    return timeB.getTime() - timeA.getTime();
+                                                  });
+                                                  
+                                                  for (const entry of sortedHistoryIgnored) {
+                                                    const entryTime = entry.timestamp ? parseTime(entry.timestamp) : null;
+                                                    if (entryTime && entryTime <= now) {
+                                                      const entryRsi = entry.meta?.rsi ?? entry.meta?.rsi14 ?? null;
+                                                      const entryEma = entry.meta?.ema ?? entry.meta?.ema5 ?? null;
+                                                      const entryHigh = entry.meta?.high ?? null;
+                                                      const entryLow = entry.meta?.low ?? null;
+                                                      const entryClose = entry.meta?.close ?? entry.meta?.currentLtp ?? null;
+                                                      
+                                                      if (entryRsi !== null && entryRsi !== undefined && typeof entryRsi === 'number') currentRsiIgnored = entryRsi;
+                                                      if (entryEma !== null && entryEma !== undefined && typeof entryEma === 'number') currentEmaIgnored = entryEma;
+                                                      if (entryHigh !== null && entryHigh !== undefined && typeof entryHigh === 'number') currentHighIgnored = entryHigh;
+                                                      if (entryLow !== null && entryLow !== undefined && typeof entryLow === 'number') currentLowIgnored = entryLow;
+                                                      if (entryClose !== null && entryClose !== undefined && typeof entryClose === 'number') currentLtpIgnored = entryClose;
+                                                      
+                                                      if ((entryRsi !== null && entryRsi !== undefined) || (entryEma !== null && entryEma !== undefined)) {
+                                                        break;
+                                                      }
+                                                    }
+                                                  }
+                                                }
+                                                
+                                                // Fallback to strategyInsights
+                                                if (currentRsiIgnored === null && insightsIgnored.rsi14 !== undefined && typeof insightsIgnored.rsi14 === 'number') currentRsiIgnored = insightsIgnored.rsi14;
+                                                if (currentEmaIgnored === null && insightsIgnored.ema5 !== undefined && typeof insightsIgnored.ema5 === 'number') currentEmaIgnored = insightsIgnored.ema5;
+                                                if (currentHighIgnored === null && insightsIgnored.currentCandleHigh !== undefined && typeof insightsIgnored.currentCandleHigh === 'number') currentHighIgnored = insightsIgnored.currentCandleHigh;
+                                                if (currentLowIgnored === null && insightsIgnored.currentCandleLow !== undefined && typeof insightsIgnored.currentCandleLow === 'number') currentLowIgnored = insightsIgnored.currentCandleLow;
+                                                
+                                                // Use currentLtp as fallback for High/Low
+                                                if (currentHighIgnored === null) currentHighIgnored = currentLtpIgnored;
+                                                if (currentLowIgnored === null) currentLowIgnored = currentLtpIgnored;
+                                                
+                                                // Check if there's already a completed evaluation for the current candle in history
+                                                // This helps us decide whether to show the in-progress version or the completed one
+                                                let hasCompletedEvaluationForCurrentCandle = false;
+                                                history.forEach((entry: any) => {
+                                                  const entryTime = entry.timestamp ? parseTime(entry.timestamp) : null;
+                                                  if (!entryTime || entryTime > now) return;
+                                                  
+                                                  // Extract candle time from entry
+                                                  const entryCandleTimeStr = entry.meta?.candle_time || entry.meta?.candleTime || entry.timestamp;
+                                                  let entryCandleTimeOnly = '';
+                                                  if (entryCandleTimeStr) {
+                                                    const parsed = parseTime(entryCandleTimeStr);
+                                                    if (parsed && !isNaN(parsed.getTime())) {
+                                                      entryCandleTimeOnly = `${String(parsed.getHours()).padStart(2, '0')}:${String(parsed.getMinutes()).padStart(2, '0')}`;
+                                                    } else if (entryCandleTimeStr.match(/^\d{2}:\d{2}/)) {
+                                                      entryCandleTimeOnly = entryCandleTimeStr.substring(0, 5);
+                                                    }
+                                                  }
+                                                  
+                                                  // If we couldn't extract from meta, calculate from entryTime
+                                                  if (!entryCandleTimeOnly) {
+                                                    const entryDate = new Date(entryTime);
+                                                    const minutes = entryDate.getMinutes();
+                                                    const roundedMinutes = Math.floor(minutes / 5) * 5;
+                                                    entryCandleTimeOnly = `${String(entryDate.getHours()).padStart(2, '0')}:${String(roundedMinutes).padStart(2, '0')}`;
+                                                  }
+                                                  
+                                                  // Check if this entry is for the current candle and is a completed evaluation
+                                                  const isSignalEval = entry.type === 'signal_ignored' || 
+                                                    entry.type === 'signal_identified' ||
+                                                    entry.message?.toLowerCase().includes('signal') ||
+                                                    entry.message?.toLowerCase().includes('ignored');
+                                                  
+                                                  if (entryCandleTimeOnly === currentCandleIgnored.candleTimeStr && isSignalEval) {
+                                                    hasCompletedEvaluationForCurrentCandle = true;
+                                                  }
+                                                });
+                                                
+                                                // Only show in-progress candle if evaluation hasn't happened yet AND there's no completed evaluation
+                                                const evaluationHasHappenedIgnored = now >= currentCandleIgnored.evaluationTime;
+                                                // Don't show in-progress if we have a completed evaluation
+                                                // Keep showing "Waiting for evaluation" for up to 2 minutes after evaluation time to allow for processing
+                                                const secondsPastEvaluation = (now.getTime() - currentCandleIgnored.evaluationTime.getTime()) / 1000;
+                                                const shouldShowInProgress = !hasCompletedEvaluationForCurrentCandle && secondsPastEvaluation < 120;
+                                                
+                                                // Debug logging
+                                                if (hasCompletedEvaluationForCurrentCandle) {
+                                                  console.log(`Found completed evaluation for current candle ${currentCandleIgnored.candleTimeStr}, hiding in-progress row`);
+                                                } else if (secondsPastEvaluation >= 120) {
+                                                  console.log(`Evaluation time passed ${secondsPastEvaluation.toFixed(0)}s ago for ${currentCandleIgnored.candleTimeStr}, but no completed evaluation found yet`);
+                                                }
+                                                
+                                                if (shouldShowInProgress && (currentRsiIgnored !== null || currentEmaIgnored !== null || currentLtpIgnored !== null)) {
+                                                  const secondsUntilEvaluationIgnored = Math.max(0, Math.floor((currentCandleIgnored.evaluationTime.getTime() - now.getTime()) / 1000));
+                                                  
+                                                  const formatNumericForIgnored = (val: any, prefix: string = ''): string => {
+                                                    if (val === null || val === undefined || (typeof val !== 'number' && isNaN(Number(val)))) {
+                                                      return 'N/A';
+                                                    }
+                                                    const numVal = typeof val === 'number' ? val : Number(val);
+                                                    return prefix ? `${prefix}${numVal.toFixed(2)}` : numVal.toFixed(2);
+                                                  };
+                                                  
+                                                  events.push({
+                                                    time: formatTime(now),
+                                                    evaluationTime: formatTime(currentCandleIgnored.evaluationTime),
+                                                    candle: currentCandleIgnored.candleTimeStr,
+                                                    details: {
+                                                      'Reason': `Waiting for evaluation (${secondsUntilEvaluationIgnored}s)`,
+                                                      'RSI': formatNumericForIgnored(currentRsiIgnored),
+                                                      'EMA': formatNumericForIgnored(currentEmaIgnored, '₹'),
+                                                      'High': formatNumericForIgnored(currentHighIgnored, '₹'),
+                                                      'Low': formatNumericForIgnored(currentLowIgnored, '₹'),
+                                                      'Close': formatNumericForIgnored(currentLtpIgnored, '₹')
+                                                    },
+                                                    status: 'in_progress',
+                                                    isCurrent: true
+                                                  });
+                                                }
+                                                
+                                                // Build a comprehensive map of all signal evaluations by candle time (HH:MM format)
+                                                // This ensures we capture all evaluations, not just those in signalsIgnored
+                                                const allEvaluationsByCandle = new Map<string, any>();
+                                                
+                                                // First, add entries from signalsIgnored (already categorized)
+                                                (signalsIgnored || []).forEach((entry: any) => {
+                                                  const entryTime = entry.timestamp ? parseTime(entry.timestamp) : null;
+                                                  if (!entryTime || entryTime > now) return;
+                                                  
+                                                  // Extract candle time in HH:MM format
+                                                  const entryCandleTimeStr = entry.meta?.candle_time || entry.meta?.candleTime || entry.timestamp;
+                                                  let candleKey = '';
+                                                  
+                                                  if (entryCandleTimeStr) {
+                                                    const parsed = parseTime(entryCandleTimeStr);
+                                                    if (parsed && !isNaN(parsed.getTime())) {
+                                                      candleKey = `${String(parsed.getHours()).padStart(2, '0')}:${String(parsed.getMinutes()).padStart(2, '0')}`;
+                                                    } else if (entryCandleTimeStr.match(/^\d{2}:\d{2}/)) {
+                                                      candleKey = entryCandleTimeStr.substring(0, 5);
+                                                    }
+                                                  }
+                                                  
+                                                  // If we couldn't extract from meta, calculate from entryTime
+                                                  if (!candleKey && entryTime) {
+                                                    const entryDate = new Date(entryTime);
+                                                    const minutes = entryDate.getMinutes();
+                                                    const roundedMinutes = Math.floor(minutes / 5) * 5;
+                                                    candleKey = `${String(entryDate.getHours()).padStart(2, '0')}:${String(roundedMinutes).padStart(2, '0')}`;
+                                                  }
+                                                  
+                                                  if (candleKey) {
+                                                    allEvaluationsByCandle.set(candleKey, entry);
+                                                  }
+                                                });
+                                                
+                                                // Now scan ALL history entries for any signal evaluations we might have missed
+                                                // This is more comprehensive than relying solely on categorizedHistory
+                                                history.forEach((entry: any) => {
+                                                  const entryTime = entry.timestamp ? parseTime(entry.timestamp) : null;
+                                                  if (!entryTime || entryTime > now) return;
+                                                  
+                                                  // Check if this is a signal evaluation entry (broader check including category and message)
+                                                  // Note: HistoryEntry uses 'category' field, not 'type'
+                                                  const entryCategory = (entry.category || '').toLowerCase();
+                                                  const entryMessage = (entry.message || '').toLowerCase();
+                                                  
+                                                  // Exclude non-evaluation entries like "Building historical data", "Monitoring", etc.
+                                                  const isNonEvaluationEntry = 
+                                                    entryMessage.includes('building') ||
+                                                    entryMessage.includes('historical data') ||
+                                                    entryMessage.includes('monitoring started') ||
+                                                    entryMessage.includes('initializing') ||
+                                                    entryMessage.includes('starting') ||
+                                                    (!entryCategory && !entryMessage.includes('signal') && !entryMessage.includes('ignored'));
+                                                  
+                                                  if (isNonEvaluationEntry) {
+                                                    return; // Skip non-evaluation entries
+                                                  }
+                                                  
+                                                  const isSignalEval = 
+                                                    entryCategory === 'signal_ignored' ||
+                                                    entryCategory === 'signal_identified' ||
+                                                    (entryMessage && (
+                                                      entryMessage.includes('signal') ||
+                                                      entryMessage.includes('ignored') ||
+                                                      entryMessage.includes('evaluation') ||
+                                                      (entry.message && entry.message.includes('LOW') && entry.message.includes('EMA')) ||
+                                                      (entry.message && entry.message.includes('RSI') && (entry.message.includes('70') || entry.message.includes('> 70')))
+                                                    ));
+                                                  
+                                                  // For SIGNAL_IGNORED state, we only want ignored signals
+                                                  const isIgnoredSignal = 
+                                                    entryCategory === 'signal_ignored' ||
+                                                    entryMessage.includes('ignored');
+                                                  
+                                                  if (isSignalEval && isIgnoredSignal) {
+                                                    // Extract candle time in HH:MM format
+                                                    const entryCandleTimeStr = entry.meta?.candle_time || entry.meta?.candleTime || entry.timestamp;
+                                                    let candleKey = '';
+                                                    
+                                                    if (entryCandleTimeStr) {
+                                                      const parsed = parseTime(entryCandleTimeStr);
+                                                      if (parsed && !isNaN(parsed.getTime())) {
+                                                        candleKey = `${String(parsed.getHours()).padStart(2, '0')}:${String(parsed.getMinutes()).padStart(2, '0')}`;
+                                                      } else if (entryCandleTimeStr.match(/^\d{2}:\d{2}/)) {
+                                                        candleKey = entryCandleTimeStr.substring(0, 5);
+                                                      }
+                                                    }
+                                                    
+                                                    // If we couldn't extract from meta, calculate from entryTime
+                                                    if (!candleKey) {
+                                                      const entryDate = new Date(entryTime);
+                                                      const minutes = entryDate.getMinutes();
+                                                      const roundedMinutes = Math.floor(minutes / 5) * 5;
+                                                      candleKey = `${String(entryDate.getHours()).padStart(2, '0')}:${String(roundedMinutes).padStart(2, '0')}`;
+                                                    }
+                                                    
+                                                    // Add if we don't already have an entry for this candle
+                                                    // Prefer entries with more complete data (meta with rsi/ema)
+                                                    if (candleKey) {
+                                                      const existing = allEvaluationsByCandle.get(candleKey);
+                                                      if (!existing) {
+                                                        allEvaluationsByCandle.set(candleKey, entry);
+                                                      } else {
+                                                        // If existing entry has less data, replace it
+                                                        const existingHasData = existing.meta?.rsi !== undefined || existing.meta?.ema !== undefined;
+                                                        const newHasData = entry.meta?.rsi !== undefined || entry.meta?.ema !== undefined;
+                                                        if (newHasData && !existingHasData) {
+                                                          allEvaluationsByCandle.set(candleKey, entry);
+                                                        }
+                                                      }
+                                                    }
+                                                  }
+                                                });
+                                                
+                                                // Convert map to array
+                                                const allIgnoredSignals = Array.from(allEvaluationsByCandle.values());
+                                                
+                                                // Debug: Log what we found
+                                                console.log(`SIGNAL_IGNORED: Found ${allIgnoredSignals.length} evaluations from ${history.length} history entries`);
+                                                if (allIgnoredSignals.length === 0 && history.length > 0) {
+                                                  // Log why entries might not be matching
+                                                  const sampleEntries = history.slice(-3);
+                                                  console.log('Sample history entries (why not matching):', sampleEntries.map((e: any) => ({
+                                                    timestamp: e.timestamp,
+                                                    category: e.category,
+                                                    message: e.message?.substring(0, 100),
+                                                    meta: e.meta ? Object.keys(e.meta) : []
+                                                  })));
+                                                }
+                                                
+                                                // Debug: Log what we found vs what we expect
+                                                const expectedCandles = [];
+                                                const nowDate = new Date(now);
+                                                const startOfDay = new Date(nowDate);
+                                                startOfDay.setHours(9, 15, 0, 0);
+                                                
+                                                // Generate expected candle times from 9:15 to current
+                                                let expectedCandleTime = new Date(startOfDay);
+                                                while (expectedCandleTime <= now) {
+                                                  const hours = expectedCandleTime.getHours();
+                                                  const minutes = expectedCandleTime.getMinutes();
+                                                  expectedCandles.push(`${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`);
+                                                  expectedCandleTime.setMinutes(expectedCandleTime.getMinutes() + 5);
+                                                }
+                                                
+                                                const foundCandles = Array.from(allEvaluationsByCandle.keys()).sort();
+                                                const missingCandles = expectedCandles.filter(c => !foundCandles.includes(c));
+                                                
+                                                if (missingCandles.length > 0) {
+                                                  console.warn('Missing candle evaluations:', missingCandles);
+                                                  console.log('Total history entries:', history.length);
+                                                  console.log('Total found evaluations:', allIgnoredSignals.length);
+                                                  
+                                                  // Debug: Check if missing candles exist in history but weren't picked up
+                                                  missingCandles.forEach(missingCandle => {
+                                                    const entriesForCandle = history.filter((entry: any) => {
+                                                      const entryTime = entry.timestamp ? parseTime(entry.timestamp) : null;
+                                                      if (!entryTime) return false;
+                                                      
+                                                      // Calculate candle time from entry
+                                                      const entryDate = new Date(entryTime);
+                                                      const minutes = entryDate.getMinutes();
+                                                      const roundedMinutes = Math.floor(minutes / 5) * 5;
+                                                      const candleKey = `${String(entryDate.getHours()).padStart(2, '0')}:${String(roundedMinutes).padStart(2, '0')}`;
+                                                      
+                                                      return candleKey === missingCandle;
+                                                    });
+                                                    
+                                                    if (entriesForCandle.length > 0) {
+                                                      console.warn(`Found ${entriesForCandle.length} history entry/entries for missing candle ${missingCandle}:`, entriesForCandle.map((e: any) => ({
+                                                        timestamp: e.timestamp,
+                                                        category: e.category,
+                                                        type: e.type,
+                                                        message: e.message?.substring(0, 100)
+                                                      })));
+                                                    }
+                                                  });
+                                                }
+                                                
+                                                // Get current candle time string to filter out duplicates
+                                                const currentCandleTimeStr = currentCandleIgnored.candleTimeStr;
+                                                
+                                                allIgnoredSignals.forEach((entry: any) => {
+                                                  const entryTime = entry.timestamp ? parseTime(entry.timestamp) : null;
+                                                  if (!entryTime || entryTime > now) return;
+                                                  
+                                                  // Extract candle time from entry
+                                                  const entryCandleTimeStr = entry.meta?.candle_time || entry.meta?.candleTime || entry.timestamp;
+                                                  // Parse to get just the time part (HH:MM)
+                                                  let entryCandleTimeOnly = '';
+                                                  if (entryCandleTimeStr) {
+                                                    const parsed = parseTime(entryCandleTimeStr);
+                                                    if (parsed && !isNaN(parsed.getTime())) {
+                                                      entryCandleTimeOnly = `${String(parsed.getHours()).padStart(2, '0')}:${String(parsed.getMinutes()).padStart(2, '0')}`;
+                                                    } else if (entryCandleTimeStr.match(/^\d{2}:\d{2}/)) {
+                                                      entryCandleTimeOnly = entryCandleTimeStr.substring(0, 5);
+                                                    }
+                                                  }
+                                                  
+                                                  // If we couldn't extract candle time from meta, calculate from entryTime
+                                                  if (!entryCandleTimeOnly) {
+                                                    const entryDate = new Date(entryTime);
+                                                    const minutes = entryDate.getMinutes();
+                                                    const roundedMinutes = Math.floor(minutes / 5) * 5;
+                                                    entryCandleTimeOnly = `${String(entryDate.getHours()).padStart(2, '0')}:${String(roundedMinutes).padStart(2, '0')}`;
+                                                  }
+                                                  
+                                                  // Only skip if this is the current candle AND we're still showing it as in-progress
+                                                  // If evaluation has completed, we want to show the completed entry instead of the in-progress one
+                                                  const isCurrentCandle = entryCandleTimeOnly === currentCandleTimeStr;
+                                                  
+                                                  // Always show completed evaluations - never skip them
+                                                  // The in-progress row will be automatically hidden if hasCompletedEvaluationForCurrentCandle is true
+                                                  
+                                                  // Calculate evaluation time (20 seconds before candle close)
+                                                  // Try multiple sources for candle time
+                                                  const candleTimeStr = entry.meta?.candle_time || entry.meta?.candleTime || entry.timestamp;
+                                                  let evaluationTime: Date | null = null;
+                                                  
+                                                  if (candleTimeStr) {
+                                                    const candleTime = parseTime(candleTimeStr);
+                                                    if (candleTime && !isNaN(candleTime.getTime())) {
+                                                      // For 5-minute candles, the candle time is the start time
+                                                      // Close time is 5 minutes after start
+                                                      const candleCloseTime = new Date(candleTime);
+                                                      // Add 5 minutes to get close time
+                                                      candleCloseTime.setMinutes(candleCloseTime.getMinutes() + 5);
+                                                      candleCloseTime.setSeconds(0, 0);
+                                                      // Evaluation happens 20 seconds before candle close
+                                                      evaluationTime = new Date(candleCloseTime.getTime() - 20 * 1000);
+                                                    }
+                                                  }
+                                                  
+                                                  // Fallback: if we can't parse candle time, calculate from entryTime
+                                                  if (!evaluationTime || isNaN(evaluationTime.getTime())) {
+                                                    // Round entryTime down to nearest 5-minute interval, add 5 min, subtract 20 sec
+                                                    const entryDate = new Date(entryTime);
+                                                    const minutes = entryDate.getMinutes();
+                                                    const roundedMinutes = Math.floor(minutes / 5) * 5;
+                                                    const candleCloseTime = new Date(entryDate);
+                                                    candleCloseTime.setMinutes(roundedMinutes + 5, 0, 0);
+                                                    evaluationTime = new Date(candleCloseTime.getTime() - 20 * 1000);
+                                                  }
+                                                  
+                                                  // Extract RSI and EMA from meta (HistoryEntry uses meta, not data)
+                                                  const meta = entry.meta || {};
+                                                  const rsiValue = meta.rsi ?? meta.rsi_value ?? meta.rsiValue ?? null;
+                                                  const emaValue = meta.ema ?? meta.ema_value ?? meta.emaValue ?? null;
+                                                  const highValue = meta.high ?? meta.signal_high ?? meta.signalHigh ?? null;
+                                                  const lowValue = meta.low ?? meta.signal_low ?? meta.signalLow ?? null;
+                                                  const closeValue = meta.close ?? meta.currentClose ?? null;
+                                                  
+                                                  // Helper to format numeric values (handles 0 correctly)
+                                                  const formatNumeric = (val: any, prefix: string = ''): string => {
+                                                    if (val === null || val === undefined || (typeof val !== 'number' && isNaN(Number(val)))) {
+                                                      return 'N/A';
+                                                    }
+                                                    const numVal = typeof val === 'number' ? val : Number(val);
+                                                    return prefix ? `${prefix}${numVal.toFixed(2)}` : numVal.toFixed(2);
+                                                  };
+                                                  
+                                                  // Extract reason from message or meta
+                                                  const reason = entry.message || meta.reason || 'RSI or EMA condition not met';
+                                                  
+                                                  events.push({
+                                                    time: formatTime(entryTime),
+                                                    evaluationTime: formatTime(evaluationTime),
+                                                    candle: entryCandleTimeOnly || meta.candle_time || meta.candleTime || entry.timestamp || 'N/A',
+                                                    details: {
+                                                      'Reason': reason,
+                                                      'RSI': formatNumeric(rsiValue),
+                                                      'EMA': formatNumeric(emaValue, '₹'),
+                                                      'High': formatNumeric(highValue, '₹'),
+                                                      'Low': formatNumeric(lowValue, '₹'),
+                                                      'Close': formatNumeric(closeValue, '₹')
+                                                    },
+                                                    status: 'ignored'
+                                                  });
+                                                });
+                                                break;
+                                              case 'SIGNAL_ACTIVE':
+                                                history.forEach((entry: any) => {
+                                                  if (entry.type === 'signal_identified' || entry.message?.toLowerCase().includes('signal identified')) {
+                                                    const entryTime = parseTime(entry.timestamp);
+                                                    if (entryTime && entryTime <= now) {
+                                                      // Calculate evaluation time (20 seconds before candle close)
+                                                      const candleTime = parseTime(entry.meta?.candle_time || entry.timestamp);
+                                                      let evaluationTime = entryTime;
+                                                      if (candleTime) {
+                                                        const candleCloseTime = new Date(candleTime);
+                                                        candleCloseTime.setSeconds(0, 0);
+                                                        evaluationTime = new Date(candleCloseTime.getTime() - 20 * 1000);
+                                                      }
+                                                      events.push({
+                                                        time: formatTime(entryTime),
+                                                        evaluationTime: formatTime(evaluationTime),
+                                                        candle: entry.meta?.candle_time || entry.timestamp || 'N/A',
+                                                        details: {
+                                                          'Signal Type': 'PE',
+                                                          'Signal High': entry.meta?.signal_high ? `₹${entry.meta.signal_high.toFixed(2)}` : 'N/A',
+                                                          'Signal Low': entry.meta?.signal_low ? `₹${entry.meta.signal_low.toFixed(2)}` : 'N/A',
+                                                          'EMA(5)': entry.meta?.ema ? `₹${entry.meta.ema.toFixed(2)}` : 'N/A',
+                                                          'RSI(14)': entry.meta?.rsi?.toFixed(2) || 'N/A',
+                                                          'Status': 'Waiting for entry: candle.close < signal.low'
+                                                        },
+                                                        status: 'active'
+                                                      });
+                                                    }
+                                                  }
+                                                });
+                                                break;
+                                              case 'TRADE_EXECUTED':
+                                              case 'EXIT_CONDITION_EVALUATION':
+                                                history.forEach((entry: any) => {
+                                                  if (entry.type === 'entry' || entry.message?.toLowerCase().includes('entry') || entry.message?.toLowerCase().includes('order')) {
+                                                    const entryTime = parseTime(entry.timestamp);
+                                                    if (entryTime && entryTime <= now) {
+                                                      // Calculate evaluation time (20 seconds before candle close)
+                                                      const candleTime = parseTime(entry.meta?.candle_time || entry.timestamp);
+                                                      let evaluationTime = entryTime;
+                                                      if (candleTime) {
+                                                        const candleCloseTime = new Date(candleTime);
+                                                        candleCloseTime.setSeconds(0, 0);
+                                                        evaluationTime = new Date(candleCloseTime.getTime() - 20 * 1000);
+                                                      }
+                                                      events.push({
+                                                        time: formatTime(entryTime),
+                                                        evaluationTime: formatTime(evaluationTime),
+                                                        candle: entry.meta?.candle_time || entry.timestamp || 'N/A',
+                                                        details: {
+                                                          'Order ID': entry.meta?.order_id || 'N/A',
+                                                          'Symbol': entry.meta?.option_symbol || entry.meta?.tradingsymbol || 'N/A',
+                                                          'Entry Price': entry.meta?.entry_price ? `₹${entry.meta.entry_price.toFixed(2)}` : 'N/A',
+                                                          'Quantity': entry.meta?.quantity || entry.meta?.total_quantity || 'N/A',
+                                                          'Status': 'Position Open'
+                                                        },
+                                                        status: 'executed'
+                                                      });
+                                                    }
+                                                  }
+                                                });
+                                                break;
+                                              case 'EXIT_EXECUTING':
+                                              case 'TRADE_COMPLETE':
+                                                history.forEach((entry: any) => {
+                                                  if (entry.type === 'exit' || entry.message?.toLowerCase().includes('exit')) {
+                                                    const entryTime = parseTime(entry.timestamp);
+                                                    if (entryTime && entryTime <= now) {
+                                                      // Calculate evaluation time (20 seconds before candle close)
+                                                      const candleTime = parseTime(entry.meta?.candle_time || entry.timestamp);
+                                                      let evaluationTime = entryTime;
+                                                      if (candleTime) {
+                                                        const candleCloseTime = new Date(candleTime);
+                                                        candleCloseTime.setSeconds(0, 0);
+                                                        evaluationTime = new Date(candleCloseTime.getTime() - 20 * 1000);
+                                                      }
+                                                      events.push({
+                                                        time: formatTime(entryTime),
+                                                        evaluationTime: formatTime(evaluationTime),
+                                                        candle: entry.meta?.candle_time || entry.timestamp || 'N/A',
+                                                        details: {
+                                                          'Exit Reason': entry.meta?.exit_reason || entry.message || 'Market Close',
+                                                          'Exit Price': entry.meta?.exit_price ? `₹${entry.meta.exit_price.toFixed(2)}` : 'N/A',
+                                                          'Entry Price': entry.meta?.entry_price ? `₹${entry.meta.entry_price.toFixed(2)}` : 'N/A',
+                                                          'P&L': entry.meta?.pnl ? `₹${entry.meta.pnl.toFixed(2)}` : 'N/A',
+                                                          'Status': currentStateId === 'EXIT_EXECUTING' ? 'Closing...' : 'Completed'
+                                                        },
+                                                        status: 'exit'
+                                                      });
+                                                    }
+                                                  }
+                                                });
+                                                break;
+                                            }
+                                          }
+
+                                          // Sort by candle time: in-progress at topmost, then latest candles at top, oldest at bottom
+                                          events.sort((a, b) => {
+                                            // Current in-progress items always go to topmost
+                                            if (a.isCurrent && !b.isCurrent) return -1;
+                                            if (!a.isCurrent && b.isCurrent) return 1;
+                                            
+                                            // For non-current items, sort by candle time (latest first, oldest last)
+                                            // Try to parse candle time from event.candle, event.details, or event.time
+                                            const getCandleTime = (event: any): Date => {
+                                              // Helper to parse time-only format like "12:20" or "09:15"
+                                              const parseTimeOnly = (timeStr: string): Date | null => {
+                                                if (!timeStr || timeStr === 'N/A') return null;
+                                                // Check if it's time-only format (HH:MM)
+                                                const timeMatch = timeStr.match(/^(\d{1,2}):(\d{2})/);
+                                                if (timeMatch) {
+                                                  const hours = parseInt(timeMatch[1], 10);
+                                                  const minutes = parseInt(timeMatch[2], 10);
+                                                  if (hours >= 0 && hours < 24 && minutes >= 0 && minutes < 60) {
+                                                    const today = new Date();
+                                                    return new Date(today.getFullYear(), today.getMonth(), today.getDate(), hours, minutes, 0, 0);
+                                                  }
+                                                }
+                                                return null;
+                                              };
+                                              
+                                              // Try to parse from candle field first (e.g., "11:45" or "2025-11-25T11:45:00+05:30")
+                                              if (event.candle && event.candle !== 'N/A') {
+                                                // First try time-only format
+                                                const timeOnly = parseTimeOnly(event.candle);
+                                                if (timeOnly) return timeOnly;
+                                                
+                                                // Then try full date format
+                                                const candleTime = parseTime(event.candle);
+                                                if (candleTime && !isNaN(candleTime.getTime())) return candleTime;
+                                              }
+                                              
+                                              // Try to extract from evaluationTime which contains the candle time info
+                                              if (event.evaluationTime && event.evaluationTime !== 'N/A') {
+                                                const evalTime = parseTime(event.evaluationTime);
+                                                if (evalTime && !isNaN(evalTime.getTime())) {
+                                                  // Evaluation time is 20 seconds before candle close, so add 20 seconds to get close time
+                                                  // Then subtract 5 minutes to get candle start time
+                                                  const candleClose = new Date(evalTime.getTime() + 20 * 1000);
+                                                  const candleStart = new Date(candleClose.getTime() - 5 * 60 * 1000);
+                                                  return candleStart;
+                                                }
+                                              }
+                                              
+                                              // Fallback to event.time
+                                              const timeParsed = parseTime(event.time);
+                                              if (timeParsed && !isNaN(timeParsed.getTime())) return timeParsed;
+                                              
+                                              return new Date(0);
+                                            };
+                                            
+                                            const candleTimeA = getCandleTime(a);
+                                            const candleTimeB = getCandleTime(b);
+                                            
+                                            // Sort by candle time descending (latest first, oldest last)
+                                            return candleTimeB.getTime() - candleTimeA.getTime();
+                                          });
+
+                                          return events;
+                                        };
+
+                                        const stateEvents = getStateEventTable();
+                                        const tableHeaders = currentStateId === 'SEARCHING_SIGNAL' 
+                                          ? ['Evaluation Time', 'Candle', 'RSI', 'EMA', 'High', 'Low', 'Close', 'Result']
+                                          : currentStateId === 'SIGNAL_IGNORED'
+                                          ? ['Evaluation Time', 'Candle', 'Reason', 'RSI', 'EMA', 'High', 'Low', 'Close']
+                                          : currentStateId === 'SIGNAL_ACTIVE'
+                                          ? ['Evaluation Time', 'Candle', 'Signal High', 'Signal Low', 'EMA(5)', 'RSI(14)', 'Close', 'Status']
+                                          : currentStateId === 'TRADE_EXECUTED' || currentStateId === 'EXIT_CONDITION_EVALUATION'
+                                          ? ['Entry Time', 'Candle', 'Order ID', 'Symbol', 'Entry Price', 'Quantity', 'Status']
+                                          : ['Exit Time', 'Candle', 'Exit Reason', 'Exit Price', 'Entry Price', 'P&L', 'Status'];
+
+                                        // Create a key based on deployment history length and last update to force re-render
+                                        const historyLength = deployment?.state?.history?.length || 0;
+                                        const lastUpdate = deployment?.state?.lastCheck || deployment?.lastRunAt || '';
+                                        const tableKey = `${currentStateId}-${historyLength}-${lastUpdate}`;
+
+                                        // Refresh handler for the table
+                                        const handleRefreshTable = async () => {
+                                          setTableRefreshing(true);
+                                          try {
+                                            if (isReplayMode) {
+                                              // For replay mode, refresh replay data
+                                              if (replayDate && selectedStrategy && currentReplayTime) {
+                                                await fetchReplayData(replayDate, selectedStrategy, currentReplayTime);
+                                              }
+                                            } else {
+                                              // For live mode, refresh deployment status
+                                              await fetchDeploymentStatus();
+                                            }
+                                            // Force update currentTime to trigger re-render and recalculate current candle
+                                            setCurrentTime(new Date());
+                                            // Small delay to ensure state updates propagate
+                                            await new Promise(resolve => setTimeout(resolve, 100));
+                                          } catch (error) {
+                                            console.error('Error refreshing table:', error);
+                                          } finally {
+                                            setTableRefreshing(false);
+                                          }
+                                        };
+
+                                        return (
+                                          <div className="mt-3" key={tableKey}>
+                                            <div className="d-flex justify-content-between align-items-center mb-2">
+                                              <h6 className="mb-0">
+                                                <i className="bi bi-table me-2"></i>
+                                                {currentStateId === 'SEARCHING_SIGNAL' 
+                                                  ? 'Candle Evaluations (20 seconds before close)'
+                                                  : currentStateId === 'SIGNAL_IGNORED'
+                                                  ? 'Ignored Signals'
+                                                  : currentStateId === 'SIGNAL_ACTIVE'
+                                                  ? 'Active Signal Details'
+                                                  : currentStateId === 'TRADE_EXECUTED'
+                                                  ? 'Executed Trades'
+                                                  : currentStateId === 'EXIT_CONDITION_EVALUATION'
+                                                  ? 'Exit Condition Monitoring'
+                                                  : 'Exit Events'}
+                                              </h6>
+                                              <button
+                                                className="btn btn-sm btn-outline-primary"
+                                                onClick={handleRefreshTable}
+                                                disabled={tableRefreshing}
+                                                title="Refresh table data"
+                                              >
+                                                {tableRefreshing ? (
+                                                  <>
+                                                    <span className="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>
+                                                    Refreshing...
+                                                  </>
+                                                ) : (
+                                                  <>
+                                                    <i className="bi bi-arrow-clockwise me-1"></i>
+                                                    Refresh
+                                                  </>
+                                                )}
+                                              </button>
+                                            </div>
+                                            {stateEvents.length === 0 ? (
+                                              <div className="alert alert-secondary mb-0">
+                                                <i className="bi bi-info-circle me-2"></i>
+                                                No events recorded yet for this state. Table will update every 5 minutes (20 seconds before candle close).
+                                              </div>
+                                            ) : (
+                                              <div 
+                                                ref={stateEventTableRef}
+                                                className="table-responsive" 
+                                                style={{ maxHeight: '400px', overflowY: 'auto' }}
+                                              >
+                                                <table className="table table-sm table-hover table-bordered align-middle">
+                                                  <thead className="table-light sticky-top">
+                                                    <tr>
+                                                      {tableHeaders.map((header, idx) => (
+                                                        <th key={idx} style={{ fontSize: '0.85rem' }}>{header}</th>
+                                                      ))}
+                                                    </tr>
+                                                  </thead>
+                                                  <tbody>
+                                                    {stateEvents.map((event, idx) => {
+                                                      const isInProgress = event.isCurrent || event.status === 'in_progress' || 
+                                                        Object.values(event.details).some(val => String(val).includes('Waiting for evaluation'));
+                                                      
+                                                      // Extract Low and EMA values from details to check if Low > EMA
+                                                      const details = event.details || {};
+                                                      const lowStr = details['Low'] || details['Signal Low'] || '';
+                                                      const emaStr = details['EMA'] || details['EMA(5)'] || '';
+                                                      
+                                                      // Parse numeric values (remove ₹ and commas, handle N/A)
+                                                      const parseNumeric = (str: string): number | null => {
+                                                        if (!str || str === 'N/A' || str.includes('N/A')) return null;
+                                                        const cleaned = str.replace(/[₹,\s]/g, '');
+                                                        const num = parseFloat(cleaned);
+                                                        return isNaN(num) ? null : num;
+                                                      };
+                                                      
+                                                      const lowValue = parseNumeric(lowStr);
+                                                      const emaValue = parseNumeric(emaStr);
+                                                      const lowGreaterThanEMA = lowValue !== null && emaValue !== null && lowValue > emaValue;
+                                                      
+                                                      return (
+                                                        <tr 
+                                                          key={idx}
+                                                          style={{
+                                                            backgroundColor: isInProgress 
+                                                              ? '#fff3cd' // Light yellow/orange background for in-progress
+                                                              : lowGreaterThanEMA
+                                                              ? '#d1e7dd' // Light green background for Low > EMA
+                                                              : idx === 0 
+                                                              ? `${currentState.color}08` 
+                                                              : 'white',
+                                                            borderLeft: isInProgress 
+                                                              ? '4px solid #ffc107' 
+                                                              : lowGreaterThanEMA
+                                                              ? '4px solid #198754' // Green border for Low > EMA
+                                                              : 'none',
+                                                            fontWeight: isInProgress ? '600' : (lowGreaterThanEMA ? '500' : 'normal')
+                                                          }}
+                                                          className={isInProgress ? 'table-warning' : (lowGreaterThanEMA ? 'table-success' : '')}
+                                                        >
+                                                          <td>
+                                                            {isInProgress ? (
+                                                              <span className="badge bg-warning text-dark">
+                                                                <i className="bi bi-hourglass-split me-1"></i>
+                                                                {event.evaluationTime || event.time}
+                                                              </span>
+                                                            ) : (
+                                                              <span className="badge bg-info">{event.evaluationTime || event.time}</span>
+                                                            )}
+                                                          </td>
+                                                          <td className="small">{event.candle || 'N/A'}</td>
+                                                          {Object.values(event.details).slice(0, tableHeaders.length - 2).map((value, detailIdx) => (
+                                                            <td key={detailIdx} className="small">
+                                                              {String(value).includes('Waiting for evaluation') ? (
+                                                                <span className="badge bg-warning text-dark">
+                                                                  <i className="bi bi-clock-history me-1"></i>
+                                                                  {String(value)}
+                                                                </span>
+                                                              ) : (
+                                                                String(value)
+                                                              )}
+                                                            </td>
+                                                          ))}
+                                                        </tr>
+                                                      );
+                                                    })}
+                                                  </tbody>
+                                                </table>
+                                                {/* Scroll Down Button */}
+                                                <div className="position-relative">
+                                                  <button
+                                                    className="btn btn-sm btn-outline-secondary position-absolute"
+                                                    style={{
+                                                      bottom: '10px',
+                                                      right: '10px',
+                                                      zIndex: 10,
+                                                      borderRadius: '50%',
+                                                      width: '40px',
+                                                      height: '40px',
+                                                      display: 'flex',
+                                                      alignItems: 'center',
+                                                      justifyContent: 'center',
+                                                      boxShadow: '0 2px 4px rgba(0,0,0,0.2)'
+                                                    }}
+                                                    onClick={() => {
+                                                      if (stateEventTableRef.current) {
+                                                        stateEventTableRef.current.scrollTop = stateEventTableRef.current.scrollHeight;
+                                                      }
+                                                    }}
+                                                    title="Scroll down to see older entries"
+                                                  >
+                                                    <i className="bi bi-arrow-down"></i>
+                                                  </button>
+                                                </div>
+                                              </div>
+                                            )}
+                                            <div className="mt-2 small text-muted d-flex justify-content-between align-items-center">
+                                              <span>
+                                                <i className="bi bi-info-circle me-1"></i>
+                                                Showing {stateEvents.length} event(s). Missing candles indicate evaluations not yet logged by backend.
+                                              </span>
+                                              <span className="text-primary">
+                                                <i className="bi bi-arrow-up me-1"></i>
+                                                Latest entries at top
+                                              </span>
+                                            </div>
+                                          </div>
+                                        );
+                                      })()}
+
+                                      {/* Real-time indicator */}
+                                      <div className="mt-3 text-center">
+                                        <span className="badge bg-success">
+                                          <i className="bi bi-circle-fill me-1" style={{ fontSize: '0.5rem' }}></i>
+                                          Live Updates Active
+                                        </span>
+                                        <small className="text-muted ms-2">
+                                          Last updated: {new Date().toLocaleTimeString()}
+                                        </small>
+                                      </div>
+                                    </div>
+                                  </div>
+                                );
+                              })()}
+                            </div>
+                          );
+                        })()}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* State Transitions Visualization for Replay Mode */}
+                  {isReplayMode && (
+                    <div className="card mb-4">
+                      <div className="card-header bg-info text-white">
+                        <h6 className="mb-0">
+                          <i className="bi bi-diagram-3-fill me-2"></i>
+                          State Transitions Visualization - Strategy Logic Flow
+                        </h6>
+                      </div>
+                      <div className="card-body">
+                        {(() => {
+                          // Collect all events and sort by time
+                          const events: Array<{
+                            time: string;
+                            timestamp: Date;
+                            eventType: string;
+                            eventName: string;
+                            description: string;
+                            details: Record<string, any>;
+                            color: string;
+                            icon: string;
+                          }> = [];
+
+                          // Event type definitions
+                          const eventDefs: Record<string, { name: string; color: string; icon: string }> = {
+                            monitoring: { name: 'Monitoring Started', color: '#6c757d', icon: 'bi-eye' },
+                            signal_identified: { name: 'PE Signal Identified', color: '#0d6efd', icon: 'bi-bullseye' },
+                            signal_reset: { name: 'Signal Reset', color: '#ffc107', icon: 'bi-arrow-repeat' },
+                            signal_ignored: { name: 'Signal Ignored', color: '#dc3545', icon: 'bi-x-circle' },
+                            signal_cleared: { name: 'Signal Cleared', color: '#dc3545', icon: 'bi-x-circle' },
+                            entry: { name: 'Trade Entry', color: '#198754', icon: 'bi-play-circle' },
+                            exit: { name: 'Trade Exit', color: '#6f42c1', icon: 'bi-stop-circle' },
+                            stop_loss: { name: 'Stop Loss Hit', color: '#dc3545', icon: 'bi-exclamation-triangle' },
+                            target: { name: 'Target Hit', color: '#198754', icon: 'bi-check-circle' },
+                            market_close: { name: 'Market Close', color: '#6c757d', icon: 'bi-clock' }
+                          };
+
+                          // Parse time string to Date
+                          const parseTime = (timeStr: string): Date | null => {
+                            if (!timeStr) return null;
+                            try {
+                              if (timeStr.includes('T') || timeStr.includes('Z') || timeStr.includes('+')) {
+                                return new Date(timeStr);
+                              }
+                              if (replayDate && timeStr.includes(':')) {
+                                return new Date(`${replayDate}T${timeStr}`);
+                              }
+                              if (timeStr.match(/^\d{2}:\d{2}/)) {
+                                return new Date(`${replayDate}T${timeStr}`);
+                              }
+                              return new Date(timeStr);
+                            } catch {
+                              return null;
+                            }
+                          };
+
+                          // Format time for display
+                          const formatTime = (date: Date | null): string => {
+                            if (!date || isNaN(date.getTime())) return 'N/A';
+                            return date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+                          };
+
+                          // Event 1: Monitoring Start
+                          if (replayDate) {
+                            events.push({
+                              time: '09:15:00',
+                              timestamp: parseTime(`${replayDate}T09:15:00`) || new Date(),
+                              eventType: 'monitoring',
+                              eventName: eventDefs.monitoring.name,
+                              description: 'Strategy deployment started - Monitoring market for signals',
+                              details: {
+                                condition: 'Waiting for: LOW > EMA(5) AND RSI > 70',
+                                evaluation: 'Every 5-minute candle, 20 seconds before close'
+                              },
+                              color: eventDefs.monitoring.color,
+                              icon: eventDefs.monitoring.icon
+                            });
+                          }
+
+                          // Events: Ignored Signals
+                          if (replayIgnoredSignals && replayIgnoredSignals.length > 0) {
+                            replayIgnoredSignals.forEach((sig: any) => {
+                              const sigTime = sig.timestamp || sig.candle_time || sig.data?.timestamp;
+                              const timestamp = parseTime(sigTime);
+                              if (timestamp) {
+                                const reason = sig.reason || sig.data?.reason || sig.message || 'RSI or EMA condition not met';
+                                events.push({
+                                  time: formatTime(timestamp),
+                                  timestamp,
+                                  eventType: 'signal_ignored',
+                                  eventName: eventDefs.signal_ignored.name,
+                                  description: `Signal evaluation - Ignored: ${reason}`,
+                                  details: {
+                                    reason: reason,
+                                    rsi: sig.data?.rsi?.toFixed(2) || sig.rsi_value?.toFixed(2) || 'N/A',
+                                    ema: sig.data?.ema?.toFixed(2) || sig.ema_value?.toFixed(2) || 'N/A',
+                                    candle_high: sig.data?.high?.toFixed(2) || sig.signal_high?.toFixed(2) || 'N/A',
+                                    candle_low: sig.data?.low?.toFixed(2) || sig.signal_low?.toFixed(2) || 'N/A'
+                                  },
+                                  color: eventDefs.signal_ignored.color,
+                                  icon: eventDefs.signal_ignored.icon
+                                });
+                              }
+                            });
+                          }
+
+                          // Events: Identified Signals
+                          if (replaySignals && replaySignals.length > 0) {
+                            replaySignals.forEach((sig: any, idx: number) => {
+                              const sigTime = sig.timestamp || sig.candle_time || sig.data?.timestamp;
+                              const timestamp = parseTime(sigTime);
+                              if (timestamp) {
+                                const isReset = idx > 0 && replaySignals[idx - 1];
+                                const eventType = isReset ? 'signal_reset' : 'signal_identified';
+                                const eventInfo = eventDefs[eventType];
+                                const reasons = sig.reasons || sig.data?.reasons || [];
+                                const reasonText = reasons.length > 0 ? reasons.join('; ') : 'LOW > EMA(5) AND RSI > 70';
+                                
+                                events.push({
+                                  time: formatTime(timestamp),
+                                  timestamp,
+                                  eventType,
+                                  eventName: eventInfo.name,
+                                  description: `${eventInfo.name}: ${reasonText}`,
+                                  details: {
+                                    signal_type: sig.type || 'PE',
+                                    signal_high: sig.signal_high?.toFixed(2) || sig.data?.signal_high?.toFixed(2) || 'N/A',
+                                    signal_low: sig.signal_low?.toFixed(2) || sig.data?.signal_low?.toFixed(2) || 'N/A',
+                                    ema5: sig.ema_value?.toFixed(2) || sig.data?.ema?.toFixed(2) || 'N/A',
+                                    rsi14: sig.rsi_value?.toFixed(2) || sig.data?.rsi?.toFixed(2) || 'N/A',
+                                    candle_time: sig.candle_time || sig.timestamp || 'N/A',
+                                    reasons: reasons
+                                  },
+                                  color: eventInfo.color,
+                                  icon: eventInfo.icon
+                                });
+                              }
+                            });
+                          }
+
+                          // Events: Trade Entries
+                          if (replayTrades && replayTrades.length > 0) {
+                            replayTrades.forEach((trade: any) => {
+                              const tradeTime = trade.timestamp || trade.data?.timestamp || trade.data?.entry_time || trade.data?.exit_time;
+                              const timestamp = parseTime(tradeTime);
+                              if (timestamp) {
+                                const isEntry = trade.type === 'entry' || trade.data?.type === 'entry' || trade.data?.event_type === 'entry';
+                                const isExit = trade.type === 'exit' || trade.data?.type === 'exit' || trade.data?.event_type === 'exit' || trade.data?.exit_reason;
+                                
+                                if (isEntry) {
+                                  events.push({
+                                    time: formatTime(timestamp),
+                                    timestamp,
+                                    eventType: 'entry',
+                                    eventName: eventDefs.entry.name,
+                                    description: 'Trade entry executed: Candle.close < Signal.low',
+                                    details: {
+                                      entry_price: trade.data?.entry_price?.toFixed(2) || 'N/A',
+                                      option_symbol: trade.data?.option_symbol || trade.data?.tradingsymbol || 'N/A',
+                                      quantity: trade.data?.quantity || trade.data?.total_quantity || 'N/A',
+                                      lot_size: trade.data?.lot_size || 'N/A',
+                                      lot_count: trade.data?.lot_count || 'N/A',
+                                      stop_loss: trade.data?.stop_loss?.toFixed(2) || 'N/A',
+                                      target: trade.data?.target?.toFixed(2) || 'N/A'
+                                    },
+                                    color: eventDefs.entry.color,
+                                    icon: eventDefs.entry.icon
+                                  });
+                                } else if (isExit) {
+                                  const exitReason = trade.data?.exit_reason || trade.data?.exit_type || 'Exit';
+                                  let eventType = 'exit';
+                                  
+                                  if (exitReason.toLowerCase().includes('stop') || exitReason.toLowerCase().includes('stop_loss')) {
+                                    eventType = 'stop_loss';
+                                  } else if (exitReason.toLowerCase().includes('target') || exitReason.toLowerCase().includes('profit')) {
+                                    eventType = 'target';
+                                  } else if (exitReason.toLowerCase().includes('market') || exitReason.toLowerCase().includes('15:15') || exitReason.toLowerCase().includes('close')) {
+                                    eventType = 'market_close';
+                                  }
+                                  
+                                  const eventInfo = eventDefs[eventType];
+                                  events.push({
+                                    time: formatTime(timestamp),
+                                    timestamp,
+                                    eventType,
+                                    eventName: eventInfo.name,
+                                    description: `Trade exit: ${exitReason}`,
+                                    details: {
+                                      exit_reason: exitReason,
+                                      exit_price: trade.data?.exit_price?.toFixed(2) || 'N/A',
+                                      entry_price: trade.data?.entry_price?.toFixed(2) || 'N/A',
+                                      pnl: trade.data?.pnl?.toFixed(2) || 'N/A',
+                                      pnl_percent: trade.data?.pnl_percent?.toFixed(2) || 'N/A',
+                                      option_symbol: trade.data?.option_symbol || trade.data?.tradingsymbol || 'N/A'
+                                    },
+                                    color: eventInfo.color,
+                                    icon: eventInfo.icon
+                                  });
+                                }
+                              }
+                            });
+                          }
+
+                          // Events: History entries (signal cleared, etc.)
+                          if (replayHistory && replayHistory.length > 0) {
+                            replayHistory.forEach((entry: any) => {
+                              const entryTime = entry.timestamp || entry.data?.timestamp;
+                              const timestamp = parseTime(entryTime);
+                              if (timestamp) {
+                                const entryType = entry.type || entry.data?.type || '';
+                                if (entryType.includes('cleared') || entry.message?.toLowerCase().includes('cleared')) {
+                                  events.push({
+                                    time: formatTime(timestamp),
+                                    timestamp,
+                                    eventType: 'signal_cleared',
+                                    eventName: eventDefs.signal_cleared.name,
+                                    description: 'Signal cleared: Criteria no longer met',
+                                    details: {
+                                      reason: entry.message || entry.data?.message || 'LOW < EMA(5) OR RSI ≤ 70',
+                                      rsi: entry.data?.rsi?.toFixed(2) || 'N/A',
+                                      ema: entry.data?.ema?.toFixed(2) || 'N/A'
+                                    },
+                                    color: eventDefs.signal_cleared.color,
+                                    icon: eventDefs.signal_cleared.icon
+                                  });
+                                }
+                              }
+                            });
+                          }
+
+                          // Sort events by timestamp
+                          events.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+
+                          // Get current replay time
+                          const currentReplayTimestamp = parseTime(`${replayDate}T${currentReplayTime}`);
+
+                          return (
+                            <div>
+                              <div className="table-responsive">
+                                <table className="table table-hover table-sm align-middle">
+                                  <thead className="table-light">
+                                    <tr>
+                                      <th style={{ width: '10%' }}>Time</th>
+                                      <th style={{ width: '8%' }}>Event</th>
+                                      <th style={{ width: '20%' }}>Event Type</th>
+                                      <th style={{ width: '25%' }}>Description</th>
+                                      <th style={{ width: '37%' }}>Event Details</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {events.length === 0 ? (
+                                      <tr>
+                                        <td colSpan={5} className="text-center text-muted py-4">
+                                          <i className="bi bi-info-circle me-2"></i>
+                                          No events recorded yet. Start replay to see event timeline.
+                                        </td>
+                                      </tr>
+                                    ) : (
+                                      events.map((event, idx) => {
+                                        const isCurrent = currentReplayTimestamp && 
+                                          event.timestamp <= currentReplayTimestamp &&
+                                          (idx === events.length - 1 || 
+                                           (events[idx + 1] && events[idx + 1].timestamp > currentReplayTimestamp));
+                                        
+                                        return (
+                                          <tr
+                                            key={idx}
+                                            style={{
+                                              backgroundColor: isCurrent ? `${event.color}15` : 'transparent',
+                                              borderLeft: isCurrent ? `4px solid ${event.color}` : 'none',
+                                              fontWeight: isCurrent ? 'bold' : 'normal'
+                                            }}
+                                          >
+                                            <td>
+                                              <span className="badge bg-secondary">{event.time}</span>
+                                            </td>
+                                            <td className="text-center">
+                                              <i className={`bi ${event.icon}`} style={{ color: event.color, fontSize: '1.3rem' }}></i>
+                                            </td>
+                                            <td>
+                                              <span className="badge" style={{ backgroundColor: event.color, color: 'white' }}>
+                                                {event.eventName}
+                                              </span>
+                                            </td>
+                                            <td>{event.description}</td>
+                                            <td>
+                                              <div className="small">
+                                                {Object.entries(event.details).map(([key, value], detailIdx) => (
+                                                  <div key={detailIdx} className="mb-1">
+                                                    <strong>{key.replace(/_/g, ' ').replace(/\b\w/g, (l) => l.toUpperCase())}:</strong>{' '}
+                                                    <span className="text-muted">{String(value)}</span>
+                                                  </div>
+                                                ))}
+                                              </div>
+                                              {isCurrent && (
+                                                <span className="badge bg-primary ms-2">CURRENT</span>
+                                              )}
+                                            </td>
+                                          </tr>
+                                        );
+                                      })
+                                    )}
+                                  </tbody>
+                                </table>
+                              </div>
+                              
+                              {/* Rules Reference */}
+                              <div className="mt-3 p-3 border rounded bg-light">
+                                <h6 className="mb-2">
+                                  <i className="bi bi-file-text me-2"></i>
+                                  Strategy Rules Reference (mountain_signal_pe.rules)
+                                </h6>
+                                <div className="small">
+                                  <p className="mb-1"><strong>Evaluation:</strong> Every 5-minute candle, 20 seconds before close</p>
+                                  <p className="mb-1"><strong>PE Signal:</strong> Candle LOW {'>'} EMA(5) AND RSI(14) {'>'} 70</p>
+                                  <p className="mb-1"><strong>Entry:</strong> When candle.close falls below signal.low</p>
+                                  <p className="mb-0"><strong>Exit Conditions:</strong> Stop Loss (-17%), Target (+45%), Market Close (15:15), Index Stop/Target</p>
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })()}
                       </div>
                     </div>
                   )}

@@ -169,3 +169,5 @@ cp .env.example .env
 5. **Security**: All files with secrets are in `.gitignore`
 
 
+
+

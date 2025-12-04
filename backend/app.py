@@ -547,10 +547,15 @@ def compute_drawdown_metrics(trades: List[Dict[str, Any]], initial_capital: floa
 
 
 def get_option_symbol_from_components(instrument_key: str, strike: int, option_type: str, candle_date: Any) -> str:
+    """
+    Generate option symbol from components. Uses next monthly expiry instead of candle date month.
+    """
     dt_obj = ensure_datetime(candle_date)
-    year = dt_obj.year % 100
+    # Use next monthly expiry instead of the month from candle_date
+    expiry_date = get_next_monthly_expiry(dt_obj.date() if isinstance(dt_obj, datetime.datetime) else dt_obj)
+    year = expiry_date.year % 100
     month_names = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC']
-    month = month_names[dt_obj.month - 1]
+    month = month_names[expiry_date.month - 1]
     strike_int = int(strike)
     return f"{instrument_key}{year:02d}{month}{strike_int}{option_type}"
 
@@ -1931,7 +1936,22 @@ def preview_option_trade(
     spot_price = get_spot_quote(kite_client, instrument)
     atm_strike = round_to_atm_price(spot_price, strike_step)
     today_ist = datetime.datetime.now(datetime.timezone.utc).astimezone(IST)
-    expiry_date = get_next_monthly_expiry(today_ist.date())
+    today = today_ist.date()
+    
+    # Get next monthly expiry that's at least 20 days away (similar to get_option_symbols logic)
+    # This ensures we use December expiry even if November expiry hasn't passed yet
+    expiry_date = get_next_monthly_expiry(today)
+    # If the expiry is less than 20 days away, get the next one
+    if (expiry_date - today).days < 20:
+        # Move to next month
+        if expiry_date.month == 12:
+            next_year = expiry_date.year + 1
+            next_month = 1
+        else:
+            next_year = expiry_date.year
+            next_month = expiry_date.month + 1
+        expiry_date = _last_thursday(next_year, next_month)
+    
     option_symbol = compose_option_symbol(instrument, expiry_date, atm_strike, option_type)
 
     quote = execute_with_retries(
@@ -2230,19 +2250,62 @@ def _process_single_live_trade_deployment(deployment: Dict[str, Any], now: datet
                 elif isinstance(timestamp, pd.Timestamp):
                     timestamp = timestamp.to_pydatetime()
                 
+                # Validate RSI before adding to history (should be > 70 for PE signals)
+                signal_type = signal.get('type', 'PE')
+                rsi_value = signal.get('rsi_value')
+                ema_value = signal.get('ema_value')
+                signal_high = signal.get('signal_high', 0)
+                signal_low = signal.get('signal_low', 0)
+                
+                # Double-check RSI condition for PE signals
+                if signal_type == 'PE' and rsi_value is not None:
+                    if rsi_value <= 70:
+                        logging.warning(
+                            f"PE Signal from historical data has RSI ({rsi_value:.2f}) <= 70. "
+                            f"This should not have been identified. Adding as ignored signal instead."
+                        )
+                        # Add as ignored signal instead
+                        append_history_entry(
+                            f"PE Signal condition met but RSI ({rsi_value:.2f}) <= 70 (required > 70)",
+                            level='warning',
+                            category='signal_ignored',
+                            meta={
+                                'eventType': 'signal_ignored',
+                                'signalType': 'PE',
+                                'timestamp': timestamp.isoformat() if timestamp else None,
+                                'candleTime': signal.get('candle_time'),
+                                'signalHigh': signal_high,
+                                'signalLow': signal_low,
+                                'emaValue': ema_value,
+                                'rsiValue': rsi_value,
+                                'price': signal.get('price'),
+                                'reason': f'RSI ({rsi_value:.2f}) <= 70 (required > 70)',
+                            },
+                            timestamp=timestamp.isoformat() if timestamp else None,
+                        )
+                        continue  # Skip adding as identified signal
+                
+                # Validate that signal has proper values
+                if signal_high == 0 and signal_low == 0:
+                    logging.warning(
+                        f"Signal from historical data has zero high/low values. "
+                        f"Signal data: {signal}. Skipping."
+                    )
+                    continue  # Skip invalid signals
+                
                 append_history_entry(
-                    f"{signal.get('type', 'PE')} Signal: {', '.join(signal.get('reasons', []))}",
+                    f"{signal_type} Signal: {', '.join(signal.get('reasons', []))}",
                     level='info',
                     category='signal_identified',
                     meta={
                         'eventType': 'signal_identified',
-                        'signalType': signal.get('type'),
+                        'signalType': signal_type,
                         'timestamp': timestamp.isoformat() if timestamp else None,
                         'candleTime': signal.get('candle_time'),
-                        'signalHigh': signal.get('signal_high'),
-                        'signalLow': signal.get('signal_low'),
-                        'emaValue': signal.get('ema_value'),
-                        'rsiValue': signal.get('rsi_value'),
+                        'signalHigh': signal_high,
+                        'signalLow': signal_low,
+                        'emaValue': ema_value,
+                        'rsiValue': rsi_value,
                         'price': signal.get('price'),
                     },
                     timestamp=timestamp.isoformat() if timestamp else None,
@@ -2347,15 +2410,33 @@ def _process_single_live_trade_deployment(deployment: Dict[str, Any], now: datet
             elif 'waiting' in lowered:
                 status_category = 'signal_waiting'
                 status_level = 'info'
+                # For waiting signals, try to extract RSI/EMA from strategy status
+                signal_meta = {'eventType': 'signal_status'}
+                if strategy_status.get('signal_rsi') is not None:
+                    signal_meta['rsiValue'] = float(strategy_status['signal_rsi'])
+                if strategy_status.get('signal_ema') is not None:
+                    signal_meta['emaValue'] = float(strategy_status['signal_ema'])
+                if strategy_status.get('signal_candle_high') is not None:
+                    signal_meta['signalHigh'] = float(strategy_status['signal_candle_high'])
+                if strategy_status.get('signal_candle_low') is not None:
+                    signal_meta['signalLow'] = float(strategy_status['signal_candle_low'])
+                if strategy_status.get('signal_candle_time'):
+                    signal_meta['candleTime'] = strategy_status['signal_candle_time']
+                append_history_entry(
+                    signal_status,
+                    level=status_level,
+                    category=status_category,
+                    meta=signal_meta
+                )
             else:
                 status_category = 'signal_status'
                 status_level = 'info'
-            append_history_entry(
-                signal_status,
-                level=status_level,
-                category=status_category,
-                meta={'eventType': 'signal_status'}
-            )
+                append_history_entry(
+                    signal_status,
+                    level=status_level,
+                    category=status_category,
+                    meta={'eventType': 'signal_status'}
+                )
             state['lastSignalStatus'] = signal_status
         insights = {
             'signalStatus': signal_status,
@@ -6322,15 +6403,32 @@ def connect(auth=None):
                                 except:
                                     pass
                             except Exception as e:
-                                try:
-                                    logging.error(f"SocketIO: Error starting ticker: {e}", exc_info=True)
-                                except:
-                                    pass  # Don't let logging errors break connection
-                                ticker = None
-                                try:
-                                    emit('error', {'message': 'Failed to start market data feed'})
-                                except:
-                                    pass
+                                error_str = str(e).lower()
+                                # Check if it's a token expiration error
+                                if ('token' in error_str and 'expired' in error_str) or '403' in error_str or 'forbidden' in error_str:
+                                    try:
+                                        logging.warning(f"SocketIO: Cannot start ticker - token expired: {e}")
+                                    except:
+                                        pass
+                                    ticker = None
+                                    try:
+                                        emit('ticker_error', {
+                                            'message': 'Zerodha session expired. Please log in again.',
+                                            'code': 403,
+                                            'reason': 'Token expired - re-authentication required'
+                                        })
+                                    except:
+                                        pass
+                                else:
+                                    try:
+                                        logging.error(f"SocketIO: Error starting ticker: {e}", exc_info=True)
+                                    except:
+                                        pass  # Don't let logging errors break connection
+                                    ticker = None
+                                    try:
+                                        emit('error', {'message': 'Failed to start market data feed'})
+                                    except:
+                                        pass
                 finally:
                     conn.close()
         else:
@@ -6434,9 +6532,23 @@ def handle_start_ticker(data=None):
                 return
             
             # Start ticker
-            ticker = Ticker(user['app_key'], access_token_from_session, running_strategies, socketio, kite)
-            ticker.start()
-            logging.info("SocketIO: Ticker started via start_ticker event")
+            try:
+                ticker = Ticker(user['app_key'], access_token_from_session, running_strategies, socketio, kite)
+                ticker.start()
+                logging.info("SocketIO: Ticker started via start_ticker event")
+            except Exception as ticker_error:
+                error_str = str(ticker_error).lower()
+                if 'token' in error_str and 'expired' in error_str or '403' in error_str or 'forbidden' in error_str:
+                    logging.warning(f"SocketIO: Cannot start ticker - token expired: {ticker_error}")
+                    ticker = None
+                    emit('ticker_error', {
+                        'message': 'Zerodha session expired. Please log in again.',
+                        'code': 403,
+                        'reason': 'Token expired - re-authentication required'
+                    })
+                    return
+                else:
+                    raise
             emit('info', {'message': 'Market data feed started successfully'})
         except Exception as e:
             logging.error(f"SocketIO: Error starting ticker via start_ticker event: {e}", exc_info=True)
@@ -6634,10 +6746,23 @@ def api_start_ticker():
                 return jsonify({'status': 'error', 'message': 'Zerodha credentials not configured'}), 400
             
             # Start ticker
-            ticker = Ticker(user['app_key'], session['access_token'], running_strategies, socketio, kite)
-            ticker.start()
-            logging.info("Ticker started via /api/ticker/start endpoint")
-            return jsonify({'status': 'success', 'message': 'Market data feed started successfully'})
+            try:
+                ticker = Ticker(user['app_key'], session['access_token'], running_strategies, socketio, kite)
+                ticker.start()
+                logging.info("Ticker started via /api/ticker/start endpoint")
+                return jsonify({'status': 'success', 'message': 'Market data feed started successfully'})
+            except Exception as ticker_error:
+                error_str = str(ticker_error).lower()
+                if ('token' in error_str and 'expired' in error_str) or '403' in error_str or 'forbidden' in error_str:
+                    logging.warning(f"Cannot start ticker - token expired: {ticker_error}")
+                    ticker = None
+                    return jsonify({
+                        'status': 'error',
+                        'message': 'Zerodha session expired. Please log in again.',
+                        'token_expired': True
+                    }), 401
+                else:
+                    raise
         except Exception as e:
             logging.error(f"Error starting ticker via /api/ticker/start: {e}", exc_info=True)
             ticker = None

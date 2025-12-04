@@ -1,10 +1,11 @@
 import React from 'react';
+import { Navigate } from 'react-router-dom';
 import 'bootstrap/dist/css/bootstrap.min.css';
 import './App.css';
-import LandingPage from './components/LandingPage';
 
 const App: React.FC = () => {
-  return <LandingPage />;
+  // Redirect root path to login page
+  return <Navigate to="/login" replace />;
 };
 
 export default App;
