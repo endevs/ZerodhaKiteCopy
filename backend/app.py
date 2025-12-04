@@ -1488,6 +1488,10 @@ def _is_admin(user_id: Optional[int] = None, email: Optional[str] = None) -> boo
     if not user_id and not email:
         return False
     
+    # Normalize email to lowercase for case-insensitive lookup
+    if email:
+        email = email.strip().lower()
+    
     conn = get_db_connection()
     try:
         if email:
@@ -3126,7 +3130,7 @@ def index():
 def signup():
     if request.method == 'POST':
         mobile = request.form['mobile']
-        email = request.form['email']
+        email = request.form['email'].strip().lower()  # Normalize email to lowercase
         app_key = request.form['app_key']
         app_secret = request.form['app_secret']
 
@@ -3161,6 +3165,10 @@ def api_signup():
         else:
             mobile = request.form.get('mobile')
             email = request.form.get('email')
+        
+        # Normalize email to lowercase for case-insensitive lookup
+        if email:
+            email = email.strip().lower()
         
         if not all([mobile, email]):
             return jsonify({'status': 'error', 'message': 'Mobile and email are required'}), 400
@@ -3200,9 +3208,11 @@ def api_signup():
 @app.route('/verify_otp', methods=['GET', 'POST'])
 def verify_otp():
     email = request.args.get('email')
+    if email:
+        email = email.strip().lower()  # Normalize email from query params
     if request.method == 'POST':
         otp_entered = request.form['otp']
-        email = request.form['email']
+        email = request.form['email'].strip().lower()  # Normalize email to lowercase
 
         conn = get_db_connection()
         user = conn.execute('SELECT * FROM users WHERE email = ?', (email,)).fetchone()
@@ -3266,6 +3276,14 @@ def api_verify_otp():
             email = request.form.get('email')
             logging.info(f"Verify OTP request - Using form data, email: {email}, otp: {'*' * len(otp_entered) if otp_entered else 'None'}")
         
+        # Normalize and trim OTP (remove whitespace)
+        if otp_entered:
+            otp_entered = str(otp_entered).strip().upper()  # Convert to uppercase for consistency
+        
+        # Normalize email to lowercase for case-insensitive lookup
+        if email:
+            email = email.strip().lower()
+        
         if not all([otp_entered, email]):
             logging.warning("Verify OTP request - Missing OTP or email")
             return jsonify({
@@ -3279,7 +3297,15 @@ def api_verify_otp():
             }), 400
 
         conn = get_db_connection()
+        # First try exact match (case-sensitive)
         user = conn.execute('SELECT * FROM users WHERE email = ?', (email,)).fetchone()
+        # If not found, try case-insensitive lookup for existing users with capitalized emails
+        if not user:
+            user = conn.execute('SELECT * FROM users WHERE LOWER(email) = ?', (email,)).fetchone()
+            # If found with case-insensitive lookup, update email to lowercase for consistency
+            if user:
+                conn.execute('UPDATE users SET email = ? WHERE id = ?', (email, user['id']))
+                conn.commit()
 
         if not user:
             conn.close()
@@ -3353,7 +3379,7 @@ def zerodha_setup():
 @app.route("/login", methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
-        email = request.form['email']
+        email = request.form['email'].strip().lower()  # Normalize email to lowercase
         conn = get_db_connection()
         user = conn.execute('SELECT * FROM users WHERE email = ?', (email,)).fetchone()
         conn.close()
@@ -3417,6 +3443,10 @@ def api_login():
             email = request.form.get('email')
             logging.info(f"Login request - Using form data, email: {email}")
         
+        # Normalize email to lowercase for case-insensitive lookup
+        if email:
+            email = email.strip().lower()
+        
         if not email:
             logging.warning("Login request - Email is missing")
             response = jsonify({
@@ -3435,7 +3465,15 @@ def api_login():
         try:
             conn = get_db_connection()
             try:
+                # First try exact match (case-sensitive)
                 user = conn.execute('SELECT * FROM users WHERE email = ?', (email,)).fetchone()
+                # If not found, try case-insensitive lookup for existing users with capitalized emails
+                if not user:
+                    user = conn.execute('SELECT * FROM users WHERE LOWER(email) = ?', (email,)).fetchone()
+                    # If found with case-insensitive lookup, update email to lowercase for consistency
+                    if user:
+                        conn.execute('UPDATE users SET email = ? WHERE id = ?', (email, user['id']))
+                        conn.commit()
             finally:
                 conn.close()
         except SqliteOperationalError as db_err:

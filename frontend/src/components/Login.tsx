@@ -17,13 +17,16 @@ const Login: React.FC = () => {
     setLoading(true);
 
     try {
+      // Normalize email to lowercase for case-insensitive login
+      const normalizedEmail = email.trim().toLowerCase();
+      
       const response = await fetch(apiUrl('/api/login'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         credentials: 'include',
-        body: JSON.stringify({ email }),
+        body: JSON.stringify({ email: normalizedEmail }),
       });
 
       // Check Content-Type before parsing
@@ -68,13 +71,13 @@ const Login: React.FC = () => {
       if (data.status === 'success') {
         setMessage({ type: 'success', text: data.message || 'OTP sent successfully!' });
         if (data.redirect) {
-          navigate(data.redirect, { state: { email } });
+          navigate(data.redirect, { state: { email: normalizedEmail } });
         } else {
-          navigate('/verify-otp', { state: { email } }); // Fallback if no redirect is provided
+          navigate('/verify-otp', { state: { email: normalizedEmail } }); // Fallback if no redirect is provided
         }
       } else if (data.status === 'otp_required') {
         setMessage({ type: 'info', text: data.message || 'Please verify the OTP sent to your email and try again.' });
-        navigate('/verify-otp', { state: { email } });
+        navigate('/verify-otp', { state: { email: normalizedEmail } });
       } else {
         // Unknown status
         setMessage({ type: 'danger', text: data.message || 'Login failed.' });

@@ -18,13 +18,16 @@ const Signup: React.FC = () => {
     setLoading(true);
 
     try {
+      // Normalize email to lowercase for case-insensitive signup
+      const normalizedEmail = email.trim().toLowerCase();
+      
       const response = await fetch(apiUrl('/api/signup'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         credentials: 'include',
-        body: JSON.stringify({ mobile, email }),
+        body: JSON.stringify({ mobile, email: normalizedEmail }),
       });
 
       const data = await response.json();
@@ -32,7 +35,7 @@ const Signup: React.FC = () => {
       if (response.ok) {
         setMessage({ type: 'success', text: data.message || 'Signup successful! Please verify your OTP and then login.' });
         setTimeout(() => {
-          navigate('/verify-otp', { state: { email } });
+          navigate('/verify-otp', { state: { email: normalizedEmail } });
         }, 3000);
       } else {
         setMessage({ type: 'danger', text: data.message || 'Signup failed.' });
