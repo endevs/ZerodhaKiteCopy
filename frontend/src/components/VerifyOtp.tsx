@@ -37,17 +37,28 @@ const VerifyOtp: React.FC = () => {
 
     if (!email.trim()) {
       setMessage({ type: 'danger', text: 'Email is required to verify OTP.' });
+      setLoading(false);
+      return;
+    }
+
+    if (!otp || !otp.trim()) {
+      setMessage({ type: 'danger', text: 'OTP is required. Please enter the 6-digit code.' });
+      setLoading(false);
       return;
     }
 
     try {
+      // Normalize email to lowercase for case-insensitive verification
+      const normalizedEmail = email.trim().toLowerCase();
+      const trimmedOtp = otp.trim();
+      
       const response = await fetch(apiUrl('/api/verify_otp'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         credentials: 'include',
-        body: JSON.stringify({ email, otp }),
+        body: JSON.stringify({ email: normalizedEmail, otp: trimmedOtp }),
       });
 
       const data = await response.json();
