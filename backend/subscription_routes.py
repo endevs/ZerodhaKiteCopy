@@ -33,3 +33,4 @@ def register_subscription_routes(app):
             return jsonify({'status': 'error', 'message': 'Failed to activate free trial'}), 500
 
 
+

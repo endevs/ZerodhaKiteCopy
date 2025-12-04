@@ -728,7 +728,18 @@ const LiveTradeContent: React.FC = () => {
         throw new Error(data.message || 'Failed to fetch live trade status');
       }
       // Log for debugging
-      console.log('Fetched deployment status - History entries:', data.deployment?.state?.history?.length || 0);
+      const historyCount = data.deployment?.state?.history?.length || 0;
+      console.log('Fetched deployment status - History entries:', historyCount);
+      if (historyCount > 0) {
+        // Log first few entries to see what we're getting
+        const recentEntries = data.deployment.state.history.slice(-5);
+        console.log('Recent history entries:', recentEntries.map((e: any) => ({
+          timestamp: e.timestamp,
+          category: e.category,
+          message: e.message?.substring(0, 80),
+          hasMeta: !!e.meta
+        })));
+      }
       setDeployment(data.deployment ?? null);
     } catch (err) {
       console.error(err);
@@ -3114,7 +3125,17 @@ const LiveTradeContent: React.FC = () => {
                                                 
                                                 // Only show in-progress candle if evaluation hasn't happened yet AND there's no completed evaluation
                                                 const evaluationHasHappenedIgnored = now >= currentCandleIgnored.evaluationTime;
-                                                const shouldShowInProgress = !evaluationHasHappenedIgnored && !hasCompletedEvaluationForCurrentCandle;
+                                                // Don't show in-progress if we have a completed evaluation
+                                                // Keep showing "Waiting for evaluation" for up to 2 minutes after evaluation time to allow for processing
+                                                const secondsPastEvaluation = (now.getTime() - currentCandleIgnored.evaluationTime.getTime()) / 1000;
+                                                const shouldShowInProgress = !hasCompletedEvaluationForCurrentCandle && secondsPastEvaluation < 120;
+                                                
+                                                // Debug logging
+                                                if (hasCompletedEvaluationForCurrentCandle) {
+                                                  console.log(`Found completed evaluation for current candle ${currentCandleIgnored.candleTimeStr}, hiding in-progress row`);
+                                                } else if (secondsPastEvaluation >= 120) {
+                                                  console.log(`Evaluation time passed ${secondsPastEvaluation.toFixed(0)}s ago for ${currentCandleIgnored.candleTimeStr}, but no completed evaluation found yet`);
+                                                }
                                                 
                                                 if (shouldShowInProgress && (currentRsiIgnored !== null || currentEmaIgnored !== null || currentLtpIgnored !== null)) {
                                                   const secondsUntilEvaluationIgnored = Math.max(0, Math.floor((currentCandleIgnored.evaluationTime.getTime() - now.getTime()) / 1000));
@@ -3190,6 +3211,19 @@ const LiveTradeContent: React.FC = () => {
                                                   const entryCategory = (entry.category || '').toLowerCase();
                                                   const entryMessage = (entry.message || '').toLowerCase();
                                                   
+                                                  // Exclude non-evaluation entries like "Building historical data", "Monitoring", etc.
+                                                  const isNonEvaluationEntry = 
+                                                    entryMessage.includes('building') ||
+                                                    entryMessage.includes('historical data') ||
+                                                    entryMessage.includes('monitoring started') ||
+                                                    entryMessage.includes('initializing') ||
+                                                    entryMessage.includes('starting') ||
+                                                    (!entryCategory && !entryMessage.includes('signal') && !entryMessage.includes('ignored'));
+                                                  
+                                                  if (isNonEvaluationEntry) {
+                                                    return; // Skip non-evaluation entries
+                                                  }
+                                                  
                                                   const isSignalEval = 
                                                     entryCategory === 'signal_ignored' ||
                                                     entryCategory === 'signal_identified' ||
@@ -3248,6 +3282,19 @@ const LiveTradeContent: React.FC = () => {
                                                 
                                                 // Convert map to array
                                                 const allIgnoredSignals = Array.from(allEvaluationsByCandle.values());
+                                                
+                                                // Debug: Log what we found
+                                                console.log(`SIGNAL_IGNORED: Found ${allIgnoredSignals.length} evaluations from ${history.length} history entries`);
+                                                if (allIgnoredSignals.length === 0 && history.length > 0) {
+                                                  // Log why entries might not be matching
+                                                  const sampleEntries = history.slice(-3);
+                                                  console.log('Sample history entries (why not matching):', sampleEntries.map((e: any) => ({
+                                                    timestamp: e.timestamp,
+                                                    category: e.category,
+                                                    message: e.message?.substring(0, 100),
+                                                    meta: e.meta ? Object.keys(e.meta) : []
+                                                  })));
+                                                }
                                                 
                                                 // Debug: Log what we found vs what we expect
                                                 const expectedCandles = [];
@@ -3326,14 +3373,12 @@ const LiveTradeContent: React.FC = () => {
                                                     entryCandleTimeOnly = `${String(entryDate.getHours()).padStart(2, '0')}:${String(roundedMinutes).padStart(2, '0')}`;
                                                   }
                                                   
-                                                  // Only skip if this is the current candle AND we're showing it as in-progress (evaluation hasn't happened yet)
+                                                  // Only skip if this is the current candle AND we're still showing it as in-progress
                                                   // If evaluation has completed, we want to show the completed entry instead of the in-progress one
                                                   const isCurrentCandle = entryCandleTimeOnly === currentCandleTimeStr;
                                                   
-                                                  // Skip only if it's the current candle AND we're showing it as in-progress (no completed evaluation exists)
-                                                  if (isCurrentCandle && !hasCompletedEvaluationForCurrentCandle && !evaluationHasHappenedIgnored) {
-                                                    return; // Skip this entry, we already have the in-progress one
-                                                  }
+                                                  // Always show completed evaluations - never skip them
+                                                  // The in-progress row will be automatically hidden if hasCompletedEvaluationForCurrentCandle is true
                                                   
                                                   // Calculate evaluation time (20 seconds before candle close)
                                                   // Try multiple sources for candle time

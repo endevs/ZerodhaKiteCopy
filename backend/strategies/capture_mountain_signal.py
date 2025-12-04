@@ -1168,16 +1168,20 @@ class CaptureMountainSignal(BaseStrategy):
                         if ema_value is not None:
                             self.status['signal_ema'] = float(ema_value)
                         
+                        # Format RSI and EMA values properly
+                        rsi_str = f"{rsi_value:.2f}" if rsi_value is not None else "N/A"
+                        ema_str = f"{ema_value:.2f}" if ema_value is not None else "N/A"
+                        
                         self.status['signal_status'] = (
                             f"PE Signal Candle Identified (from historical data): {signal_date.strftime('%H:%M')} "
                             f"(H:{latest_signal['signal_high']:.2f}, L:{latest_signal['signal_low']:.2f}, "
-                            f"RSI:{rsi_value:.2f if rsi_value else 'N/A'}, EMA:{ema_value:.2f if ema_value else 'N/A'})"
+                            f"RSI:{rsi_str}, EMA:{ema_str})"
                         )
                         
                         logging.info(
                             f"PE Signal candle set from historical data: {signal_date.strftime('%H:%M')} "
                             f"(H:{latest_signal['signal_high']:.2f}, L:{latest_signal['signal_low']:.2f}, "
-                            f"RSI:{rsi_value:.2f if rsi_value else 'N/A'}, EMA:{ema_value:.2f if ema_value else 'N/A'})"
+                            f"RSI:{rsi_str}, EMA:{ema_str})"
                         )
                         
                         # Ensure the audit trail entry includes RSI and EMA
