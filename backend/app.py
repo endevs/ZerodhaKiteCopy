@@ -3567,22 +3567,23 @@ def zerodha_login():
 
     kite.api_key = user['app_key']
     
-    # Get the callback URL - must match exactly what's configured in Zerodha developer portal
+    # Get the backend URL to determine if we're in local or production
     backend_url = _get_backend_url()
     redirect_uri = f"{backend_url}/callback"
     
-    # Generate login URL with explicit redirect_uri
-    # The redirect_uri MUST match exactly what's configured in Zerodha's app settings
-    # For production: https://drpinfotech.com/callback
-    # For local: http://localhost:8000/callback
-    try:
-        # KiteConnect.login_url() accepts redirect_uri as a parameter
-        login_url = kite.login_url(redirect_uri=redirect_uri)
-        logging.info(f"Zerodha login URL generated with redirect_uri: {redirect_uri}")
-    except Exception as e:
-        logging.error(f"Error generating Zerodha login URL: {e}")
-        frontend_url = _get_frontend_url()
-        return redirect(f"{frontend_url}/welcome?error=zerodha_login_failed")
+    # For local development (localhost), manually construct the login URL with redirect_uri
+    # For production (drpinfotech.com), use the default login_url() which uses redirect_uri from Zerodha portal
+    if 'localhost' in backend_url or '127.0.0.1' in backend_url:
+        # Local: manually construct URL with redirect_uri parameter
+        from urllib.parse import quote_plus
+        base_url = "https://kite.zerodha.com/connect/login"
+        encoded_redirect_uri = quote_plus(redirect_uri)
+        login_url = f"{base_url}?api_key={user['app_key']}&redirect_uri={encoded_redirect_uri}"
+        logging.info(f"Local Zerodha login URL generated with redirect_uri: {redirect_uri}")
+    else:
+        # Production: use default login_url() (redirect_uri must be configured in Zerodha portal as https://drpinfotech.com/callback)
+        login_url = kite.login_url()
+        logging.info(f"Production Zerodha login URL generated. Expected redirect_uri in portal: {redirect_uri}")
     
     return redirect(login_url)
 

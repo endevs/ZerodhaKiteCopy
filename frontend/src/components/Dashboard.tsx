@@ -11,6 +11,7 @@ import LiveTradeContent from './LiveTradeContent';
 import AdminContent from './AdminContent';
 import ProfileContent from './ProfileContent';
 import SubscribeContent from './SubscribeContent';
+import RiskDisclosureModal from './RiskDisclosureModal';
 import { apiUrl, SOCKET_BASE_URL } from '../config/api';
 
 const Dashboard: React.FC = () => {
@@ -25,6 +26,7 @@ const Dashboard: React.FC = () => {
   const [chartInstrumentToken, setChartInstrumentToken] = useState<string | undefined>(undefined);
   const [showLiveStrategyModal, setShowLiveStrategyModal] = useState<boolean>(false);
   const [liveStrategyId, setLiveStrategyId] = useState<string | null>(null);
+  const [showRiskDisclosure, setShowRiskDisclosure] = useState<boolean>(false);
   const socketRef = useRef<Socket | null>(null);
   const warningShownRef = useRef<boolean>(false);
 
@@ -48,6 +50,13 @@ const Dashboard: React.FC = () => {
     setLiveStrategyId(null);
   }, []);
 
+
+  const handleRiskDisclosureClose = useCallback(() => {
+    setShowRiskDisclosure(false);
+    // Mark as shown in this session (will show again after next login/new session)
+    sessionStorage.setItem('riskDisclosureShown', 'true');
+  }, []);
+
   useEffect(() => {
     const fetchUserData = async () => {
       try {
@@ -56,6 +65,16 @@ const Dashboard: React.FC = () => {
         if (response.ok) {
           setUserName(data.user_name || 'User');
           setKiteClientId(data.kite_client_id || null);
+          
+          // Show risk disclosure modal after successful login (once per session)
+          const riskDisclosureShown = sessionStorage.getItem('riskDisclosureShown');
+          if (!riskDisclosureShown) {
+            // Small delay to ensure page is fully loaded
+            setTimeout(() => {
+              setShowRiskDisclosure(true);
+            }, 1000);
+          }
+          
           const hasAccessToken = data.access_token_present || false;
           
           // Check admin status
@@ -120,9 +139,20 @@ const Dashboard: React.FC = () => {
         if (resp.ok && data.status === 'success') {
           if (typeof data.nifty === 'number') setNiftyPrice(data.nifty.toFixed(2));
           if (typeof data.banknifty === 'number') setBankNiftyPrice(data.banknifty.toFixed(2));
+        } else if (resp.status === 401) {
+          // 401 is expected if user is not logged in or Zerodha is not connected
+          // Don't log as error, just set default values
+          setNiftyPrice('Not Connected');
+          setBankNiftyPrice('Not Connected');
         }
       } catch (error) {
-        console.error('Error fetching initial market data:', error);
+        // Only log non-401 errors
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        if (!errorMessage.includes('401')) {
+          console.error('Error fetching initial market data:', error);
+        }
+        setNiftyPrice('Not Connected');
+        setBankNiftyPrice('Not Connected');
       }
     };
 
@@ -274,6 +304,9 @@ const Dashboard: React.FC = () => {
 
   const handleLogout = async () => {
     try {
+      // Clear risk disclosure flag so it shows again on next login
+      sessionStorage.removeItem('riskDisclosureShown');
+      
       const response = await fetch(apiUrl('/api/logout'), { method: 'POST', credentials: 'include' });
       if (response.ok) {
         window.location.href = '/login';
@@ -343,6 +376,10 @@ const Dashboard: React.FC = () => {
           onClose={handleCloseLiveStrategyModal}
         />
       )}
+      <RiskDisclosureModal
+        show={showRiskDisclosure}
+        onClose={handleRiskDisclosureClose}
+      />
     </Layout>
   );
 };
