@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { apiUrl } from '../config/api';
 import { Link, useNavigate } from 'react-router-dom';
 import LoaderOverlay from './LoaderOverlay';
@@ -9,7 +9,34 @@ const Login: React.FC = () => {
   const [email, setEmail] = useState<string>('');
   const [message, setMessage] = useState<{ type: string; text: string } | null>(null);
   const [loading, setLoading] = useState(false);
+  const [checkingAuth, setCheckingAuth] = useState(true);
   const navigate = useNavigate();
+
+  // Check if user is already authenticated and redirect to dashboard
+  useEffect(() => {
+    const checkAuthentication = async () => {
+      try {
+        const response = await fetch(apiUrl('/api/user-data'), {
+          credentials: 'include',
+        });
+        
+        if (response.ok) {
+          const data = await response.json();
+          const isAuthenticated = data.authenticated === true || (data.user_id !== undefined && data.user_id !== null);
+          if (isAuthenticated) {
+            navigate('/dashboard', { replace: true });
+            return;
+          }
+        }
+      } catch (error) {
+        console.error('Error checking authentication:', error);
+      } finally {
+        setCheckingAuth(false);
+      }
+    };
+
+    checkAuthentication();
+  }, [navigate]);
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -90,6 +117,21 @@ const Login: React.FC = () => {
       setLoading(false);
     }
   };
+
+  // Show loading while checking authentication
+  if (checkingAuth) {
+    return (
+      <div className="auth-page">
+        <div className="d-flex justify-content-center align-items-center" style={{ minHeight: '100vh' }}>
+          <div className="text-center">
+            <div className="spinner-border text-primary" role="status">
+              <span className="visually-hidden">Loading...</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="auth-page">
