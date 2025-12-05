@@ -1427,6 +1427,22 @@ except Exception as e:
 
 # Helper utilities for live trade feature
 
+def _get_backend_url() -> str:
+    """
+    Get backend URL for constructing callback URLs.
+    Uses request context to determine the current backend URL.
+    
+    Returns:
+        Backend URL string (e.g., 'https://drpinfotech.com' or 'http://localhost:8000')
+    """
+    if has_request_context():
+        # Use request to get the current backend URL
+        scheme = request.scheme  # 'http' or 'https'
+        host = request.host  # 'localhost:8000' or 'drpinfotech.com'
+        return f"{scheme}://{host}"
+    # Fallback if no request context (shouldn't happen in normal flow)
+    return os.getenv('BACKEND_URL', 'http://localhost:8000')
+
 def _get_frontend_url(default: str = 'http://localhost:3000') -> str:
     """
     Get frontend URL that works in both local and production environments.
@@ -3550,7 +3566,24 @@ def zerodha_login():
         return redirect(f"{frontend_url}/welcome?credentials=missing")
 
     kite.api_key = user['app_key']
-    login_url = kite.login_url()
+    
+    # Get the callback URL - must match exactly what's configured in Zerodha developer portal
+    backend_url = _get_backend_url()
+    redirect_uri = f"{backend_url}/callback"
+    
+    # Generate login URL with explicit redirect_uri
+    # The redirect_uri MUST match exactly what's configured in Zerodha's app settings
+    # For production: https://drpinfotech.com/callback
+    # For local: http://localhost:8000/callback
+    try:
+        # KiteConnect.login_url() accepts redirect_uri as a parameter
+        login_url = kite.login_url(redirect_uri=redirect_uri)
+        logging.info(f"Zerodha login URL generated with redirect_uri: {redirect_uri}")
+    except Exception as e:
+        logging.error(f"Error generating Zerodha login URL: {e}")
+        frontend_url = _get_frontend_url()
+        return redirect(f"{frontend_url}/welcome?error=zerodha_login_failed")
+    
     return redirect(login_url)
 
 
