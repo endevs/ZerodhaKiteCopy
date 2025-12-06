@@ -41,59 +41,84 @@ const ProfileContent: React.FC<ProfileContentProps> = ({ onSubscribeClick }) => 
       setLoading(true);
       setError(null);
       
-      // Fetch user data from API (includes balance and kite_client_id)
-      const userDataResponse = await fetch(apiUrl('/api/user-data'), {
-        credentials: 'include'
-      });
-      
-      const userData = await userDataResponse.json();
-      
-      // Fetch additional user details from database (email and mobile)
-      const userDetailsResponse = await fetch(apiUrl('/api/user/profile'), {
-        credentials: 'include'
-      });
-      
-      const userDetails = await userDetailsResponse.json();
-      
-      // Fetch subscription information
-      const subscriptionResponse = await fetch(apiUrl('/api/subscription/info'), {
-        credentials: 'include'
-      });
-      
-      let subscriptionData: SubscriptionInfo | null = null;
-      if (subscriptionResponse.ok) {
-        const subData = await subscriptionResponse.json();
-        if (subData.status === 'success' && subData.subscription) {
-          subscriptionData = subData.subscription;
+      // Helper function to safely parse JSON response
+      const parseJsonResponse = async (response: Response) => {
+        const contentType = response.headers.get('content-type');
+        if (!contentType || !contentType.includes('application/json')) {
+          const text = await response.text();
+          console.error('Non-JSON response received:', text.substring(0, 200));
+          throw new Error(`Expected JSON but received ${contentType || 'unknown content type'}`);
         }
+        return await response.json();
+      };
+      
+      // Fetch user data from API (includes balance and kite_client_id)
+      let userData: any = null;
+      let userDataResponse: Response | null = null;
+      try {
+        userDataResponse = await fetch(apiUrl('/api/user-data'), {
+          credentials: 'include'
+        });
+        userData = await parseJsonResponse(userDataResponse);
+      } catch (err) {
+        console.error('Error fetching user data:', err);
+        throw new Error('Failed to fetch user data');
       }
       
-      if (userDataResponse.ok && userData.status === 'success' && 
-          userDetailsResponse.ok && userDetails.status === 'success') {
+      // Fetch additional user details from database (email and mobile)
+      let userDetails: any = null;
+      let userDetailsResponse: Response | null = null;
+      try {
+        userDetailsResponse = await fetch(apiUrl('/api/user/profile'), {
+          credentials: 'include'
+        });
+        userDetails = await parseJsonResponse(userDetailsResponse);
+      } catch (err) {
+        console.error('Error fetching user profile:', err);
+        // Continue with partial data if profile fetch fails
+        userDetails = { status: 'error', email: 'N/A', mobile: 'N/A' };
+      }
+      
+      // Fetch subscription information
+      let subscriptionData: SubscriptionInfo | null = null;
+      try {
+        const subscriptionResponse = await fetch(apiUrl('/api/subscription/status'), {
+          credentials: 'include'
+        });
+        
+        if (subscriptionResponse.ok) {
+          const subData = await parseJsonResponse(subscriptionResponse);
+          // Transform the response to match SubscriptionInfo interface
+          if (subData.status === 'success') {
+            subscriptionData = {
+              has_subscription: !subData.is_free_user,
+              plan_type: subData.plan_type || 'freemium',
+              plan_name: subData.plan_type === 'premium' ? 'Premium' : 
+                        subData.plan_type === 'super_premium' ? 'Super Premium' : 'Freemium',
+              status: 'active',
+              trial_days_remaining: 0,
+              days_remaining: 0
+            };
+          }
+        }
+      } catch (err) {
+        console.error('Error fetching subscription:', err);
+        // Continue without subscription data if fetch fails
+      }
+      
+      if (userDataResponse && userDataResponse.ok && userData.status === 'success') {
         setProfile({
           user_name: userData.user_name || 'Guest',
-          email: userDetails.email || 'N/A',
-          mobile: userDetails.mobile || 'N/A',
+          email: userDetails?.email || 'N/A',
+          mobile: userDetails?.mobile || 'N/A',
           kite_client_id: userData.kite_client_id || 'N/A',
           account_balance: userData.balance || 0
         });
         setSubscription(subscriptionData);
       } else {
-        // If one API fails, still try to show what we can
-        const errorMsg = userData.message || userDetails.message || 'Failed to load profile';
+        // If API fails, show error
+        const errorMsg = userData?.message || userDetails?.message || 'Failed to load profile';
         setError(errorMsg);
-        
-        // Set partial profile if we have some data
-        if (userDataResponse.ok && userData.status === 'success') {
-          setProfile({
-            user_name: userData.user_name || 'Guest',
-            email: userDetails.email || 'N/A',
-            mobile: userDetails.mobile || 'N/A',
-            kite_client_id: userData.kite_client_id || 'N/A',
-            account_balance: userData.balance || 0
-          });
-          setSubscription(subscriptionData);
-        }
       }
     } catch (err) {
       console.error('Error fetching profile:', err);
