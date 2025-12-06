@@ -1431,15 +1431,26 @@ def _get_backend_url() -> str:
     """
     Get backend URL for constructing callback URLs.
     Uses request context to determine the current backend URL.
+    Forces HTTPS for production domains.
     
     Returns:
         Backend URL string (e.g., 'https://drpinfotech.com' or 'http://localhost:8000')
     """
     if has_request_context():
         # Use request to get the current backend URL
-        scheme = request.scheme  # 'http' or 'https'
         host = request.host  # 'localhost:8000' or 'drpinfotech.com'
-        return f"{scheme}://{host}"
+        
+        # Force HTTPS for production domains (drpinfotech.com)
+        if 'drpinfotech.com' in host or 'localhost' not in host and '127.0.0.1' not in host:
+            # Production: always use HTTPS
+            # Remove port if present (HTTPS uses default port 443)
+            if ':' in host:
+                host = host.split(':')[0]
+            return f"https://{host}"
+        else:
+            # Local development: use request scheme
+            scheme = request.scheme  # 'http' or 'https'
+            return f"{scheme}://{host}"
     # Fallback if no request context (shouldn't happen in normal flow)
     return os.getenv('BACKEND_URL', 'http://localhost:8000')
 
@@ -3760,6 +3771,10 @@ def api_google_auth():
         # Build Google OAuth URL
         backend_url = _get_backend_url()
         redirect_uri = f"{backend_url}/api/auth/google/callback"
+        
+        # Log the redirect URI for debugging
+        logging.info(f"Google OAuth redirect_uri: {redirect_uri}")
+        logging.info(f"Backend URL: {backend_url}, Request host: {request.host if has_request_context() else 'N/A'}, Request scheme: {request.scheme if has_request_context() else 'N/A'}")
         
         params = {
             'client_id': GOOGLE_CLIENT_ID,
