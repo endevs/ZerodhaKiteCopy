@@ -3734,6 +3734,181 @@ def api_logout():
     session.pop('user_id', None)
     return jsonify({'status': 'success', 'message': 'Logged out successfully'})
 
+@app.route("/api/auth/google", methods=['GET'])
+def api_google_auth():
+    """Initiate Google OAuth login"""
+    try:
+        from urllib.parse import urlencode
+        from config import GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
+        
+        # Debug logging
+        logging.info(f"Google OAuth config check - CLIENT_ID present: {bool(GOOGLE_CLIENT_ID)}, CLIENT_SECRET present: {bool(GOOGLE_CLIENT_SECRET)}")
+        
+        if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+            error_msg = "Google OAuth is not configured. Please add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET to your .env file in the backend directory."
+            logging.error(error_msg)
+            logging.error(f"Current CLIENT_ID value: {'SET' if GOOGLE_CLIENT_ID else 'EMPTY'}, CLIENT_SECRET value: {'SET' if GOOGLE_CLIENT_SECRET else 'EMPTY'}")
+            return jsonify({
+                'status': 'error',
+                'message': error_msg
+            }), 500
+        
+        # Generate state token for CSRF protection
+        state_token = secrets.token_urlsafe(32)
+        session['google_oauth_state'] = state_token
+        
+        # Build Google OAuth URL
+        backend_url = _get_backend_url()
+        redirect_uri = f"{backend_url}/api/auth/google/callback"
+        
+        params = {
+            'client_id': GOOGLE_CLIENT_ID,
+            'redirect_uri': redirect_uri,
+            'response_type': 'code',
+            'scope': 'openid email profile',
+            'state': state_token,
+            'access_type': 'offline',
+            'prompt': 'consent'
+        }
+        
+        auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(params)}"
+        
+        return jsonify({
+            'status': 'success',
+            'auth_url': auth_url
+        })
+    except Exception as e:
+        logging.error(f"Error initiating Google OAuth: {e}")
+        return jsonify({
+            'status': 'error',
+            'message': 'Failed to initiate Google login'
+        }), 500
+
+@app.route("/api/auth/google/callback", methods=['GET'])
+def api_google_callback():
+    """Handle Google OAuth callback"""
+    try:
+        from urllib.parse import urlencode
+        from config import GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
+        
+        # Verify state token
+        state = request.args.get('state')
+        if not state or state != session.get('google_oauth_state'):
+            frontend_url = _get_frontend_url()
+            return redirect(f"{frontend_url}/login?error=invalid_state")
+        
+        # Remove state from session
+        session.pop('google_oauth_state', None)
+        
+        # Get authorization code
+        code = request.args.get('code')
+        if not code:
+            frontend_url = _get_frontend_url()
+            return redirect(f"{frontend_url}/login?error=no_code")
+        
+        # Exchange code for access token
+        backend_url = _get_backend_url()
+        token_url = "https://oauth2.googleapis.com/token"
+        token_data = {
+            'client_id': GOOGLE_CLIENT_ID,
+            'client_secret': GOOGLE_CLIENT_SECRET,
+            'code': code,
+            'grant_type': 'authorization_code',
+            'redirect_uri': f"{backend_url}/api/auth/google/callback"
+        }
+        
+        token_response = requests.post(token_url, data=token_data)
+        if token_response.status_code != 200:
+            logging.error(f"Google token exchange failed: {token_response.text}")
+            frontend_url = _get_frontend_url()
+            return redirect(f"{frontend_url}/login?error=token_exchange_failed")
+        
+        token_json = token_response.json()
+        access_token = token_json.get('access_token')
+        
+        if not access_token:
+            frontend_url = _get_frontend_url()
+            return redirect(f"{frontend_url}/login?error=no_access_token")
+        
+        # Get user info from Google
+        user_info_url = "https://www.googleapis.com/oauth2/v2/userinfo"
+        headers = {'Authorization': f'Bearer {access_token}'}
+        user_response = requests.get(user_info_url, headers=headers)
+        
+        if user_response.status_code != 200:
+            logging.error(f"Google user info fetch failed: {user_response.text}")
+            frontend_url = _get_frontend_url()
+            return redirect(f"{frontend_url}/login?error=user_info_failed")
+        
+        user_info = user_response.json()
+        google_email = user_info.get('email', '').strip().lower()
+        google_name = user_info.get('name', '')
+        google_picture = user_info.get('picture', '')
+        
+        if not google_email:
+            frontend_url = _get_frontend_url()
+            return redirect(f"{frontend_url}/login?error=no_email")
+        
+        # Check if user exists
+        conn = get_db_connection()
+        user = conn.execute('SELECT * FROM users WHERE email = ?', (google_email,)).fetchone()
+        
+        if user:
+            # Existing user - log them in
+            session['user_id'] = user['id']
+            # Update user name if available and different
+            if google_name and google_name != user.get('user_name', ''):
+                conn.execute('UPDATE users SET user_name = ? WHERE id = ?', (google_name, user['id']))
+                conn.commit()
+            conn.close()
+            
+            frontend_url = _get_frontend_url()
+            return redirect(f"{frontend_url}/dashboard")
+        else:
+            # New user - create account
+            # Generate a random mobile number placeholder (user can update later)
+            mobile = f"+91{secrets.randbelow(10000000000):010d}"
+            
+            # Check if google_picture column exists, if not, insert without it
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA table_info(users)")
+            columns = [col[1] for col in cursor.fetchall()]
+            
+            if 'google_picture' in columns:
+                conn.execute(
+                    'INSERT INTO users (mobile, email, email_verified, user_name, google_picture) VALUES (?, ?, ?, ?, ?)',
+                    (mobile, google_email, 1, google_name or '', google_picture or '')
+                )
+            else:
+                conn.execute(
+                    'INSERT INTO users (mobile, email, email_verified, user_name) VALUES (?, ?, ?, ?)',
+                    (mobile, google_email, 1, google_name or '')
+                )
+            user_id = conn.lastrowid
+            
+            # Create freemium subscription for new user
+            try:
+                from subscription_manager import create_subscription
+                create_subscription(user_id, 'freemium', trial_days=7)
+                logging.info(f"Created freemium subscription for new Google user {user_id}")
+            except Exception as sub_error:
+                logging.warning(f"Failed to create freemium subscription for Google user {user_id}: {sub_error}")
+            
+            conn.commit()
+            conn.close()
+            
+            session['user_id'] = user_id
+            
+            frontend_url = _get_frontend_url()
+            return redirect(f"{frontend_url}/dashboard")
+            
+    except Exception as e:
+        logging.error(f"Error in Google OAuth callback: {e}")
+        import traceback
+        logging.error(traceback.format_exc())
+        frontend_url = _get_frontend_url()
+        return redirect(f"{frontend_url}/login?error=oauth_failed")
+
 @app.route("/api/admin/check")
 def api_admin_check():
     """Check if current user is admin"""
