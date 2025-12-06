@@ -3903,8 +3903,17 @@ def api_google_callback():
                         else:
                             raise
                 
+                # Check if user has Zerodha credentials configured
+                has_app_key = bool(user.get('app_key'))
+                has_app_secret = bool(user.get('app_secret'))
+                
                 frontend_url = _get_frontend_url()
-                return redirect(f"{frontend_url}/dashboard")
+                if has_app_key and has_app_secret:
+                    # User has credentials, redirect to dashboard
+                    return redirect(f"{frontend_url}/dashboard")
+                else:
+                    # User needs to configure Zerodha credentials, redirect to welcome page
+                    return redirect(f"{frontend_url}/welcome")
             else:
                 # New user - create account
                 # Close the existing connection first to avoid locks
@@ -3955,8 +3964,9 @@ def api_google_callback():
                         
                         session['user_id'] = user_id
                         
+                        # New users don't have Zerodha credentials, redirect to welcome page
                         frontend_url = _get_frontend_url()
-                        return redirect(f"{frontend_url}/dashboard")
+                        return redirect(f"{frontend_url}/welcome")
                     
                     except SqliteOperationalError as db_err:
                         if conn:
