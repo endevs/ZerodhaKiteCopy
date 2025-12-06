@@ -1,15 +1,105 @@
-import React, { ReactNode } from 'react';
+import React, { ReactNode, useState } from 'react';
 import { apiUrl } from '../config/api';
 
 interface LayoutProps {
   children: ReactNode;
   navigation?: ReactNode;
+  onSubscribeClick?: () => void;
 }
 
-const Layout: React.FC<LayoutProps> = ({ children, navigation }) => {
+const Layout: React.FC<LayoutProps> = ({ children, navigation, onSubscribeClick }) => {
+  const [showSubscriptionSidebar, setShowSubscriptionSidebar] = useState(true);
+
   return (
-    <div className="min-vh-100 d-flex flex-column" style={{ backgroundColor: '#f8f9fa' }}>
+    <div className="min-vh-100 d-flex flex-column" style={{ backgroundColor: '#f8f9fa', position: 'relative' }}>
       {navigation}
+      {/* Subscription Sidebar - Left Side */}
+      {showSubscriptionSidebar && onSubscribeClick && (
+        <div
+          style={{
+            position: 'fixed',
+            left: 0,
+            top: '50%',
+            transform: 'translateY(-50%)',
+            zIndex: 1000,
+            marginLeft: '20px',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+          }}
+        >
+          <button
+            onClick={onSubscribeClick}
+            className="btn shadow-lg"
+            style={{
+              writingMode: 'vertical-rl',
+              textOrientation: 'upright',
+              padding: '20px 12px',
+              borderRadius: '10px 0 0 10px',
+              fontSize: '12px',
+              fontWeight: '600',
+              letterSpacing: '1.6px',
+              boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+              transition: 'all 0.3s ease',
+              border: 'none',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              minHeight: '96px',
+              background: 'linear-gradient(135deg, #fd7e14 0%, #e8650e 100%)',
+              color: 'white',
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.transform = 'translateX(5px)';
+              e.currentTarget.style.boxShadow = '0 6px 20px rgba(253, 126, 20, 0.4)';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.transform = 'translateX(0)';
+              e.currentTarget.style.boxShadow = '0 4px 12px rgba(0,0,0,0.15)';
+            }}
+          >
+            <i className="bi bi-star-fill" style={{ marginBottom: '6px', fontSize: '14px' }}></i>
+            <span>SUBSCRIBE</span>
+          </button>
+          <button
+            onClick={() => setShowSubscriptionSidebar(false)}
+            className="btn btn-sm btn-outline-secondary"
+            style={{
+              width: '100%',
+              borderRadius: '0 0 8px 8px',
+              fontSize: '12px',
+              padding: '6px',
+              marginTop: '2px',
+            }}
+            title="Hide subscription link"
+          >
+            <i className="bi bi-chevron-left"></i>
+          </button>
+        </div>
+      )}
+      {/* Show/Hide Toggle Button (when hidden) */}
+      {!showSubscriptionSidebar && onSubscribeClick && (
+        <button
+          onClick={() => setShowSubscriptionSidebar(true)}
+          className="btn btn-sm btn-outline-primary"
+          style={{
+            position: 'fixed',
+            left: 0,
+            top: '50%',
+            transform: 'translateY(-50%)',
+            zIndex: 1000,
+            marginLeft: '10px',
+            borderRadius: '0 8px 8px 0',
+            padding: '15px 8px',
+            writingMode: 'vertical-rl',
+            textOrientation: 'upright',
+            fontSize: '12px',
+          }}
+          title="Show subscription link"
+        >
+          <i className="bi bi-chevron-right"></i>
+        </button>
+      )}
       <main className="flex-grow-1 container-fluid py-4">
         <div className="container-xxl">
           {children}

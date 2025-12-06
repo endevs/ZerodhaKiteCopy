@@ -331,13 +331,13 @@ const Dashboard: React.FC = () => {
   const renderContent = () => {
     switch (activeTab) {
       case 'dashboard':
-        return <DashboardContent onViewLiveStrategy={handleViewLiveStrategy} />;
+        return <DashboardContent onViewLiveStrategy={handleViewLiveStrategy} onSubscribeClick={handleSubscribeClick} />;
       case 'algo-visualization':
         return <AlgoVisualizationContent />;
       case 'live-trade':
         return <LiveTradeContent />;
       case 'ai-ml':
-        return <AIMLContent />;
+        return <AIMLContent onSubscribeClick={handleSubscribeClick} />;
       case 'admin':
         return <AdminContent />;
       case 'profile':
@@ -350,20 +350,23 @@ const Dashboard: React.FC = () => {
   };
 
   return (
-    <Layout navigation={
-      <Navigation
-        activeTab={activeTab}
-        onTabChange={setActiveTab}
-        userName={userName}
-        kiteClientId={kiteClientId}
-        onLogout={handleLogout}
-        niftyPrice={niftyPrice}
-        bankNiftyPrice={bankNiftyPrice}
-        isAdmin={isAdmin}
-        onProfileClick={handleProfileClick}
-        onSubscribeClick={handleSubscribeClick}
-      />
-    }>
+    <Layout 
+      navigation={
+        <Navigation
+          activeTab={activeTab}
+          onTabChange={setActiveTab}
+          userName={userName}
+          kiteClientId={kiteClientId}
+          onLogout={handleLogout}
+          niftyPrice={niftyPrice}
+          bankNiftyPrice={bankNiftyPrice}
+          isAdmin={isAdmin}
+          onProfileClick={handleProfileClick}
+          onSubscribeClick={handleSubscribeClick}
+        />
+      }
+      onSubscribeClick={handleSubscribeClick}
+    >
       {renderContent()}
       <ChartModal
         show={showChartModal}

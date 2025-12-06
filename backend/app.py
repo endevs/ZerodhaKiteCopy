@@ -3204,6 +3204,17 @@ def api_signup():
 
         conn.execute('INSERT INTO users (mobile, email, otp, otp_expiry) VALUES (?, ?, ?, ?)',
                      (mobile, email, otp, otp_expiry))
+        user_id = conn.lastrowid
+        
+        # Create freemium subscription for new user
+        try:
+            from subscription_manager import create_subscription
+            create_subscription(user_id, 'freemium', trial_days=7)
+            logging.info(f"Created freemium subscription for new user {user_id}")
+        except Exception as sub_error:
+            logging.warning(f"Failed to create freemium subscription for user {user_id}: {sub_error}")
+            # Don't fail signup if subscription creation fails
+        
         conn.commit()
         conn.close()
 
@@ -3336,6 +3347,19 @@ def api_verify_otp():
             if not user['email_verified']:
                 # First time verification - new registration
                 conn.execute('UPDATE users SET email_verified = 1 WHERE email = ?', (email,))
+                user_id = user['id']
+                
+                # Create freemium subscription for new user if they don't have one
+                try:
+                    from subscription_manager import get_user_subscription, create_subscription
+                    existing_subscription = get_user_subscription(user_id)
+                    if not existing_subscription:
+                        create_subscription(user_id, 'freemium', trial_days=7)
+                        logging.info(f"Created freemium subscription for new user {user_id}")
+                except Exception as sub_error:
+                    logging.warning(f"Failed to create freemium subscription for user {user_id}: {sub_error}")
+                    # Don't fail verification if subscription creation fails
+                
                 conn.commit()
                 conn.close()
                 return jsonify({
@@ -3345,8 +3369,21 @@ def api_verify_otp():
                 })
             else:
                 # Already verified - login
+                user_id = user['id']
+                
+                # Ensure user has freemium subscription if they don't have any subscription
+                try:
+                    from subscription_manager import get_user_subscription, create_subscription
+                    existing_subscription = get_user_subscription(user_id)
+                    if not existing_subscription:
+                        create_subscription(user_id, 'freemium', trial_days=7)
+                        logging.info(f"Created freemium subscription for existing user {user_id}")
+                except Exception as sub_error:
+                    logging.warning(f"Failed to create freemium subscription for user {user_id}: {sub_error}")
+                    # Don't fail login if subscription creation fails
+                
                 conn.close()
-                session['user_id'] = user['id']
+                session['user_id'] = user_id
                 return jsonify({
                     'status': 'success',
                     'message': 'OTP verified successfully!',
@@ -4782,6 +4819,63 @@ def delete_strategy(strategy_id):
     finally:
         conn.close()
 
+@app.route("/api/subscription/status", methods=['GET'])
+def api_subscription_status():
+    """Get user's subscription status and plan type."""
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+    
+    try:
+        from subscription_manager import get_user_subscription_info
+        user_id = session['user_id']
+        subscription_info = get_user_subscription_info(user_id)
+        
+        # Determine if user is free user
+        is_free_user = subscription_info['plan_type'] == 'freemium' or not subscription_info.get('has_subscription', False)
+        
+        # Check if user has live deployment access
+        has_live_deployment_access = subscription_info.get('features', {}).get('live_deployment', False)
+        
+        return jsonify({
+            'status': 'success',
+            'is_free_user': is_free_user,
+            'plan_type': subscription_info['plan_type'],
+            'plan_name': subscription_info.get('plan_name', 'Freemium'),
+            'has_live_deployment_access': has_live_deployment_access,
+            'subscription_status': subscription_info.get('status', 'none')
+        })
+    except Exception as e:
+        logging.error(f"Error fetching subscription status: {e}", exc_info=True)
+        # Default to freemium on error
+        return jsonify({
+            'status': 'success',
+            'is_free_user': True,
+            'plan_type': 'freemium',
+            'plan_name': 'Freemium',
+            'has_live_deployment_access': False,
+            'subscription_status': 'none'
+        })
+
+@app.route("/api/subscription/check-deployment", methods=['GET'])
+def api_check_deployment_access():
+    """Check if user has access to live deployment feature."""
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+    
+    try:
+        from subscription_manager import check_feature_access
+        user_id = session['user_id']
+        has_access = check_feature_access(user_id, 'live_deployment')
+        
+        return jsonify({
+            'status': 'success',
+            'has_access': has_access,
+            'can_deploy': has_access
+        })
+    except Exception as e:
+        logging.error(f"Error checking deployment access: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': 'Failed to check subscription status'}), 500
+
 @app.route("/strategy/deploy/<int:strategy_id>", methods=['POST', 'OPTIONS'])
 @app.route("/api/strategy/deploy/<int:strategy_id>", methods=['POST', 'OPTIONS'])
 def deploy_strategy(strategy_id):
@@ -4794,6 +4888,21 @@ def deploy_strategy(strategy_id):
     
     if 'access_token' not in session:
         return jsonify({'status': 'error', 'message': 'Zerodha not connected. Please connect your Zerodha account first.'}), 401
+    
+    # Check subscription for live deployment
+    try:
+        from subscription_manager import check_feature_access
+        user_id = session['user_id']
+        has_access = check_feature_access(user_id, 'live_deployment')
+        if not has_access:
+            return jsonify({
+                'status': 'error',
+                'message': 'Live deployment requires a Premium or Super Premium subscription. Please subscribe to deploy strategies.',
+                'subscription_required': True
+            }), 403
+    except Exception as e:
+        logging.error(f"Error checking subscription for deployment: {e}", exc_info=True)
+        # Don't block deployment if subscription check fails, but log it
 
     conn = get_db_connection()
     strategy_data = conn.execute('SELECT * FROM strategies WHERE id = ? AND user_id = ?', (strategy_id, session['user_id'])).fetchone()
@@ -8340,6 +8449,21 @@ def api_live_trade_deploy():
         return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
     if 'access_token' not in session:
         return jsonify({'status': 'error', 'message': 'Zerodha access token missing. Please login with Zerodha first.'}), 401
+
+    # Check subscription for live deployment
+    try:
+        from subscription_manager import check_feature_access
+        user_id = session['user_id']
+        has_access = check_feature_access(user_id, 'live_deployment')
+        if not has_access:
+            return jsonify({
+                'status': 'error',
+                'message': 'Live deployment requires a Premium or Super Premium subscription. Please subscribe to deploy strategies.',
+                'subscription_required': True
+            }), 403
+    except Exception as e:
+        logging.error(f"Error checking subscription for live deployment: {e}", exc_info=True)
+        # Don't block deployment if subscription check fails, but log it
 
     data = request.get_json() or {}
     strategy_id_raw = data.get('strategy_id')

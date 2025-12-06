@@ -1,11 +1,19 @@
 import React, { useEffect, useState } from 'react';
 import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, Legend, ReferenceArea, CartesianGrid, AreaChart, Area, ScatterChart, Scatter, ZAxis } from 'recharts';
 import { apiUrl } from '../config/api';
+import SubscriptionPopupModal from './SubscriptionPopupModal';
 
-interface AIMLContentProps {}
+interface AIMLContentProps {
+  onSubscribeClick?: () => void;
+}
 
-const AIMLContent: React.FC<AIMLContentProps> = () => {
+const AIMLContent: React.FC<AIMLContentProps> = ({ onSubscribeClick }) => {
   const [activeTab, setActiveTab] = useState<string>('overview');
+  const [subscriptionStatus, setSubscriptionStatus] = useState<{
+    is_free_user: boolean;
+    plan_type: string;
+  } | null>(null);
+  const [showSubscriptionPopup, setShowSubscriptionPopup] = useState(false);
 
   const tabs = [
     { id: 'overview', label: 'Overview', icon: '📊' },
@@ -16,31 +24,118 @@ const AIMLContent: React.FC<AIMLContentProps> = () => {
     { id: 'strategy-optimization', label: 'Strategy Optimization', icon: '⚙️' },
   ];
 
+  // Fetch subscription status on mount
+  useEffect(() => {
+    const fetchSubscriptionStatus = async () => {
+      try {
+        const response = await fetch(apiUrl('/api/subscription/status'), {
+          credentials: 'include',
+        });
+        if (response.ok) {
+          const data = await response.json();
+          setSubscriptionStatus({
+            is_free_user: data.is_free_user || false,
+            plan_type: data.plan_type || 'freemium',
+          });
+        } else {
+          // Default to free user if fetch fails
+          setSubscriptionStatus({ is_free_user: true, plan_type: 'freemium' });
+        }
+      } catch (error) {
+        console.error('Error fetching subscription status:', error);
+        // Default to free user if fetch fails
+        setSubscriptionStatus({ is_free_user: true, plan_type: 'freemium' });
+      }
+    };
+    fetchSubscriptionStatus();
+  }, []);
+
+  // Note: We no longer redirect to overview - users can see all tabs but will see premium required messages
+
+  // Define tab access rules
+  const canAccessTab = (tabId: string): boolean => {
+    // While loading, only allow overview tab (most restrictive)
+    if (!subscriptionStatus) {
+      return tabId === 'overview';
+    }
+    
+    const planType = subscriptionStatus.plan_type;
+    
+    // Free users: only overview
+    if (planType === 'freemium') {
+      return tabId === 'overview';
+    }
+    
+    // Premium users: overview + predictions
+    if (planType === 'premium') {
+      return tabId === 'overview' || tabId === 'predictions';
+    }
+    
+    // Super premium users: all tabs
+    if (planType === 'super_premium') {
+      return true;
+    }
+    
+    // Default: only overview (most restrictive)
+    return tabId === 'overview';
+  };
+
+  const handleTabClick = (tabId: string) => {
+    if (canAccessTab(tabId)) {
+      setActiveTab(tabId);
+    } else {
+      // Show subscription popup for restricted tabs
+      setShowSubscriptionPopup(true);
+    }
+  };
+
+  const handleSubscriptionPopupClose = () => {
+    setShowSubscriptionPopup(false);
+  };
+
+  const handleViewPlans = () => {
+    setShowSubscriptionPopup(false);
+    if (onSubscribeClick) {
+      onSubscribeClick();
+    }
+  };
+
   return (
-    <div className="container-fluid">
-      <div className="card shadow-sm border-0 mb-4">
-        <div className="card-header bg-gradient text-white" style={{ background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)' }}>
-          <h4 className="card-title mb-0">
-            <i className="bi bi-robot me-2"></i>
-            AI / ML Trading Analytics
-          </h4>
-          <small className="text-white-50">Advanced AI-powered tools for trading insights and predictions</small>
-        </div>
-        <div className="card-body">
+    <>
+      <div className="container-fluid">
+        <div className="card shadow-sm border-0 mb-4">
+          <div className="card-header bg-gradient text-white" style={{ background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)' }}>
+            <h4 className="card-title mb-0">
+              <i className="bi bi-robot me-2"></i>
+              AI / ML Trading Analytics
+            </h4>
+            <small className="text-white-50">Advanced AI-powered tools for trading insights and predictions</small>
+          </div>
+          <div className="card-body">
           {/* Tab Navigation */}
           <ul className="nav nav-tabs mb-4" role="tablist">
-            {tabs.map((tab) => (
-              <li key={tab.id} className="nav-item" role="presentation">
-                <button
-                  className={`nav-link ${activeTab === tab.id ? 'active' : ''}`}
-                  onClick={() => setActiveTab(tab.id)}
-                  type="button"
-                >
-                  <span className="me-2">{tab.icon}</span>
-                  {tab.label}
-                </button>
-              </li>
-            ))}
+            {tabs.map((tab) => {
+              const isAccessible = canAccessTab(tab.id);
+              const isLocked = !isAccessible;
+              return (
+                <li key={tab.id} className="nav-item" role="presentation">
+                  <button
+                    className={`nav-link ${activeTab === tab.id ? 'active' : ''} ${isLocked ? 'text-muted' : ''}`}
+                    onClick={() => handleTabClick(tab.id)}
+                    type="button"
+                    disabled={isLocked && activeTab !== tab.id}
+                    title={isLocked ? `${tab.label} - Premium or Super Premium subscription required` : tab.label}
+                    style={isLocked ? { opacity: 0.7, cursor: activeTab === tab.id ? 'default' : 'not-allowed' } : {}}
+                  >
+                    <span className="me-2">{tab.icon}</span>
+                    {tab.label}
+                    {isLocked && (
+                      <i className="bi bi-lock-fill ms-2" style={{ fontSize: '0.8rem' }} title="Premium Required"></i>
+                    )}
+                  </button>
+                </li>
+              );
+            })}
           </ul>
 
           {/* Tab Content */}
@@ -160,65 +255,320 @@ const AIMLContent: React.FC<AIMLContentProps> = () => {
               </div>
             )}
 
+            {/* Reinforcement Learning Tab */}
+            {activeTab === 'reinforcement-learning' && (
+              canAccessTab('reinforcement-learning') ? (
+                <div className="alert alert-info">
+                  <h5><i className="bi bi-robot me-2"></i>Reinforcement Learning</h5>
+                  <p>Reinforcement Learning features are available in the "Train Model" tab for Super Premium subscribers.</p>
+                  <p className="mb-0">This feature uses Deep Q-Network (DQN) to optimize trading decisions based on strategy rules.</p>
+                </div>
+              ) : (
+                <div className="card border-warning shadow-sm">
+                  <div className="card-header bg-warning text-dark">
+                    <h5 className="mb-0">
+                      <i className="bi bi-lock-fill me-2"></i>
+                      Super Premium Feature - Reinforcement Learning
+                    </h5>
+                  </div>
+                  <div className="card-body">
+                    <div className="alert alert-info">
+                      <h6 className="fw-bold">
+                        <i className="bi bi-info-circle me-2"></i>
+                        What is Reinforcement Learning?
+                      </h6>
+                      <p className="mb-2">
+                        Reinforcement Learning uses Deep Q-Network (DQN) to optimize trading decisions based on strategy rules.
+                        The AI agent learns from historical data to make better entry and exit decisions.
+                      </p>
+                      <ul className="mb-0">
+                        <li>Train RL agents on historical market data</li>
+                        <li>Optimize entry and exit decisions automatically</li>
+                        <li>Evaluate performance on test and out-of-sample periods</li>
+                        <li>View detailed trade history with model reasoning</li>
+                        <li>See Q-values and model confidence scores</li>
+                      </ul>
+                    </div>
+                    <div className="alert alert-warning">
+                      <h6 className="fw-bold mb-2">
+                        <i className="bi bi-star me-2"></i>
+                        Upgrade to Super Premium to unlock:
+                      </h6>
+                      <ul className="mb-0">
+                        <li><strong>Reinforcement Learning</strong> - Train AI agents to optimize trading decisions</li>
+                        <li>Train Model - Customize and train your own ML models</li>
+                        <li>Pattern Recognition - AI-powered pattern detection</li>
+                        <li>Strategy Optimization - Genetic algorithms for parameter tuning</li>
+                        <li>All Premium features included</li>
+                      </ul>
+                    </div>
+                    <div className="text-center mt-3">
+                      <button className="btn btn-warning btn-lg px-5" onClick={() => setShowSubscriptionPopup(true)}>
+                        <i className="bi bi-star-fill me-2"></i>
+                        View Subscription Plans
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )
+            )}
+
             {/* Price Predictions Tab */}
             {activeTab === 'predictions' && (
-              <AIMLPredictions />
+              canAccessTab('predictions') ? (
+                <AIMLPredictions />
+              ) : (
+                <div className="card border-warning shadow-sm">
+                  <div className="card-header bg-warning text-dark">
+                    <h5 className="mb-0">
+                      <i className="bi bi-lock-fill me-2"></i>
+                      Premium Feature - Price Predictions
+                    </h5>
+                  </div>
+                  <div className="card-body">
+                    <div className="alert alert-info">
+                      <h6 className="fw-bold">
+                        <i className="bi bi-info-circle me-2"></i>
+                        What is Price Predictions?
+                      </h6>
+                      <p className="mb-2">
+                        Use advanced machine learning models to predict future price movements based on historical data,
+                        technical indicators, and market patterns.
+                      </p>
+                      <ul className="mb-0">
+                        <li>LSTM Neural Networks for time series forecasting</li>
+                        <li>Random Forest Models for pattern recognition</li>
+                        <li>Support Vector Machines for classification</li>
+                        <li>View predictions for specific dates</li>
+                        <li>Compare actual vs predicted prices</li>
+                      </ul>
+                    </div>
+                    <div className="alert alert-warning">
+                      <h6 className="fw-bold mb-2">
+                        <i className="bi bi-star me-2"></i>
+                        Upgrade to Premium or Super Premium to unlock:
+                      </h6>
+                      <ul className="mb-0">
+                        <li><strong>Price Predictions</strong> - ML models to predict future price movements</li>
+                        <li>All Premium features</li>
+                        <li>Super Premium includes additional AI/ML features</li>
+                      </ul>
+                    </div>
+                    <div className="text-center mt-3">
+                      <button className="btn btn-warning btn-lg px-5" onClick={() => setShowSubscriptionPopup(true)}>
+                        <i className="bi bi-star-fill me-2"></i>
+                        View Subscription Plans
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )
             )}
 
             {/* Train Model Tab */}
             {activeTab === 'sentiment' && (
-              <TrainModelPanel />
+              canAccessTab('sentiment') ? (
+                <TrainModelPanel />
+              ) : (
+                <div className="card border-warning shadow-sm">
+                  <div className="card-header bg-warning text-dark">
+                    <h5 className="mb-0">
+                      <i className="bi bi-lock-fill me-2"></i>
+                      Super Premium Feature - Train Model
+                    </h5>
+                  </div>
+                  <div className="card-body">
+                    <div className="alert alert-info">
+                      <h6 className="fw-bold">
+                        <i className="bi bi-info-circle me-2"></i>
+                        What is Train Model?
+                      </h6>
+                      <p className="mb-2">
+                        Train and customize your own machine learning models for price prediction and trading strategy optimization.
+                        Includes LSTM models and Reinforcement Learning agents.
+                      </p>
+                      <ul className="mb-0">
+                        <li>Train LSTM models on historical data</li>
+                        <li>Configure model parameters (epochs, lookback, horizon)</li>
+                        <li>Train Reinforcement Learning agents</li>
+                        <li>Evaluate models on test and out-of-sample periods</li>
+                        <li>View detailed training results and performance metrics</li>
+                      </ul>
+                    </div>
+                    <div className="alert alert-warning">
+                      <h6 className="fw-bold mb-2">
+                        <i className="bi bi-star me-2"></i>
+                        Upgrade to Super Premium to unlock:
+                      </h6>
+                      <ul className="mb-0">
+                        <li><strong>Train Model</strong> - Customize and train your own ML models</li>
+                        <li>Reinforcement Learning - Train AI agents</li>
+                        <li>Pattern Recognition - AI-powered pattern detection</li>
+                        <li>Strategy Optimization - Genetic algorithms</li>
+                        <li>All Premium features included</li>
+                      </ul>
+                    </div>
+                    <div className="text-center mt-3">
+                      <button className="btn btn-warning btn-lg px-5" onClick={() => setShowSubscriptionPopup(true)}>
+                        <i className="bi bi-star-fill me-2"></i>
+                        View Subscription Plans
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )
             )}
 
             {/* Pattern Recognition Tab */}
             {activeTab === 'pattern-recognition' && (
-              <div className="card border-0 shadow-sm">
-                <div className="card-header bg-info text-white">
-                  <h6 className="mb-0">
-                    <i className="bi bi-search me-2"></i>
-                    Pattern Recognition
-                  </h6>
-                </div>
-                <div className="card-body">
-                  <div className="alert alert-info" role="alert">
-                    <i className="bi bi-info-circle me-2"></i>
-                    <strong>Coming Soon:</strong> AI-powered pattern recognition will automatically detect chart patterns,
-                    candlestick formations, and trading opportunities.
+              canAccessTab('pattern-recognition') ? (
+                <div className="card border-0 shadow-sm">
+                  <div className="card-header bg-info text-white">
+                    <h6 className="mb-0">
+                      <i className="bi bi-search me-2"></i>
+                      Pattern Recognition
+                    </h6>
                   </div>
-                  <div className="text-center py-5">
-                    <i className="bi bi-search" style={{ fontSize: '4rem', opacity: 0.3, color: '#6c757d' }}></i>
-                    <p className="mt-3 text-muted">Pattern recognition features will be implemented here</p>
+                  <div className="card-body">
+                    <div className="alert alert-info" role="alert">
+                      <i className="bi bi-info-circle me-2"></i>
+                      <strong>Coming Soon:</strong> AI-powered pattern recognition will automatically detect chart patterns,
+                      candlestick formations, and trading opportunities.
+                    </div>
+                    <div className="text-center py-5">
+                      <i className="bi bi-search" style={{ fontSize: '4rem', opacity: 0.3, color: '#6c757d' }}></i>
+                      <p className="mt-3 text-muted">Pattern recognition features will be implemented here</p>
+                    </div>
                   </div>
                 </div>
-              </div>
+              ) : (
+                <div className="card border-warning shadow-sm">
+                  <div className="card-header bg-warning text-dark">
+                    <h5 className="mb-0">
+                      <i className="bi bi-lock-fill me-2"></i>
+                      Super Premium Feature - Pattern Recognition
+                    </h5>
+                  </div>
+                  <div className="card-body">
+                    <div className="alert alert-info">
+                      <h6 className="fw-bold">
+                        <i className="bi bi-info-circle me-2"></i>
+                        What is Pattern Recognition?
+                      </h6>
+                      <p className="mb-2">
+                        AI-powered pattern detection to identify chart patterns, candlestick formations, and trading opportunities automatically.
+                      </p>
+                      <ul className="mb-0">
+                        <li>Candlestick Pattern Detection</li>
+                        <li>Chart Pattern Recognition (head & shoulders, triangles, etc.)</li>
+                        <li>Anomaly Detection</li>
+                        <li>Automated trading opportunity identification</li>
+                      </ul>
+                    </div>
+                    <div className="alert alert-warning">
+                      <h6 className="fw-bold mb-2">
+                        <i className="bi bi-star me-2"></i>
+                        Upgrade to Super Premium to unlock:
+                      </h6>
+                      <ul className="mb-0">
+                        <li><strong>Pattern Recognition</strong> - AI-powered pattern detection</li>
+                        <li>Train Model - Customize and train ML models</li>
+                        <li>Reinforcement Learning - Train AI agents</li>
+                        <li>Strategy Optimization - Genetic algorithms</li>
+                        <li>All Premium features included</li>
+                      </ul>
+                    </div>
+                    <div className="text-center mt-3">
+                      <button className="btn btn-warning btn-lg px-5" onClick={() => setShowSubscriptionPopup(true)}>
+                        <i className="bi bi-star-fill me-2"></i>
+                        View Subscription Plans
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )
             )}
 
             {/* Strategy Optimization Tab */}
             {activeTab === 'strategy-optimization' && (
-              <div className="card border-0 shadow-sm">
-                <div className="card-header bg-info text-white">
-                  <h6 className="mb-0">
-                    <i className="bi bi-gear me-2"></i>
-                    Strategy Optimization
-                  </h6>
-                </div>
-                <div className="card-body">
-                  <div className="alert alert-info" role="alert">
-                    <i className="bi bi-info-circle me-2"></i>
-                    <strong>Coming Soon:</strong> Use AI to optimize trading strategy parameters using genetic algorithms
-                    and reinforcement learning for better performance.
+              canAccessTab('strategy-optimization') ? (
+                <div className="card border-0 shadow-sm">
+                  <div className="card-header bg-info text-white">
+                    <h6 className="mb-0">
+                      <i className="bi bi-gear me-2"></i>
+                      Strategy Optimization
+                    </h6>
                   </div>
-                  <div className="text-center py-5">
-                    <i className="bi bi-gear" style={{ fontSize: '4rem', opacity: 0.3, color: '#6c757d' }}></i>
-                    <p className="mt-3 text-muted">Strategy optimization features will be implemented here</p>
+                  <div className="card-body">
+                    <div className="alert alert-info" role="alert">
+                      <i className="bi bi-info-circle me-2"></i>
+                      <strong>Coming Soon:</strong> Use AI to optimize trading strategy parameters using genetic algorithms
+                      and reinforcement learning for better performance.
+                    </div>
+                    <div className="text-center py-5">
+                      <i className="bi bi-gear" style={{ fontSize: '4rem', opacity: 0.3, color: '#6c757d' }}></i>
+                      <p className="mt-3 text-muted">Strategy optimization features will be implemented here</p>
+                    </div>
                   </div>
                 </div>
-              </div>
+              ) : (
+                <div className="card border-warning shadow-sm">
+                  <div className="card-header bg-warning text-dark">
+                    <h5 className="mb-0">
+                      <i className="bi bi-lock-fill me-2"></i>
+                      Super Premium Feature - Strategy Optimization
+                    </h5>
+                  </div>
+                  <div className="card-body">
+                    <div className="alert alert-info">
+                      <h6 className="fw-bold">
+                        <i className="bi bi-info-circle me-2"></i>
+                        What is Strategy Optimization?
+                      </h6>
+                      <p className="mb-2">
+                        Use genetic algorithms and reinforcement learning to optimize trading strategy parameters for better performance.
+                      </p>
+                      <ul className="mb-0">
+                        <li>Parameter Optimization - Find optimal values for strategy parameters</li>
+                        <li>Genetic Algorithms - Evolve better strategies over generations</li>
+                        <li>Reinforcement Learning - Learn optimal decisions from market data</li>
+                        <li>Backtesting with optimized parameters</li>
+                        <li>Performance comparison and analysis</li>
+                      </ul>
+                    </div>
+                    <div className="alert alert-warning">
+                      <h6 className="fw-bold mb-2">
+                        <i className="bi bi-star me-2"></i>
+                        Upgrade to Super Premium to unlock:
+                      </h6>
+                      <ul className="mb-0">
+                        <li><strong>Strategy Optimization</strong> - Optimize strategy parameters using AI</li>
+                        <li>Train Model - Customize and train ML models</li>
+                        <li>Reinforcement Learning - Train AI agents</li>
+                        <li>Pattern Recognition - AI-powered pattern detection</li>
+                        <li>All Premium features included</li>
+                      </ul>
+                    </div>
+                    <div className="text-center mt-3">
+                      <button className="btn btn-warning btn-lg px-5" onClick={() => setShowSubscriptionPopup(true)}>
+                        <i className="bi bi-star-fill me-2"></i>
+                        View Subscription Plans
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )
             )}
           </div>
         </div>
       </div>
-    </div>
+      </div>
+      <SubscriptionPopupModal
+        show={showSubscriptionPopup}
+        onClose={handleSubscriptionPopupClose}
+        onViewPlans={handleViewPlans}
+      />
+    </>
   );
 };
 
@@ -1327,4 +1677,3 @@ const TrainModelPanel: React.FC = () => {
     </>
   );
 };
-
