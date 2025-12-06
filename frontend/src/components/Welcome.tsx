@@ -5,7 +5,7 @@ import LoaderOverlay from './LoaderOverlay';
 import SupportChat from './SupportChat';
 import PolicyLinks from './PolicyLinks';
 
-const API_TUTORIAL_URL = 'https://www.youtube.com/watch?v=b8m9zhyNQVM';
+const API_TUTORIAL_URL = 'https://youtu.be/r88L9AqnNaE?si=kdMDw04MxVZ8WCax';
 
 const WelcomeContent: React.FC<{ message: { type: string; text: string } | null; onLogout: () => void }> = ({ message, onLogout }) => {
   const [loading, setLoading] = useState(true);

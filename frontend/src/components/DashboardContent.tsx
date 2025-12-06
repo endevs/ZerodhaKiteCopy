@@ -6,6 +6,7 @@ import React, {
   useState,
 } from 'react';
 import { apiUrl } from '../config/api';
+import SubscriptionPopupModal from './SubscriptionPopupModal';
 
 type VisibilityOption = 'private' | 'public';
 
@@ -95,6 +96,7 @@ interface SavedStrategiesProps {
   onEditStrategy: (strategy: Strategy) => void;
   isOpen: boolean;
   onToggle: (open: boolean) => void;
+  onSubscribeClick?: () => void;
 }
 
 interface ChatMessage {
@@ -537,13 +539,41 @@ const SavedStrategies: React.FC<SavedStrategiesProps> = ({
   onEditStrategy,
   isOpen,
   onToggle,
+  onSubscribeClick,
 }) => {
   const [strategies, setStrategies] = useState<Strategy[]>([]);
   const [selectedStrategy, setSelectedStrategy] = useState<Strategy | null>(null);
+  const [canDeploy, setCanDeploy] = useState<boolean>(false);
+  const [showSubscriptionPopup, setShowSubscriptionPopup] = useState<boolean>(false);
+  const [checkingSubscription, setCheckingSubscription] = useState<boolean>(true);
   const formatTimestamp = useCallback(
     (value?: string | null) => formatDateTime(value),
     [],
   );
+
+  // Check subscription status for deployment
+  useEffect(() => {
+    const checkSubscription = async () => {
+      try {
+        const response = await fetch(apiUrl('/api/subscription/check-deployment'), {
+          credentials: 'include',
+        });
+        const data = await response.json();
+        if (response.ok && data.status === 'success') {
+          setCanDeploy(data.can_deploy || false);
+        } else {
+          // Default to false if check fails
+          setCanDeploy(false);
+        }
+      } catch (error) {
+        console.error('Error checking subscription:', error);
+        setCanDeploy(false);
+      } finally {
+        setCheckingSubscription(false);
+      }
+    };
+    checkSubscription();
+  }, []);
 
   const fetchStrategies = useCallback(async () => {
     try {
@@ -591,6 +621,11 @@ const SavedStrategies: React.FC<SavedStrategiesProps> = ({
           ? await response.json()
           : await response.text();
       if (!response.ok) {
+        // Check if it's a subscription required error
+        if (typeof data === 'object' && data.subscription_required) {
+          setShowSubscriptionPopup(true);
+          return;
+        }
         throw new Error(
           typeof data === 'string' ? data : data.message || 'Request failed',
         );
@@ -601,7 +636,12 @@ const SavedStrategies: React.FC<SavedStrategiesProps> = ({
       fetchStrategies();
     } catch (error: any) {
       console.error('Saved strategies action failed:', error);
-      alert(error.message || 'An unexpected error occurred.');
+      // Check if error message indicates subscription required
+      if (error.message && error.message.includes('subscription')) {
+        setShowSubscriptionPopup(true);
+      } else {
+        alert(error.message || 'An unexpected error occurred.');
+      }
     }
   };
 
@@ -794,11 +834,23 @@ const SavedStrategies: React.FC<SavedStrategiesProps> = ({
                                     <button
                                       className="btn btn-outline-success"
                                       title="Deploy"
-                                      onClick={() =>
-                                        handleAction(
-                                        apiUrl(`/api/strategy/deploy/${strategy.id}`),
-                                        )
-                                      }
+                                      onClick={async () => {
+                                        // Check subscription before deploying
+                                        try {
+                                          const checkResponse = await fetch(apiUrl('/api/subscription/check-deployment'), {
+                                            credentials: 'include',
+                                          });
+                                          const checkData = await checkResponse.json();
+                                          if (checkResponse.ok && checkData.status === 'success' && checkData.can_deploy) {
+                                            handleAction(apiUrl(`/api/strategy/deploy/${strategy.id}`));
+                                          } else {
+                                            setShowSubscriptionPopup(true);
+                                          }
+                                        } catch (error) {
+                                          console.error('Error checking subscription:', error);
+                                          setShowSubscriptionPopup(true);
+                                        }
+                                      }}
                                     >
                                       <i className="bi bi-play-fill" />
                                     </button>
@@ -902,6 +954,16 @@ const SavedStrategies: React.FC<SavedStrategiesProps> = ({
           </div>
         </div>
       </div>
+      <SubscriptionPopupModal
+        show={showSubscriptionPopup}
+        onClose={() => setShowSubscriptionPopup(false)}
+        onSubscribe={() => {
+          setShowSubscriptionPopup(false);
+          if (onSubscribeClick) {
+            onSubscribeClick();
+          }
+        }}
+      />
       {selectedStrategy && (
         <div
           className="modal fade show d-block"
@@ -1826,9 +1888,10 @@ const AIEnabledStrategyChat: React.FC<AIEnabledStrategyChatProps> = ({
 
 interface DashboardContentProps {
   onViewLiveStrategy: (strategyId: string) => void;
+  onSubscribeClick?: () => void;
 }
 
-const DashboardContent: React.FC<DashboardContentProps> = ({ onViewLiveStrategy }) => {
+const DashboardContent: React.FC<DashboardContentProps> = ({ onViewLiveStrategy, onSubscribeClick }) => {
   const [refreshStrategies, setRefreshStrategies] = useState(0);
   const [aiEditingStrategy, setAiEditingStrategy] = useState<Strategy | null>(null);
   const [savedOpen, setSavedOpen] = useState(true);
@@ -1862,6 +1925,7 @@ const DashboardContent: React.FC<DashboardContentProps> = ({ onViewLiveStrategy 
           onEditStrategy={handleEditStrategy}
           isOpen={savedOpen}
           onToggle={setSavedOpen}
+          onSubscribeClick={onSubscribeClick}
         />
       </div>
     </div>

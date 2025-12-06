@@ -3204,6 +3204,17 @@ def api_signup():
 
         conn.execute('INSERT INTO users (mobile, email, otp, otp_expiry) VALUES (?, ?, ?, ?)',
                      (mobile, email, otp, otp_expiry))
+        user_id = conn.lastrowid
+        
+        # Create freemium subscription for new user
+        try:
+            from subscription_manager import create_subscription
+            create_subscription(user_id, 'freemium', trial_days=7)
+            logging.info(f"Created freemium subscription for new user {user_id}")
+        except Exception as sub_error:
+            logging.warning(f"Failed to create freemium subscription for user {user_id}: {sub_error}")
+            # Don't fail signup if subscription creation fails
+        
         conn.commit()
         conn.close()
 
@@ -3336,6 +3347,19 @@ def api_verify_otp():
             if not user['email_verified']:
                 # First time verification - new registration
                 conn.execute('UPDATE users SET email_verified = 1 WHERE email = ?', (email,))
+                user_id = user['id']
+                
+                # Create freemium subscription for new user if they don't have one
+                try:
+                    from subscription_manager import get_user_subscription, create_subscription
+                    existing_subscription = get_user_subscription(user_id)
+                    if not existing_subscription:
+                        create_subscription(user_id, 'freemium', trial_days=7)
+                        logging.info(f"Created freemium subscription for new user {user_id}")
+                except Exception as sub_error:
+                    logging.warning(f"Failed to create freemium subscription for user {user_id}: {sub_error}")
+                    # Don't fail verification if subscription creation fails
+                
                 conn.commit()
                 conn.close()
                 return jsonify({
@@ -3345,8 +3369,21 @@ def api_verify_otp():
                 })
             else:
                 # Already verified - login
+                user_id = user['id']
+                
+                # Ensure user has freemium subscription if they don't have any subscription
+                try:
+                    from subscription_manager import get_user_subscription, create_subscription
+                    existing_subscription = get_user_subscription(user_id)
+                    if not existing_subscription:
+                        create_subscription(user_id, 'freemium', trial_days=7)
+                        logging.info(f"Created freemium subscription for existing user {user_id}")
+                except Exception as sub_error:
+                    logging.warning(f"Failed to create freemium subscription for user {user_id}: {sub_error}")
+                    # Don't fail login if subscription creation fails
+                
                 conn.close()
-                session['user_id'] = user['id']
+                session['user_id'] = user_id
                 return jsonify({
                     'status': 'success',
                     'message': 'OTP verified successfully!',
@@ -3567,22 +3604,23 @@ def zerodha_login():
 
     kite.api_key = user['app_key']
     
-    # Get the callback URL - must match exactly what's configured in Zerodha developer portal
+    # Get the backend URL to determine if we're in local or production
     backend_url = _get_backend_url()
     redirect_uri = f"{backend_url}/callback"
     
-    # Generate login URL with explicit redirect_uri
-    # The redirect_uri MUST match exactly what's configured in Zerodha's app settings
-    # For production: https://drpinfotech.com/callback
-    # For local: http://localhost:8000/callback
-    try:
-        # KiteConnect.login_url() accepts redirect_uri as a parameter
-        login_url = kite.login_url(redirect_uri=redirect_uri)
-        logging.info(f"Zerodha login URL generated with redirect_uri: {redirect_uri}")
-    except Exception as e:
-        logging.error(f"Error generating Zerodha login URL: {e}")
-        frontend_url = _get_frontend_url()
-        return redirect(f"{frontend_url}/welcome?error=zerodha_login_failed")
+    # For local development (localhost), manually construct the login URL with redirect_uri
+    # For production (drpinfotech.com), use the default login_url() which uses redirect_uri from Zerodha portal
+    if 'localhost' in backend_url or '127.0.0.1' in backend_url:
+        # Local: manually construct URL with redirect_uri parameter
+        from urllib.parse import quote_plus
+        base_url = "https://kite.zerodha.com/connect/login"
+        encoded_redirect_uri = quote_plus(redirect_uri)
+        login_url = f"{base_url}?api_key={user['app_key']}&redirect_uri={encoded_redirect_uri}"
+        logging.info(f"Local Zerodha login URL generated with redirect_uri: {redirect_uri}")
+    else:
+        # Production: use default login_url() (redirect_uri must be configured in Zerodha portal as https://drpinfotech.com/callback)
+        login_url = kite.login_url()
+        logging.info(f"Production Zerodha login URL generated. Expected redirect_uri in portal: {redirect_uri}")
     
     return redirect(login_url)
 
@@ -3695,6 +3733,181 @@ def api_logout():
     session.pop('access_token', None)
     session.pop('user_id', None)
     return jsonify({'status': 'success', 'message': 'Logged out successfully'})
+
+@app.route("/api/auth/google", methods=['GET'])
+def api_google_auth():
+    """Initiate Google OAuth login"""
+    try:
+        from urllib.parse import urlencode
+        from config import GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
+        
+        # Debug logging
+        logging.info(f"Google OAuth config check - CLIENT_ID present: {bool(GOOGLE_CLIENT_ID)}, CLIENT_SECRET present: {bool(GOOGLE_CLIENT_SECRET)}")
+        
+        if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+            error_msg = "Google OAuth is not configured. Please add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET to your .env file in the backend directory."
+            logging.error(error_msg)
+            logging.error(f"Current CLIENT_ID value: {'SET' if GOOGLE_CLIENT_ID else 'EMPTY'}, CLIENT_SECRET value: {'SET' if GOOGLE_CLIENT_SECRET else 'EMPTY'}")
+            return jsonify({
+                'status': 'error',
+                'message': error_msg
+            }), 500
+        
+        # Generate state token for CSRF protection
+        state_token = secrets.token_urlsafe(32)
+        session['google_oauth_state'] = state_token
+        
+        # Build Google OAuth URL
+        backend_url = _get_backend_url()
+        redirect_uri = f"{backend_url}/api/auth/google/callback"
+        
+        params = {
+            'client_id': GOOGLE_CLIENT_ID,
+            'redirect_uri': redirect_uri,
+            'response_type': 'code',
+            'scope': 'openid email profile',
+            'state': state_token,
+            'access_type': 'offline',
+            'prompt': 'consent'
+        }
+        
+        auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(params)}"
+        
+        return jsonify({
+            'status': 'success',
+            'auth_url': auth_url
+        })
+    except Exception as e:
+        logging.error(f"Error initiating Google OAuth: {e}")
+        return jsonify({
+            'status': 'error',
+            'message': 'Failed to initiate Google login'
+        }), 500
+
+@app.route("/api/auth/google/callback", methods=['GET'])
+def api_google_callback():
+    """Handle Google OAuth callback"""
+    try:
+        from urllib.parse import urlencode
+        from config import GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
+        
+        # Verify state token
+        state = request.args.get('state')
+        if not state or state != session.get('google_oauth_state'):
+            frontend_url = _get_frontend_url()
+            return redirect(f"{frontend_url}/login?error=invalid_state")
+        
+        # Remove state from session
+        session.pop('google_oauth_state', None)
+        
+        # Get authorization code
+        code = request.args.get('code')
+        if not code:
+            frontend_url = _get_frontend_url()
+            return redirect(f"{frontend_url}/login?error=no_code")
+        
+        # Exchange code for access token
+        backend_url = _get_backend_url()
+        token_url = "https://oauth2.googleapis.com/token"
+        token_data = {
+            'client_id': GOOGLE_CLIENT_ID,
+            'client_secret': GOOGLE_CLIENT_SECRET,
+            'code': code,
+            'grant_type': 'authorization_code',
+            'redirect_uri': f"{backend_url}/api/auth/google/callback"
+        }
+        
+        token_response = requests.post(token_url, data=token_data)
+        if token_response.status_code != 200:
+            logging.error(f"Google token exchange failed: {token_response.text}")
+            frontend_url = _get_frontend_url()
+            return redirect(f"{frontend_url}/login?error=token_exchange_failed")
+        
+        token_json = token_response.json()
+        access_token = token_json.get('access_token')
+        
+        if not access_token:
+            frontend_url = _get_frontend_url()
+            return redirect(f"{frontend_url}/login?error=no_access_token")
+        
+        # Get user info from Google
+        user_info_url = "https://www.googleapis.com/oauth2/v2/userinfo"
+        headers = {'Authorization': f'Bearer {access_token}'}
+        user_response = requests.get(user_info_url, headers=headers)
+        
+        if user_response.status_code != 200:
+            logging.error(f"Google user info fetch failed: {user_response.text}")
+            frontend_url = _get_frontend_url()
+            return redirect(f"{frontend_url}/login?error=user_info_failed")
+        
+        user_info = user_response.json()
+        google_email = user_info.get('email', '').strip().lower()
+        google_name = user_info.get('name', '')
+        google_picture = user_info.get('picture', '')
+        
+        if not google_email:
+            frontend_url = _get_frontend_url()
+            return redirect(f"{frontend_url}/login?error=no_email")
+        
+        # Check if user exists
+        conn = get_db_connection()
+        user = conn.execute('SELECT * FROM users WHERE email = ?', (google_email,)).fetchone()
+        
+        if user:
+            # Existing user - log them in
+            session['user_id'] = user['id']
+            # Update user name if available and different
+            if google_name and google_name != user.get('user_name', ''):
+                conn.execute('UPDATE users SET user_name = ? WHERE id = ?', (google_name, user['id']))
+                conn.commit()
+            conn.close()
+            
+            frontend_url = _get_frontend_url()
+            return redirect(f"{frontend_url}/dashboard")
+        else:
+            # New user - create account
+            # Generate a random mobile number placeholder (user can update later)
+            mobile = f"+91{secrets.randbelow(10000000000):010d}"
+            
+            # Check if google_picture column exists, if not, insert without it
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA table_info(users)")
+            columns = [col[1] for col in cursor.fetchall()]
+            
+            if 'google_picture' in columns:
+                conn.execute(
+                    'INSERT INTO users (mobile, email, email_verified, user_name, google_picture) VALUES (?, ?, ?, ?, ?)',
+                    (mobile, google_email, 1, google_name or '', google_picture or '')
+                )
+            else:
+                conn.execute(
+                    'INSERT INTO users (mobile, email, email_verified, user_name) VALUES (?, ?, ?, ?)',
+                    (mobile, google_email, 1, google_name or '')
+                )
+            user_id = conn.lastrowid
+            
+            # Create freemium subscription for new user
+            try:
+                from subscription_manager import create_subscription
+                create_subscription(user_id, 'freemium', trial_days=7)
+                logging.info(f"Created freemium subscription for new Google user {user_id}")
+            except Exception as sub_error:
+                logging.warning(f"Failed to create freemium subscription for Google user {user_id}: {sub_error}")
+            
+            conn.commit()
+            conn.close()
+            
+            session['user_id'] = user_id
+            
+            frontend_url = _get_frontend_url()
+            return redirect(f"{frontend_url}/dashboard")
+            
+    except Exception as e:
+        logging.error(f"Error in Google OAuth callback: {e}")
+        import traceback
+        logging.error(traceback.format_exc())
+        frontend_url = _get_frontend_url()
+        return redirect(f"{frontend_url}/login?error=oauth_failed")
 
 @app.route("/api/admin/check")
 def api_admin_check():
@@ -4781,6 +4994,63 @@ def delete_strategy(strategy_id):
     finally:
         conn.close()
 
+@app.route("/api/subscription/status", methods=['GET'])
+def api_subscription_status():
+    """Get user's subscription status and plan type."""
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+    
+    try:
+        from subscription_manager import get_user_subscription_info
+        user_id = session['user_id']
+        subscription_info = get_user_subscription_info(user_id)
+        
+        # Determine if user is free user
+        is_free_user = subscription_info['plan_type'] == 'freemium' or not subscription_info.get('has_subscription', False)
+        
+        # Check if user has live deployment access
+        has_live_deployment_access = subscription_info.get('features', {}).get('live_deployment', False)
+        
+        return jsonify({
+            'status': 'success',
+            'is_free_user': is_free_user,
+            'plan_type': subscription_info['plan_type'],
+            'plan_name': subscription_info.get('plan_name', 'Freemium'),
+            'has_live_deployment_access': has_live_deployment_access,
+            'subscription_status': subscription_info.get('status', 'none')
+        })
+    except Exception as e:
+        logging.error(f"Error fetching subscription status: {e}", exc_info=True)
+        # Default to freemium on error
+        return jsonify({
+            'status': 'success',
+            'is_free_user': True,
+            'plan_type': 'freemium',
+            'plan_name': 'Freemium',
+            'has_live_deployment_access': False,
+            'subscription_status': 'none'
+        })
+
+@app.route("/api/subscription/check-deployment", methods=['GET'])
+def api_check_deployment_access():
+    """Check if user has access to live deployment feature."""
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+    
+    try:
+        from subscription_manager import check_feature_access
+        user_id = session['user_id']
+        has_access = check_feature_access(user_id, 'live_deployment')
+        
+        return jsonify({
+            'status': 'success',
+            'has_access': has_access,
+            'can_deploy': has_access
+        })
+    except Exception as e:
+        logging.error(f"Error checking deployment access: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': 'Failed to check subscription status'}), 500
+
 @app.route("/strategy/deploy/<int:strategy_id>", methods=['POST', 'OPTIONS'])
 @app.route("/api/strategy/deploy/<int:strategy_id>", methods=['POST', 'OPTIONS'])
 def deploy_strategy(strategy_id):
@@ -4793,6 +5063,21 @@ def deploy_strategy(strategy_id):
     
     if 'access_token' not in session:
         return jsonify({'status': 'error', 'message': 'Zerodha not connected. Please connect your Zerodha account first.'}), 401
+    
+    # Check subscription for live deployment
+    try:
+        from subscription_manager import check_feature_access
+        user_id = session['user_id']
+        has_access = check_feature_access(user_id, 'live_deployment')
+        if not has_access:
+            return jsonify({
+                'status': 'error',
+                'message': 'Live deployment requires a Premium or Super Premium subscription. Please subscribe to deploy strategies.',
+                'subscription_required': True
+            }), 403
+    except Exception as e:
+        logging.error(f"Error checking subscription for deployment: {e}", exc_info=True)
+        # Don't block deployment if subscription check fails, but log it
 
     conn = get_db_connection()
     strategy_data = conn.execute('SELECT * FROM strategies WHERE id = ? AND user_id = ?', (strategy_id, session['user_id'])).fetchone()
@@ -8339,6 +8624,21 @@ def api_live_trade_deploy():
         return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
     if 'access_token' not in session:
         return jsonify({'status': 'error', 'message': 'Zerodha access token missing. Please login with Zerodha first.'}), 401
+
+    # Check subscription for live deployment
+    try:
+        from subscription_manager import check_feature_access
+        user_id = session['user_id']
+        has_access = check_feature_access(user_id, 'live_deployment')
+        if not has_access:
+            return jsonify({
+                'status': 'error',
+                'message': 'Live deployment requires a Premium or Super Premium subscription. Please subscribe to deploy strategies.',
+                'subscription_required': True
+            }), 403
+    except Exception as e:
+        logging.error(f"Error checking subscription for live deployment: {e}", exc_info=True)
+        # Don't block deployment if subscription check fails, but log it
 
     data = request.get_json() or {}
     strategy_id_raw = data.get('strategy_id')

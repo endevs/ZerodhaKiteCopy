@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useMemo, useState, useRef } from 'react'
 import { apiUrl, SOCKET_BASE_URL } from '../config/api';
 import { io, Socket } from 'socket.io-client';
 import { ResponsiveContainer, ComposedChart, Line, XAxis, YAxis, Tooltip, Legend, ReferenceLine, CartesianGrid } from 'recharts';
+import SubscriptionPopupModal from './SubscriptionPopupModal';
+import { useNavigate } from 'react-router-dom';
 
 interface StrategyOption {
   id: number;
@@ -149,6 +151,7 @@ interface LiveDeployment {
 }
 
 const LiveTradeContent: React.FC = () => {
+  const navigate = useNavigate();
   const [strategies, setStrategies] = useState<StrategyOption[]>([]);
   const [selectedStrategy, setSelectedStrategy] = useState<string>('');
   const [lotCount, setLotCount] = useState<number>(1);
@@ -162,6 +165,12 @@ const LiveTradeContent: React.FC = () => {
   const [previewLoading, setPreviewLoading] = useState<boolean>(false);
   const [testOrderLoading, setTestOrderLoading] = useState<boolean>(false);
   const [isAdmin, setIsAdmin] = useState<boolean>(false);
+  const [subscriptionStatus, setSubscriptionStatus] = useState<{
+    is_free_user: boolean;
+    plan_type: string;
+    has_live_deployment_access: boolean;
+  } | null>(null);
+  const [showSubscriptionPopup, setShowSubscriptionPopup] = useState(false);
   // Replay/Simulation controls
   const [replayDate, setReplayDate] = useState<string>('');
   const [isReplayMode, setIsReplayMode] = useState<boolean>(false);
@@ -675,6 +684,33 @@ const LiveTradeContent: React.FC = () => {
     })();
   }, []);
 
+  // Fetch subscription status
+  useEffect(() => {
+    const fetchSubscriptionStatus = async () => {
+      try {
+        const response = await fetch(apiUrl('/api/subscription/status'), {
+          credentials: 'include',
+        });
+        if (response.ok) {
+          const data = await response.json();
+          setSubscriptionStatus({
+            is_free_user: data.is_free_user || false,
+            plan_type: data.plan_type || 'freemium',
+            has_live_deployment_access: data.has_live_deployment_access || false,
+          });
+        } else {
+          // Default to freemium if fetch fails
+          setSubscriptionStatus({ is_free_user: true, plan_type: 'freemium', has_live_deployment_access: false });
+        }
+      } catch (error) {
+        console.error('Error fetching subscription status:', error);
+        // Default to freemium if fetch fails
+        setSubscriptionStatus({ is_free_user: true, plan_type: 'freemium', has_live_deployment_access: false });
+      }
+    };
+    fetchSubscriptionStatus();
+  }, []);
+
   const fetchPreview = useCallback(
     async (strategyId: string, lots: number) => {
       if (!strategyId || lots <= 0) {
@@ -944,6 +980,12 @@ const LiveTradeContent: React.FC = () => {
     setError(null);
     setActionMessage(null);
 
+    // Check subscription status before deploying
+    if (subscriptionStatus && subscriptionStatus.is_free_user) {
+      setShowSubscriptionPopup(true);
+      return;
+    }
+
     if (!selectedStrategy) {
       setError('Please select a strategy to deploy.');
       return;
@@ -978,16 +1020,35 @@ const LiveTradeContent: React.FC = () => {
       });
       const data = await response.json();
       if (!response.ok || data.status !== 'success') {
+        // Check if it's a subscription required error
+        if (data.subscription_required) {
+          setShowSubscriptionPopup(true);
+          return;
+        }
         throw new Error(data.message || 'Failed to deploy strategy.');
       }
       setDeployment(data.deployment ?? null);
       setActionMessage('Strategy deployment initiated successfully.');
     } catch (err) {
       console.error('Deploy error:', err);
-      setError(err instanceof Error ? err.message : 'Failed to deploy strategy.');
+      const errorMessage = err instanceof Error ? err.message : 'Failed to deploy strategy.';
+      if (errorMessage.includes('subscription')) {
+        setShowSubscriptionPopup(true);
+      } else {
+        setError(errorMessage);
+      }
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleSubscriptionPopupClose = () => {
+    setShowSubscriptionPopup(false);
+  };
+
+  const handleViewPlans = () => {
+    setShowSubscriptionPopup(false);
+    navigate('/dashboard?tab=subscribe');
   };
 
   const handleTestOrder = async () => {
@@ -1435,8 +1496,9 @@ const LiveTradeContent: React.FC = () => {
               <div className="d-grid gap-2">
                 <button
                   className="btn btn-primary"
-                  disabled={loading}
+                  disabled={loading || (subscriptionStatus?.is_free_user ?? false)}
                   onClick={handleDeploy}
+                  title={subscriptionStatus?.is_free_user ? 'Premium or Super Premium subscription required to deploy strategies' : ''}
                 >
                   {loading ? (
                     <>
@@ -1446,10 +1508,23 @@ const LiveTradeContent: React.FC = () => {
                   ) : (
                     <>
                       <i className="bi bi-play-circle me-2"></i>
-                      Deploy Strategy
+                      {subscriptionStatus?.is_free_user ? (
+                        <>
+                          <i className="bi bi-lock-fill me-2"></i>
+                          Deploy Strategy (Premium Required)
+                        </>
+                      ) : (
+                        'Deploy Strategy'
+                      )}
                     </>
                   )}
                 </button>
+                {subscriptionStatus?.is_free_user && (
+                  <small className="text-muted text-center">
+                    <i className="bi bi-info-circle me-1"></i>
+                    Upgrade to Premium or Super Premium to deploy strategies
+                  </small>
+                )}
               </div>
 
               <hr />
@@ -4966,6 +5041,11 @@ const LiveTradeContent: React.FC = () => {
           </div>
         </div>
       </div>
+      <SubscriptionPopupModal
+        show={showSubscriptionPopup}
+        onClose={handleSubscriptionPopupClose}
+        onViewPlans={handleViewPlans}
+      />
     </div>
   );
 };
