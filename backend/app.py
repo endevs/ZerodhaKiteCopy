@@ -1308,7 +1308,13 @@ def aggregate_trades_by_period(trades: List[Dict[str, Any]], period: str) -> Lis
 
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+# Configure logging with timestamp format
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+
 # Reduce noisy werkzeug/socket logs (but keep ERROR level for debugging)
 try:
     logging.getLogger('werkzeug').setLevel(logging.WARNING)  # Changed from ERROR to WARNING to see 404s
@@ -3832,9 +3838,21 @@ def api_google_callback():
             'redirect_uri': f"{backend_url}/api/auth/google/callback"
         }
         
-        token_response = requests.post(token_url, data=token_data)
+        token_response = requests.post(token_url, data=token_data, timeout=10)
         if token_response.status_code != 200:
-            logging.error(f"Google token exchange failed: {token_response.text}")
+            error_text = token_response.text
+            logging.error(f"Google token exchange failed (status {token_response.status_code}): {error_text}")
+            
+            # Check if it's an invalid_grant error (code already used or expired)
+            try:
+                error_json = token_response.json()
+                if error_json.get('error') == 'invalid_grant':
+                    logging.warning("Google OAuth code was already used or expired. User may need to try again.")
+                    frontend_url = _get_frontend_url()
+                    return redirect(f"{frontend_url}/login?error=oauth_code_expired")
+            except:
+                pass
+            
             frontend_url = _get_frontend_url()
             return redirect(f"{frontend_url}/login?error=token_exchange_failed")
         
@@ -3842,6 +3860,7 @@ def api_google_callback():
         access_token = token_json.get('access_token')
         
         if not access_token:
+            logging.error("Google OAuth: No access token in response")
             frontend_url = _get_frontend_url()
             return redirect(f"{frontend_url}/login?error=no_access_token")
         
@@ -3866,59 +3885,139 @@ def api_google_callback():
         
         # Check if user exists
         conn = get_db_connection()
-        user = conn.execute('SELECT * FROM users WHERE email = ?', (google_email,)).fetchone()
-        
-        if user:
-            # Existing user - log them in
-            session['user_id'] = user['id']
-            # Update user name if available and different
-            if google_name and google_name != user.get('user_name', ''):
-                conn.execute('UPDATE users SET user_name = ? WHERE id = ?', (google_name, user['id']))
-                conn.commit()
-            conn.close()
+        try:
+            user = conn.execute('SELECT * FROM users WHERE email = ?', (google_email,)).fetchone()
             
-            frontend_url = _get_frontend_url()
-            return redirect(f"{frontend_url}/dashboard")
-        else:
-            # New user - create account
-            # Generate a random mobile number placeholder (user can update later)
-            mobile = f"+91{secrets.randbelow(10000000000):010d}"
-            
-            # Check if google_picture column exists, if not, insert without it
-            cursor = conn.cursor()
-            cursor.execute("PRAGMA table_info(users)")
-            columns = [col[1] for col in cursor.fetchall()]
-            
-            if 'google_picture' in columns:
-                conn.execute(
-                    'INSERT INTO users (mobile, email, email_verified, user_name, google_picture) VALUES (?, ?, ?, ?, ?)',
-                    (mobile, google_email, 1, google_name or '', google_picture or '')
-                )
+            if user:
+                # Existing user - log them in
+                session['user_id'] = user['id']
+                # Update user name if available and different
+                if google_name and google_name != user.get('user_name', ''):
+                    try:
+                        conn.execute('UPDATE users SET user_name = ? WHERE id = ?', (google_name, user['id']))
+                        conn.commit()
+                    except SqliteOperationalError as db_err:
+                        if 'locked' in str(db_err).lower():
+                            logging.warning(f"Database locked when updating user name, continuing anyway: {db_err}")
+                            conn.rollback()
+                        else:
+                            raise
+                
+                frontend_url = _get_frontend_url()
+                return redirect(f"{frontend_url}/dashboard")
             else:
-                conn.execute(
-                    'INSERT INTO users (mobile, email, email_verified, user_name) VALUES (?, ?, ?, ?)',
-                    (mobile, google_email, 1, google_name or '')
-                )
-            user_id = conn.lastrowid
-            
-            # Create freemium subscription for new user
-            try:
-                from subscription_manager import create_subscription
-                create_subscription(user_id, 'freemium', trial_days=7)
-                logging.info(f"Created freemium subscription for new Google user {user_id}")
-            except Exception as sub_error:
-                logging.warning(f"Failed to create freemium subscription for Google user {user_id}: {sub_error}")
-            
-            conn.commit()
-            conn.close()
-            
-            session['user_id'] = user_id
-            
+                # New user - create account
+                # Close the existing connection first to avoid locks
+                conn.close()
+                
+                # Retry logic for database operations
+                max_retries = 3
+                retry_delay = 0.2
+                
+                for attempt in range(max_retries):
+                    conn = None
+                    try:
+                        # Get a fresh connection for the INSERT operation
+                        conn = get_db_connection()
+                        
+                        # Generate a random mobile number placeholder (user can update later)
+                        mobile = f"+91{secrets.randbelow(10000000000):010d}"
+                        
+                        # Check if google_picture column exists, if not, insert without it
+                        cursor = conn.cursor()
+                        cursor.execute("PRAGMA table_info(users)")
+                        columns = [col[1] for col in cursor.fetchall()]
+                        
+                        # Use cursor for INSERT to get lastrowid
+                        if 'google_picture' in columns:
+                            cursor.execute(
+                                'INSERT INTO users (mobile, email, email_verified, user_name, google_picture) VALUES (?, ?, ?, ?, ?)',
+                                (mobile, google_email, 1, google_name or '', google_picture or '')
+                            )
+                        else:
+                            cursor.execute(
+                                'INSERT INTO users (mobile, email, email_verified, user_name) VALUES (?, ?, ?, ?)',
+                                (mobile, google_email, 1, google_name or '')
+                            )
+                        
+                        user_id = cursor.lastrowid
+                        conn.commit()
+                        conn.close()
+                        conn = None
+                        
+                        # Create freemium subscription for new user (in a separate connection)
+                        try:
+                            from subscription_manager import create_subscription
+                            create_subscription(user_id, 'freemium', trial_days=7)
+                            logging.info(f"Created freemium subscription for new Google user {user_id}")
+                        except Exception as sub_error:
+                            logging.warning(f"Failed to create freemium subscription for Google user {user_id}: {sub_error}")
+                        
+                        session['user_id'] = user_id
+                        
+                        frontend_url = _get_frontend_url()
+                        return redirect(f"{frontend_url}/dashboard")
+                    
+                    except SqliteOperationalError as db_err:
+                        if conn:
+                            try:
+                                conn.rollback()
+                                conn.close()
+                            except:
+                                pass
+                            conn = None
+                        
+                        if 'locked' in str(db_err).lower():
+                            if attempt < max_retries - 1:
+                                wait_time = retry_delay * (attempt + 1)
+                                logging.warning(f"Database locked in Google OAuth callback (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s: {db_err}")
+                                time.sleep(wait_time)
+                                continue
+                            else:
+                                logging.error(f"Database locked in Google OAuth callback after {max_retries} attempts: {db_err}")
+                                frontend_url = _get_frontend_url()
+                                return redirect(f"{frontend_url}/login?error=database_locked")
+                        else:
+                            logging.error(f"Database error in Google OAuth callback: {db_err}")
+                            raise
+                    except Exception as e:
+                        if conn:
+                            try:
+                                conn.rollback()
+                                conn.close()
+                            except:
+                                pass
+                            conn = None
+                        logging.error(f"Error creating new Google user: {e}")
+                        if attempt < max_retries - 1:
+                            wait_time = retry_delay * (attempt + 1)
+                            logging.warning(f"Error creating user (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s: {e}")
+                            time.sleep(wait_time)
+                            continue
+                        else:
+                            raise
+        except SqliteOperationalError as db_err:
+            if 'locked' in str(db_err).lower():
+                logging.error(f"Database locked in Google OAuth callback (user lookup): {db_err}")
+                frontend_url = _get_frontend_url()
+                return redirect(f"{frontend_url}/login?error=database_locked")
+            else:
+                raise
+        except Exception as e:
+            logging.error(f"Error in Google OAuth callback: {e}")
+            import traceback
+            logging.error(traceback.format_exc())
             frontend_url = _get_frontend_url()
-            return redirect(f"{frontend_url}/dashboard")
-            
+            return redirect(f"{frontend_url}/login?error=oauth_failed")
+        finally:
+            # Ensure connection is closed if it still exists
+            if 'conn' in locals() and conn:
+                try:
+                    conn.close()
+                except:
+                    pass
     except Exception as e:
-        logging.error(f"Error in Google OAuth callback: {e}")
+        logging.error(f"Unexpected error in Google OAuth callback: {e}")
         import traceback
         logging.error(traceback.format_exc())
         frontend_url = _get_frontend_url()
