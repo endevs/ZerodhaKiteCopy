@@ -218,7 +218,7 @@ def create_subscription(
                 raise
             
             try:
-                # Cancel any existing active subscriptions
+                # Cancel any existing active subscriptions for this user (all plan types)
                 conn.execute(
                     """
                     UPDATE subscriptions 
@@ -228,25 +228,63 @@ def create_subscription(
                     (user_id,)
                 )
                 
-                # Create new subscription
-                cursor = conn.execute(
+                # Check if a subscription with the same user_id, plan_type, and status already exists
+                existing = conn.execute(
                     """
-                    INSERT INTO subscriptions (
-                        user_id, plan_type, status, start_date, end_date, trial_end_date, auto_renew
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    SELECT id FROM subscriptions 
+                    WHERE user_id = ? AND plan_type = ? AND status = ?
                     """,
-                    (
-                        user_id,
-                        plan_type,
-                        subscription_status,
-                        start_date.isoformat(),
-                        end_date.isoformat() if end_date else None,
-                        trial_end_date.isoformat() if trial_end_date else None,
-                        1 if plan_type != 'freemium' else 0
+                    (user_id, plan_type, subscription_status)
+                ).fetchone()
+                
+                if existing:
+                    # Update existing subscription instead of creating a new one
+                    subscription_id = existing['id']
+                    conn.execute(
+                        """
+                        UPDATE subscriptions 
+                        SET start_date = ?, end_date = ?, trial_end_date = ?, 
+                            auto_renew = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                        """,
+                        (
+                            start_date.isoformat(),
+                            end_date.isoformat() if end_date else None,
+                            trial_end_date.isoformat() if trial_end_date else None,
+                            1 if plan_type != 'freemium' else 0,
+                            subscription_id
+                        )
                     )
-                )
-                subscription_id = cursor.lastrowid
+                else:
+                    # Before creating, delete any existing subscription with same user_id, plan_type, and status
+                    # This handles edge cases where a cancelled/expired subscription might still exist
+                    conn.execute(
+                        """
+                        DELETE FROM subscriptions 
+                        WHERE user_id = ? AND plan_type = ? AND status = ?
+                        """,
+                        (user_id, plan_type, subscription_status)
+                    )
+                    
+                    # Create new subscription
+                    cursor = conn.execute(
+                        """
+                        INSERT INTO subscriptions (
+                            user_id, plan_type, status, start_date, end_date, trial_end_date, auto_renew
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            user_id,
+                            plan_type,
+                            subscription_status,
+                            start_date.isoformat(),
+                            end_date.isoformat() if end_date else None,
+                            trial_end_date.isoformat() if trial_end_date else None,
+                            1 if plan_type != 'freemium' else 0
+                        )
+                    )
+                    subscription_id = cursor.lastrowid
                 
                 # Update user's current subscription
                 conn.execute(

@@ -4109,6 +4109,63 @@ def api_admin_get_subscriptions():
     finally:
         conn.close()
 
+@app.route("/api/admin/user/<int:user_id>/payments", methods=['GET'])
+def api_admin_get_user_payments(user_id):
+    """Get all payment transactions for a specific user (admin only)."""
+    if not _require_admin():
+        return jsonify({'status': 'error', 'message': 'Admin access required'}), 403
+    
+    conn = get_db_connection()
+    try:
+        # Get all payments for this user, ordered by transaction date (newest first)
+        payments = conn.execute("""
+            SELECT 
+                p.id as payment_id,
+                p.razorpay_order_id,
+                p.razorpay_payment_id,
+                p.invoice_number,
+                p.amount,
+                p.currency,
+                p.plan_type,
+                p.payment_status,
+                p.payment_method,
+                p.transaction_date,
+                p.created_at,
+                s.id as subscription_id,
+                s.plan_type as subscription_plan_type,
+                s.status as subscription_status
+            FROM payments p
+            LEFT JOIN subscriptions s ON p.subscription_id = s.id
+            WHERE p.user_id = ?
+            ORDER BY p.transaction_date DESC, p.created_at DESC
+        """, (user_id,)).fetchall()
+        
+        result = []
+        for payment in payments:
+            p_dict = dict(payment)
+            # Format dates
+            if p_dict.get('transaction_date'):
+                try:
+                    p_dict['transaction_date'] = datetime.datetime.fromisoformat(p_dict['transaction_date']).isoformat()
+                except:
+                    pass
+            if p_dict.get('created_at'):
+                try:
+                    p_dict['created_at'] = datetime.datetime.fromisoformat(p_dict['created_at']).isoformat()
+                except:
+                    pass
+            result.append(p_dict)
+        
+        return jsonify({
+            'status': 'success',
+            'payments': result
+        })
+    except Exception as e:
+        logging.error(f"Error fetching user payments: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': 'Failed to fetch payments'}), 500
+    finally:
+        conn.close()
+
 @app.route("/api/admin/plan-prices", methods=['GET'])
 def api_admin_get_plan_prices():
     """Get all plan prices (admin only)."""

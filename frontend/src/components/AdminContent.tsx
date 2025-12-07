@@ -55,8 +55,28 @@ const AdminContent: React.FC = () => {
     transaction_date: string | null;
   }
   
+  interface Payment {
+    payment_id: number;
+    razorpay_order_id: string | null;
+    razorpay_payment_id: string | null;
+    invoice_number: string | null;
+    amount: number;
+    currency: string;
+    plan_type: string;
+    payment_status: string;
+    payment_method: string | null;
+    transaction_date: string | null;
+    created_at: string;
+    subscription_id: number | null;
+    subscription_plan_type: string | null;
+    subscription_status: string | null;
+  }
+  
   const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
   const [loadingSubscriptions, setLoadingSubscriptions] = useState(false);
+  const [expandedUsers, setExpandedUsers] = useState<Set<number>>(new Set());
+  const [userPayments, setUserPayments] = useState<{[key: number]: Payment[]}>({});
+  const [loadingPayments, setLoadingPayments] = useState<{[key: number]: boolean}>({});
 
   const [planPrices, setPlanPrices] = useState<{[key: string]: {price: number, updated_at?: string}}>({});
   const [loadingPrices, setLoadingPrices] = useState(false);
@@ -179,6 +199,45 @@ const AdminContent: React.FC = () => {
     } finally {
       setLoadingSubscriptions(false);
     }
+  };
+
+  const loadUserPayments = async (userId: number) => {
+    if (userPayments[userId]) {
+      // Already loaded, just toggle
+      return;
+    }
+
+    try {
+      setLoadingPayments(prev => ({ ...prev, [userId]: true }));
+      const response = await fetch(apiUrl(`/api/admin/user/${userId}/payments`), {
+        credentials: 'include',
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to load payment history');
+      }
+
+      const data = await response.json();
+      if (data.status === 'success') {
+        setUserPayments(prev => ({ ...prev, [userId]: data.payments || [] }));
+      }
+    } catch (err) {
+      console.error('Error loading user payments:', err);
+      setUserPayments(prev => ({ ...prev, [userId]: [] }));
+    } finally {
+      setLoadingPayments(prev => ({ ...prev, [userId]: false }));
+    }
+  };
+
+  const toggleUserTransactions = (userId: number) => {
+    const newExpanded = new Set(expandedUsers);
+    if (newExpanded.has(userId)) {
+      newExpanded.delete(userId);
+    } else {
+      newExpanded.add(userId);
+      loadUserPayments(userId);
+    }
+    setExpandedUsers(newExpanded);
   };
   
   const loadPendingStrategies = async () => {
@@ -709,20 +768,37 @@ const AdminContent: React.FC = () => {
                           <th>Amount</th>
                           <th>Payment Method</th>
                           <th>Payment ID</th>
+                          <th>Actions</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {subscriptions.map((sub, idx) => (
-                          <tr key={sub.subscription_id}>
-                            <td>{idx + 1}</td>
-                            <td>
-                              <div>
-                                <strong>{sub.email}</strong>
-                              </div>
-                              <small className="text-muted">{sub.mobile || 'N/A'}</small>
-                              <br />
-                              <small className="text-muted">User ID: {sub.user_id}</small>
-                            </td>
+                        {subscriptions.map((sub, idx) => {
+                          const isExpanded = expandedUsers.has(sub.user_id);
+                          const payments = userPayments[sub.user_id] || [];
+                          const isLoadingPayments = loadingPayments[sub.user_id] || false;
+                          
+                          return (
+                            <React.Fragment key={sub.subscription_id}>
+                              <tr>
+                                <td>{idx + 1}</td>
+                                <td>
+                                  <div>
+                                    <strong>{sub.email}</strong>
+                                  </div>
+                                  <small className="text-muted">{sub.mobile || 'N/A'}</small>
+                                  <br />
+                                  <small className="text-muted">User ID: {sub.user_id}</small>
+                                  <br />
+                                  <button
+                                    className="btn btn-sm btn-link p-0 mt-1 text-primary"
+                                    onClick={() => toggleUserTransactions(sub.user_id)}
+                                    style={{ fontSize: '0.85rem', textDecoration: 'none' }}
+                                  >
+                                    <i className={`bi ${isExpanded ? 'bi-chevron-down' : 'bi-chevron-right'} me-1`}></i>
+                                    {isExpanded ? 'Hide' : 'Show'} Transaction History
+                                    {payments.length > 0 && ` (${payments.length})`}
+                                  </button>
+                                </td>
                             <td>
                               <span className={`badge ${
                                 sub.plan_type === 'super_premium' ? 'bg-success' :
@@ -783,8 +859,128 @@ const AdminContent: React.FC = () => {
                                 ? <small className="font-monospace">{sub.razorpay_payment_id.substring(0, 12)}...</small>
                                 : 'N/A'}
                             </td>
+                            <td>
+                              {sub.payment_id && sub.payment_status === 'completed' ? (
+                                <a
+                                  href={apiUrl(`/api/invoice/download/${sub.payment_id}`)}
+                                  className="btn btn-sm btn-outline-primary"
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  title="Download Invoice"
+                                >
+                                  <i className="bi bi-download me-1"></i>
+                                  Invoice
+                                </a>
+                              ) : (
+                                <span className="text-muted small">N/A</span>
+                              )}
+                            </td>
                           </tr>
-                        ))}
+                          {isExpanded && (
+                            <tr>
+                              <td colSpan={11} className="p-0">
+                                <div className="bg-light p-3">
+                                  {isLoadingPayments ? (
+                                    <div className="text-center py-2">
+                                      <div className="spinner-border spinner-border-sm" role="status">
+                                        <span className="visually-hidden">Loading...</span>
+                                      </div>
+                                    </div>
+                                  ) : payments.length === 0 ? (
+                                    <div className="text-center text-muted py-2">
+                                      No payment transactions found
+                                    </div>
+                                  ) : (
+                                    <div>
+                                      <h6 className="mb-3">
+                                        <i className="bi bi-clock-history me-2"></i>
+                                        Payment Transaction History ({payments.length})
+                                      </h6>
+                                      <div className="table-responsive">
+                                        <table className="table table-sm table-bordered">
+                                          <thead className="table-secondary">
+                                            <tr>
+                                              <th>Date</th>
+                                              <th>Invoice #</th>
+                                              <th>Plan</th>
+                                              <th>Amount</th>
+                                              <th>Status</th>
+                                              <th>Method</th>
+                                              <th>Payment ID</th>
+                                              <th>Actions</th>
+                                            </tr>
+                                          </thead>
+                                          <tbody>
+                                            {payments.map((payment) => (
+                                              <tr key={payment.payment_id}>
+                                                <td>
+                                                  {payment.transaction_date
+                                                    ? new Date(payment.transaction_date).toLocaleDateString('en-IN', {
+                                                        year: 'numeric',
+                                                        month: 'short',
+                                                        day: 'numeric',
+                                                        hour: '2-digit',
+                                                        minute: '2-digit'
+                                                      })
+                                                    : 'N/A'}
+                                                </td>
+                                                <td>
+                                                  <code className="small">{payment.invoice_number || 'N/A'}</code>
+                                                </td>
+                                                <td>
+                                                  <span className="badge bg-secondary">
+                                                    {payment.plan_type?.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase()) || 'N/A'}
+                                                  </span>
+                                                </td>
+                                                <td className="fw-bold">₹{payment.amount.toFixed(2)}</td>
+                                                <td>
+                                                  <span className={`badge ${
+                                                    payment.payment_status === 'completed' ? 'bg-success' :
+                                                    payment.payment_status === 'pending' ? 'bg-warning' :
+                                                    payment.payment_status === 'failed' ? 'bg-danger' : 'bg-secondary'
+                                                  }`}>
+                                                    {payment.payment_status || 'N/A'}
+                                                  </span>
+                                                </td>
+                                                <td>
+                                                  {payment.payment_method ? (
+                                                    <span className="badge bg-info">{payment.payment_method.toUpperCase()}</span>
+                                                  ) : 'N/A'}
+                                                </td>
+                                                <td>
+                                                  {payment.razorpay_payment_id ? (
+                                                    <small className="font-monospace">{payment.razorpay_payment_id.substring(0, 12)}...</small>
+                                                  ) : 'N/A'}
+                                                </td>
+                                                <td>
+                                                  {payment.payment_status === 'completed' && payment.payment_id ? (
+                                                    <a
+                                                      href={apiUrl(`/api/invoice/download/${payment.payment_id}`)}
+                                                      className="btn btn-sm btn-outline-primary"
+                                                      target="_blank"
+                                                      rel="noopener noreferrer"
+                                                      title="Download Invoice"
+                                                    >
+                                                      <i className="bi bi-download"></i>
+                                                    </a>
+                                                  ) : (
+                                                    <span className="text-muted small">-</span>
+                                                  )}
+                                                </td>
+                                              </tr>
+                                            ))}
+                                          </tbody>
+                                        </table>
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </React.Fragment>
+                        );
+                      })}
                       </tbody>
                     </table>
                   </div>
