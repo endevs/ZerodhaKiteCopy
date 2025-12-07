@@ -280,19 +280,10 @@ def register_razorpay_routes(app):
             logging.error(f"Error fetching subscription info: {e}", exc_info=True)
             return jsonify({'status': 'error', 'message': 'Failed to fetch subscription info'}), 500
 
-    @app.route("/api/payment/create-order", methods=['POST', 'OPTIONS'])
-    @app.route("/payment/create-order", methods=['POST', 'OPTIONS'])  # Alternative route without /api prefix
+    @app.route("/api/payment/create-order", methods=['POST'])
     def api_create_payment_order():
         """Create a Razorpay order for subscription payment."""
-        logging.info(f"Payment create-order endpoint called: method={request.method}, path={request.path}, origin={request.headers.get('Origin', 'N/A')}")
-        # Handle CORS preflight
-        if request.method == 'OPTIONS':
-            response = jsonify({'status': 'ok'})
-            response.headers.add('Access-Control-Allow-Origin', request.headers.get('Origin', '*'))
-            response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
-            response.headers.add('Access-Control-Allow-Methods', 'POST, OPTIONS')
-            response.headers.add('Access-Control-Allow-Credentials', 'true')
-            return response
+        logging.info(f"Payment create-order endpoint called: method={request.method}, path={request.path}")
         
         # Ensure we return JSON with proper Content-Type
         if 'user_id' not in session:
