@@ -172,8 +172,9 @@ const Navigation: React.FC<NavigationProps> = ({
                 onMouseLeave={scheduleClose}
                 style={{ touchAction: 'manipulation' }}
               >
-                <span 
-                  className="nav-link text-light"
+                <button
+                  type="button"
+                  className="nav-link text-light border-0 bg-transparent p-0"
                   style={{ 
                     cursor: 'pointer', 
                     touchAction: 'manipulation', 
@@ -183,16 +184,22 @@ const Navigation: React.FC<NavigationProps> = ({
                     display: 'inline-block',
                     minWidth: '44px',
                     minHeight: '44px',
-                    padding: '0.5rem 1rem'
+                    padding: '0.5rem 1rem',
+                    textAlign: 'left',
+                    width: '100%'
                   }}
                   onClick={(e) => {
                     e.stopPropagation();
+                    e.preventDefault();
                     if (showDropdown) {
                       setShowDropdown(false);
                       clearCloseTimeout();
                     } else {
                       openDropdown();
                     }
+                  }}
+                  onTouchStart={(e) => {
+                    e.stopPropagation();
                   }}
                   onTouchEnd={(e) => {
                     e.stopPropagation();
@@ -211,7 +218,7 @@ const Navigation: React.FC<NavigationProps> = ({
                     <span className="ms-1 text-white-50">({kiteClientId})</span>
                   )}
                   <i className={`bi bi-chevron-${showDropdown ? 'up' : 'down'} ms-2`} style={{ fontSize: '0.75rem' }}></i>
-                </span>
+                </button>
                 {showDropdown && (
                   <div 
                     className="dropdown-menu show position-absolute end-0"

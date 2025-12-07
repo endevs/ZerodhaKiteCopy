@@ -261,6 +261,7 @@ def send_payment_confirmation_email(user_email: str, user_name: str, payment_dat
 
 def register_razorpay_routes(app):
     """Register all Razorpay-related routes with the Flask app."""
+    logging.info("Registering Razorpay routes...")
     
     @app.route("/api/subscription/info", methods=['GET'])
     def api_subscription_info():
@@ -280,8 +281,10 @@ def register_razorpay_routes(app):
             return jsonify({'status': 'error', 'message': 'Failed to fetch subscription info'}), 500
 
     @app.route("/api/payment/create-order", methods=['POST', 'OPTIONS'])
+    @app.route("/payment/create-order", methods=['POST', 'OPTIONS'])  # Alternative route without /api prefix
     def api_create_payment_order():
         """Create a Razorpay order for subscription payment."""
+        logging.info(f"Payment create-order endpoint called: method={request.method}, path={request.path}, origin={request.headers.get('Origin', 'N/A')}")
         # Handle CORS preflight
         if request.method == 'OPTIONS':
             response = jsonify({'status': 'ok'})
@@ -291,11 +294,16 @@ def register_razorpay_routes(app):
             response.headers.add('Access-Control-Allow-Credentials', 'true')
             return response
         
+        # Ensure we return JSON with proper Content-Type
         if 'user_id' not in session:
-            return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+            response = jsonify({'status': 'error', 'message': 'User not logged in'})
+            response.headers['Content-Type'] = 'application/json'
+            return response, 401
         
         if not razorpay_client:
-            return jsonify({'status': 'error', 'message': 'Payment gateway not configured'}), 500
+            response = jsonify({'status': 'error', 'message': 'Payment gateway not configured'})
+            response.headers['Content-Type'] = 'application/json'
+            return response, 500
         
         try:
             data = request.get_json()
@@ -310,7 +318,9 @@ def register_razorpay_routes(app):
                 if amount is None:
                     amount = get_customization_price()
             elif not plan_type or plan_type not in PLAN_TYPES:
-                return jsonify({'status': 'error', 'message': 'Invalid plan type'}), 400
+                response = jsonify({'status': 'error', 'message': 'Invalid plan type'})
+                response.headers['Content-Type'] = 'application/json'
+                return response, 400
             else:
                 plan_info = PLAN_TYPES[plan_type]
                 # Use provided amount or plan price
@@ -340,8 +350,12 @@ def register_razorpay_routes(app):
                 # Check if it's a connection error
                 error_str = str(e).lower()
                 if 'connection' in error_str or 'reset' in error_str or 'aborted' in error_str:
-                    return jsonify({'status': 'error', 'message': 'Payment gateway connection error. Please try again in a moment.'}), 503
-                return jsonify({'status': 'error', 'message': f'Failed to create payment order: {str(e)}'}), 500
+                    response = jsonify({'status': 'error', 'message': 'Payment gateway connection error. Please try again in a moment.'})
+                    response.headers['Content-Type'] = 'application/json'
+                    return response, 503
+                response = jsonify({'status': 'error', 'message': f'Failed to create payment order: {str(e)}'})
+                response.headers['Content-Type'] = 'application/json'
+                return response, 500
             
             # Store payment record in database
             conn = get_db_connection()
@@ -371,7 +385,7 @@ def register_razorpay_routes(app):
             finally:
                 conn.close()
             
-            return jsonify({
+            response = jsonify({
                 'status': 'success',
                 'order': {
                     'id': razorpay_order['id'],
@@ -381,9 +395,13 @@ def register_razorpay_routes(app):
                     'payment_id': payment_id
                 }
             })
+            response.headers['Content-Type'] = 'application/json'
+            return response
         except Exception as e:
             logging.error(f"Error creating payment order: {e}", exc_info=True)
-            return jsonify({'status': 'error', 'message': 'Failed to create payment order'}), 500
+            response = jsonify({'status': 'error', 'message': 'Failed to create payment order'})
+            response.headers['Content-Type'] = 'application/json'
+            return response, 500
 
     @app.route("/api/payment/verify", methods=['POST'])
     def api_verify_payment():
