@@ -22,6 +22,13 @@ const App: React.FC = () => {
           const isAuth = data.authenticated === true || (data.user_id !== undefined && data.user_id !== null);
           console.log('[App] Authentication check:', { authenticated: isAuth, data });
           setIsAuthenticated(isAuth);
+          
+          // If authenticated but no credentials, redirect to welcome page
+          // But only if we're at root path (not already navigating)
+          if (isAuth && !data.zerodha_credentials_present && window.location.pathname === '/') {
+            // Don't redirect here, let the user see landing page or navigate manually
+            // The Welcome page will handle showing the credentials form
+          }
         } else {
           console.log('[App] Authentication check failed:', response.status);
           setIsAuthenticated(false);

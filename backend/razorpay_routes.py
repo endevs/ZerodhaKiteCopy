@@ -9,6 +9,8 @@ import ssl
 from flask import request, jsonify, session
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
 import razorpay
 import config
 from database import get_db_connection
@@ -21,6 +23,7 @@ from subscription_manager import (
     PLAN_TYPES,
     get_customization_price
 )
+from invoice_generator import generate_invoice_pdf, get_next_invoice_number, save_invoice_number_to_payment
 
 # Initialize Razorpay client (use config module for consistency)
 RAZORPAY_KEY_ID = config.RAZORPAY_KEY_ID
@@ -35,8 +38,8 @@ if RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET:
         logging.error(f"Failed to initialize Razorpay client: {e}")
 
 
-def send_payment_confirmation_email(user_email: str, user_name: str, payment_data: dict, subscription_data: dict):
-    """Send payment confirmation email with receipt to user."""
+def send_payment_confirmation_email(user_email: str, user_name: str, payment_data: dict, subscription_data: dict, payment_id: int = None):
+    """Send payment confirmation email with PDF invoice attachment to user."""
     try:
         port = 465
         smtp_server = config.SMTP_SERVER
@@ -184,6 +187,57 @@ def send_payment_confirmation_email(user_email: str, user_name: str, payment_dat
         message.attach(MIMEText(text, "plain"))
         message.attach(MIMEText(html, "html"))
         
+        # Generate and attach PDF invoice
+        try:
+            # Use invoice number from payment_data (should already be set during payment verification)
+            invoice_number = payment_data.get('invoice_number')
+            if not invoice_number and payment_id:
+                # Fallback: if invoice number not set, get it from database
+                conn = get_db_connection()
+                try:
+                    payment_row = conn.execute(
+                        "SELECT invoice_number FROM payments WHERE id = ?",
+                        (payment_id,)
+                    ).fetchone()
+                    if payment_row and payment_row['invoice_number']:
+                        invoice_number = payment_row['invoice_number']
+                    else:
+                        # Last resort: generate new invoice number (shouldn't happen)
+                        logging.warning(f"Invoice number missing for payment {payment_id}, generating new one")
+                        invoice_number = get_next_invoice_number()
+                        save_invoice_number_to_payment(payment_id, invoice_number)
+                finally:
+                    conn.close()
+            
+            if invoice_number:
+                payment_data['invoice_number'] = invoice_number
+            
+            # Prepare user data for invoice
+            user_invoice_data = {
+                'name': user_name,
+                'email': user_email
+            }
+            
+            # Generate PDF invoice
+            pdf_buffer = generate_invoice_pdf(payment_data, user_invoice_data, subscription_data)
+            
+            # Attach PDF to email
+            pdf_attachment = MIMEBase('application', 'pdf')
+            pdf_attachment.set_payload(pdf_buffer.read())
+            encoders.encode_base64(pdf_attachment)
+            pdf_filename = f"Invoice_{invoice_number.replace('/', '_')}.pdf"
+            pdf_attachment.add_header(
+                'Content-Disposition',
+                f'attachment; filename= {pdf_filename}'
+            )
+            message.attach(pdf_attachment)
+            
+            logging.info(f"PDF invoice {invoice_number} generated and attached to email")
+        except Exception as e:
+            logging.error(f"Error generating PDF invoice: {e}", exc_info=True)
+            # Continue sending email even if PDF generation fails
+            logging.warning("Email will be sent without PDF attachment")
+        
         context = ssl.create_default_context()
         with smtplib.SMTP_SSL(smtp_server, port, context=context) as server:
             logging.info(f"Connecting to SMTP server {smtp_server}:{port}...")
@@ -192,7 +246,7 @@ def send_payment_confirmation_email(user_email: str, user_name: str, payment_dat
             server.sendmail(sender_email, receiver_email, message.as_string())
             logging.info(f"Email sent successfully to {receiver_email}")
         
-        logging.info(f"Payment confirmation email sent successfully to {user_email}")
+        logging.info(f"Payment confirmation email with invoice sent successfully to {user_email}")
         return True
     except smtplib.SMTPAuthenticationError as e:
         logging.error(f"SMTP authentication failed. Check EMAIL_FROM and PASSWORD_EMAIL: {e}")
@@ -496,6 +550,20 @@ def register_razorpay_routes(app):
                         logging.error(f"Error fetching subscription info: {e}", exc_info=True)
                         subscription_info = None
                 
+                # Generate and save invoice number immediately after payment verification (atomic)
+                invoice_number = None
+                if not payment.get('invoice_number'):
+                    try:
+                        invoice_number = get_next_invoice_number()
+                        # Save invoice number to database immediately
+                        save_invoice_number_to_payment(payment['id'], invoice_number)
+                        logging.info(f"Invoice number {invoice_number} assigned to payment ID {payment['id']}")
+                    except Exception as e:
+                        logging.error(f"Error assigning invoice number: {e}", exc_info=True)
+                        # Continue without invoice number - will be generated later if needed
+                else:
+                    invoice_number = payment.get('invoice_number')
+                
                 # Prepare receipt data
                 if is_customization:
                     plan_name = 'Strategy Customization'
@@ -504,6 +572,7 @@ def register_razorpay_routes(app):
                 
                 receipt_data = {
                     'payment_id': payment['id'],
+                    'invoice_number': invoice_number,  # Include invoice number in receipt data
                     'razorpay_payment_id': razorpay_payment_id,
                     'razorpay_order_id': razorpay_order_id,
                     'amount': payment['amount'],
@@ -597,4 +666,282 @@ def register_razorpay_routes(app):
         except Exception as e:
             logging.error(f"Error checking feature access: {e}", exc_info=True)
             return jsonify({'status': 'error', 'message': 'Failed to check feature access'}), 500
+
+    @app.route("/api/invoice/download/<int:payment_id>", methods=['GET'])
+    def api_download_invoice(payment_id):
+        """Download invoice PDF for a payment (user or admin)."""
+        if 'user_id' not in session:
+            return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+        
+        user_id = session['user_id']
+        # Check if user is admin using the same method as other admin endpoints
+        from app import _require_admin
+        is_admin = _require_admin()
+        
+        try:
+            conn = get_db_connection()
+            try:
+                # Get payment record
+                payment_row = conn.execute(
+                    """
+                    SELECT p.*, u.email, u.user_name 
+                    FROM payments p
+                    JOIN users u ON p.user_id = u.id
+                    WHERE p.id = ?
+                    """,
+                    (payment_id,)
+                ).fetchone()
+                
+                if not payment_row:
+                    return jsonify({'status': 'error', 'message': 'Payment not found'}), 404
+                
+                payment = dict(payment_row)
+                
+                # Check if user has access (either owns the payment or is admin)
+                if not is_admin and payment['user_id'] != user_id:
+                    return jsonify({'status': 'error', 'message': 'Unauthorized access'}), 403
+                
+                # Check if payment is completed
+                if payment.get('payment_status') != 'completed':
+                    return jsonify({'status': 'error', 'message': 'Invoice only available for completed payments'}), 400
+                
+                # Get subscription info if available
+                subscription_info = None
+                if payment.get('subscription_id'):
+                    sub_row = conn.execute(
+                        "SELECT * FROM subscriptions WHERE id = ?",
+                        (payment['subscription_id'],)
+                    ).fetchone()
+                    if sub_row:
+                        subscription_info = dict(sub_row)
+                
+            finally:
+                conn.close()
+            
+            # Get invoice number from database (must exist for completed payments)
+            invoice_number = payment.get('invoice_number')
+            if not invoice_number:
+                # If missing, generate and save it (shouldn't happen, but handle gracefully)
+                logging.warning(f"Invoice number missing for payment {payment['id']}, generating now")
+                invoice_number = get_next_invoice_number()
+                save_invoice_number_to_payment(payment['id'], invoice_number)
+            
+            # Prepare payment data (same structure as email generation)
+            payment_data = {
+                'payment_id': payment['id'],
+                'invoice_number': invoice_number,
+                'razorpay_payment_id': payment.get('razorpay_payment_id', 'N/A'),
+                'razorpay_order_id': payment.get('razorpay_order_id', 'N/A'),
+                'amount': payment['amount'],
+                'currency': payment.get('currency', 'INR'),
+                'payment_method': payment.get('payment_method', 'Unknown'),
+                'transaction_date': payment.get('transaction_date') or datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                'plan_type': payment.get('plan_type', ''),
+                'plan_name': payment.get('plan_type', 'Unknown Plan').replace('_', ' ').title()
+            }
+            
+            # Get plan name from PLAN_TYPES if available
+            if payment_data['plan_type'] in PLAN_TYPES:
+                payment_data['plan_name'] = PLAN_TYPES[payment_data['plan_type']]['name']
+            elif payment_data['plan_type'] == 'customization':
+                payment_data['plan_name'] = 'Strategy Customization'
+            
+            # Prepare user data (same structure as email generation)
+            user_data = {
+                'name': payment.get('user_name') or 'Customer',
+                'email': payment.get('email', 'N/A')
+            }
+            
+            # Generate PDF using the same function as email (ensures consistency)
+            pdf_buffer = generate_invoice_pdf(payment_data, user_data, subscription_info)
+            
+            # Return PDF as response
+            from flask import Response
+            invoice_number = payment_data['invoice_number'].replace('/', '_')
+            filename = f"Invoice_{invoice_number}.pdf"
+            
+            return Response(
+                pdf_buffer.getvalue(),
+                mimetype='application/pdf',
+                headers={
+                    'Content-Disposition': f'attachment; filename={filename}'
+                }
+            )
+            
+        except Exception as e:
+            logging.error(f"Error generating invoice PDF: {e}", exc_info=True)
+            return jsonify({'status': 'error', 'message': f'Failed to generate invoice: {str(e)}'}), 500
+
+    @app.route("/api/invoice/resend/<int:payment_id>", methods=['POST'])
+    def api_resend_invoice(payment_id):
+        """Resend invoice email to user."""
+        if 'user_id' not in session:
+            return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+        
+        user_id = session['user_id']
+        # Check if user is admin using the same method as other admin endpoints
+        from app import _require_admin
+        is_admin = _require_admin()
+        
+        try:
+            conn = get_db_connection()
+            try:
+                # Get payment record
+                payment_row = conn.execute(
+                    """
+                    SELECT p.*, u.email, u.user_name 
+                    FROM payments p
+                    JOIN users u ON p.user_id = u.id
+                    WHERE p.id = ?
+                    """,
+                    (payment_id,)
+                ).fetchone()
+                
+                if not payment_row:
+                    return jsonify({'status': 'error', 'message': 'Payment not found'}), 404
+                
+                payment = dict(payment_row)
+                
+                # Check if user has access (either owns the payment or is admin)
+                if not is_admin and payment['user_id'] != user_id:
+                    return jsonify({'status': 'error', 'message': 'Unauthorized access'}), 403
+                
+                # Check if payment is completed
+                if payment.get('payment_status') != 'completed':
+                    return jsonify({'status': 'error', 'message': 'Invoice can only be resent for completed payments'}), 400
+                
+                # Get subscription info if available
+                subscription_info = None
+                if payment.get('subscription_id'):
+                    sub_row = conn.execute(
+                        "SELECT * FROM subscriptions WHERE id = ?",
+                        (payment['subscription_id'],)
+                    ).fetchone()
+                    if sub_row:
+                        subscription_info = dict(sub_row)
+                        # Get subscription info using subscription_manager
+                        try:
+                            subscription_info = get_user_subscription_info(payment['user_id'])
+                        except:
+                            pass
+                
+            finally:
+                conn.close()
+            
+            # Get invoice number from database (must exist for completed payments)
+            invoice_number = payment.get('invoice_number')
+            if not invoice_number:
+                # If missing, generate and save it (shouldn't happen, but handle gracefully)
+                logging.warning(f"Invoice number missing for payment {payment['id']}, generating now")
+                invoice_number = get_next_invoice_number()
+                save_invoice_number_to_payment(payment['id'], invoice_number)
+            
+            # Prepare payment data (same structure as email generation)
+            payment_data = {
+                'payment_id': payment['id'],
+                'invoice_number': invoice_number,
+                'razorpay_payment_id': payment.get('razorpay_payment_id', 'N/A'),
+                'razorpay_order_id': payment.get('razorpay_order_id', 'N/A'),
+                'amount': payment['amount'],
+                'currency': payment.get('currency', 'INR'),
+                'payment_method': payment.get('payment_method', 'Unknown'),
+                'transaction_date': payment.get('transaction_date') or datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                'plan_type': payment.get('plan_type', ''),
+                'plan_name': payment.get('plan_type', 'Unknown Plan').replace('_', ' ').title()
+            }
+            
+            # Get plan name from PLAN_TYPES if available
+            if payment_data['plan_type'] in PLAN_TYPES:
+                payment_data['plan_name'] = PLAN_TYPES[payment_data['plan_type']]['name']
+            elif payment_data['plan_type'] == 'customization':
+                payment_data['plan_name'] = 'Strategy Customization'
+            
+            # Prepare user data (same structure as email generation)
+            user_name = payment.get('user_name') or payment.get('email', 'Customer').split('@')[0]
+            user_email = payment.get('email')
+            
+            # Send email
+            email_sent = send_payment_confirmation_email(
+                user_email,
+                user_name,
+                payment_data,
+                subscription_info or {},
+                payment['id']
+            )
+            
+            if email_sent:
+                return jsonify({
+                    'status': 'success',
+                    'message': 'Invoice email sent successfully'
+                })
+            else:
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Failed to send invoice email. Please check email configuration.'
+                }), 500
+                
+        except Exception as e:
+            logging.error(f"Error resending invoice email: {e}", exc_info=True)
+            return jsonify({'status': 'error', 'message': f'Failed to resend invoice: {str(e)}'}), 500
+
+    @app.route("/api/invoice/list", methods=['GET'])
+    def api_list_invoices():
+        """Get list of invoices for current user."""
+        if 'user_id' not in session:
+            return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+        
+        user_id = session['user_id']
+        is_admin = session.get('is_admin', False)
+        
+        try:
+            conn = get_db_connection()
+            try:
+                if is_admin:
+                    # Admin can see all invoices
+                    payments = conn.execute(
+                        """
+                        SELECT p.*, u.email, u.user_name 
+                        FROM payments p
+                        JOIN users u ON p.user_id = u.id
+                        WHERE p.payment_status = 'completed'
+                        ORDER BY p.transaction_date DESC
+                        """
+                    ).fetchall()
+                else:
+                    # User can only see their own invoices
+                    payments = conn.execute(
+                        """
+                        SELECT p.*, u.email, u.user_name 
+                        FROM payments p
+                        JOIN users u ON p.user_id = u.id
+                        WHERE p.user_id = ? AND p.payment_status = 'completed'
+                        ORDER BY p.transaction_date DESC
+                        """,
+                        (user_id,)
+                    ).fetchall()
+                
+                invoices = []
+                for payment in payments:
+                    p = dict(payment)
+                    invoices.append({
+                        'payment_id': p['id'],
+                        'invoice_number': p.get('invoice_number', 'N/A'),
+                        'amount': float(p['amount']),
+                        'plan_type': p.get('plan_type', ''),
+                        'transaction_date': p.get('transaction_date', ''),
+                        'user_name': p.get('user_name', ''),
+                        'user_email': p.get('email', '')
+                    })
+                
+            finally:
+                conn.close()
+            
+            return jsonify({
+                'status': 'success',
+                'invoices': invoices
+            })
+            
+        except Exception as e:
+            logging.error(f"Error listing invoices: {e}", exc_info=True)
+            return jsonify({'status': 'error', 'message': f'Failed to list invoices: {str(e)}'}), 500
 

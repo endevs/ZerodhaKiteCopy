@@ -78,7 +78,22 @@ const VerifyOtp: React.FC = () => {
             }
             navigate(redirectPath);
           } else {
-            navigate('/welcome');
+            // Check if user has API credentials
+            // If not, redirect to welcome page; otherwise go to dashboard
+            const credResponse = await fetch(apiUrl('/api/user-credentials'), {
+              credentials: 'include',
+            });
+            if (credResponse.ok) {
+              const credData = await credResponse.json();
+              if (credData?.has_credentials) {
+                navigate('/dashboard');
+              } else {
+                navigate('/welcome');
+              }
+            } else {
+              // If credential check fails, go to welcome page
+              navigate('/welcome');
+            }
           }
         } else {
           setMessage({ type: 'danger', text: data.message || 'OTP verification failed.' });

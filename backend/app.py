@@ -3219,11 +3219,15 @@ def api_signup():
         otp = secrets.token_hex(3).upper()
         otp_expiry = datetime.datetime.now() + datetime.timedelta(minutes=10)
 
-        conn.execute('INSERT INTO users (mobile, email, otp, otp_expiry) VALUES (?, ?, ?, ?)',
+        cursor = conn.execute('INSERT INTO users (mobile, email, otp, otp_expiry) VALUES (?, ?, ?, ?)',
                      (mobile, email, otp, otp_expiry))
-        user_id = conn.lastrowid
+        user_id = cursor.lastrowid
         
-        # Create freemium subscription for new user
+        # Commit and close connection BEFORE creating subscription to avoid database locks
+        conn.commit()
+        conn.close()
+        
+        # Create freemium subscription for new user (uses its own connection)
         try:
             from subscription_manager import create_subscription
             create_subscription(user_id, 'freemium', trial_days=7)
@@ -3231,9 +3235,6 @@ def api_signup():
         except Exception as sub_error:
             logging.warning(f"Failed to create freemium subscription for user {user_id}: {sub_error}")
             # Don't fail signup if subscription creation fails
-        
-        conn.commit()
-        conn.close()
 
         send_email(email, otp)
         
@@ -3366,7 +3367,11 @@ def api_verify_otp():
                 conn.execute('UPDATE users SET email_verified = 1 WHERE email = ?', (email,))
                 user_id = user['id']
                 
-                # Create freemium subscription for new user if they don't have one
+                # Commit and close connection BEFORE creating subscription to avoid database locks
+                conn.commit()
+                conn.close()
+                
+                # Create freemium subscription for new user if they don't have one (uses its own connection)
                 try:
                     from subscription_manager import get_user_subscription, create_subscription
                     existing_subscription = get_user_subscription(user_id)
@@ -3376,9 +3381,6 @@ def api_verify_otp():
                 except Exception as sub_error:
                     logging.warning(f"Failed to create freemium subscription for user {user_id}: {sub_error}")
                     # Don't fail verification if subscription creation fails
-                
-                conn.commit()
-                conn.close()
                 return jsonify({
                     'status': 'success',
                     'message': 'Registration successful! Please log in.',
@@ -3388,7 +3390,10 @@ def api_verify_otp():
                 # Already verified - login
                 user_id = user['id']
                 
-                # Ensure user has freemium subscription if they don't have any subscription
+                # Close connection BEFORE creating subscription to avoid database locks
+                conn.close()
+                
+                # Ensure user has freemium subscription if they don't have any subscription (uses its own connection)
                 try:
                     from subscription_manager import get_user_subscription, create_subscription
                     existing_subscription = get_user_subscription(user_id)
@@ -3398,8 +3403,6 @@ def api_verify_otp():
                 except Exception as sub_error:
                     logging.warning(f"Failed to create freemium subscription for user {user_id}: {sub_error}")
                     # Don't fail login if subscription creation fails
-                
-                conn.close()
                 session['user_id'] = user_id
                 return jsonify({
                     'status': 'success',
@@ -3617,6 +3620,10 @@ def zerodha_login():
     if not user or not user['app_key'] or not user['app_secret']:
         # Use helper function that works in both local and production
         frontend_url = _get_frontend_url()
+        if not user:
+            return redirect(f"{frontend_url}/welcome?credentials=missing&error=user_not_found")
+        elif not user['app_key'] or not user['app_secret']:
+            return redirect(f"{frontend_url}/welcome?credentials=missing&error=api_key_missing")
         return redirect(f"{frontend_url}/welcome?credentials=missing")
 
     kite.api_key = user['app_key']
@@ -3658,7 +3665,8 @@ def callback():
     conn.close()
 
     if not user or not user['app_key'] or not user['app_secret']:
-        return "App key or secret not configured", 400
+        frontend_url = _get_frontend_url()
+        return redirect(f"{frontend_url}/welcome?credentials=missing&error=api_key_missing")
 
     kite.api_key = user['app_key']
 
@@ -3697,7 +3705,13 @@ def callback():
         return redirect(f"{frontend_url}/dashboard")
     except Exception as e:
         logging.error(f"Error generating session: {e}")
-        return "Error generating session", 500
+        error_message = str(e).lower()
+        frontend_url = _get_frontend_url()
+        # Check for specific error types and provide user-friendly messages
+        if "invalid" in error_message or "incorrect" in error_message or "api_key" in error_message:
+            return redirect(f"{frontend_url}/welcome?credentials=invalid&error=api_key_invalid")
+        else:
+            return redirect(f"{frontend_url}/welcome?credentials=error&error=session_failed")
 
 @app.route("/dashboard")
 def dashboard():
@@ -4109,6 +4123,63 @@ def api_admin_get_subscriptions():
     finally:
         conn.close()
 
+@app.route("/api/admin/user/<int:user_id>/payments", methods=['GET'])
+def api_admin_get_user_payments(user_id):
+    """Get all payment transactions for a specific user (admin only)."""
+    if not _require_admin():
+        return jsonify({'status': 'error', 'message': 'Admin access required'}), 403
+    
+    conn = get_db_connection()
+    try:
+        # Get all payments for this user, ordered by transaction date (newest first)
+        payments = conn.execute("""
+            SELECT 
+                p.id as payment_id,
+                p.razorpay_order_id,
+                p.razorpay_payment_id,
+                p.invoice_number,
+                p.amount,
+                p.currency,
+                p.plan_type,
+                p.payment_status,
+                p.payment_method,
+                p.transaction_date,
+                p.created_at,
+                s.id as subscription_id,
+                s.plan_type as subscription_plan_type,
+                s.status as subscription_status
+            FROM payments p
+            LEFT JOIN subscriptions s ON p.subscription_id = s.id
+            WHERE p.user_id = ?
+            ORDER BY p.transaction_date DESC, p.created_at DESC
+        """, (user_id,)).fetchall()
+        
+        result = []
+        for payment in payments:
+            p_dict = dict(payment)
+            # Format dates
+            if p_dict.get('transaction_date'):
+                try:
+                    p_dict['transaction_date'] = datetime.datetime.fromisoformat(p_dict['transaction_date']).isoformat()
+                except:
+                    pass
+            if p_dict.get('created_at'):
+                try:
+                    p_dict['created_at'] = datetime.datetime.fromisoformat(p_dict['created_at']).isoformat()
+                except:
+                    pass
+            result.append(p_dict)
+        
+        return jsonify({
+            'status': 'success',
+            'payments': result
+        })
+    except Exception as e:
+        logging.error(f"Error fetching user payments: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': 'Failed to fetch payments'}), 500
+    finally:
+        conn.close()
+
 @app.route("/api/admin/plan-prices", methods=['GET'])
 def api_admin_get_plan_prices():
     """Get all plan prices (admin only)."""
@@ -4509,12 +4580,16 @@ def api_user_data():
         stored_token = user.get('zerodha_access_token')
         session_token = session.get('access_token')
         stored_user_name = user.get('user_name')  # Get stored user name from database
+        user_email = user.get('email', '')  # Get email as fallback
+
+        # Use stored name if available, otherwise use email, otherwise 'Guest'
+        display_name = stored_user_name or user_email or 'Guest'
 
         default_response = {
             'status': 'success',
             'authenticated': True,
             'user_id': user_id,
-            'user_name': stored_user_name or 'Guest',  # Use stored name if available
+            'user_name': display_name,
             'balance': 0,
             'access_token_present': False,
             'token_valid': False,
@@ -4719,7 +4794,12 @@ def api_user_credentials():
         app_secret = (payload.get('app_secret') or '').strip()
         if not app_key or not app_secret:
             conn.close()
-            return jsonify({'status': 'error', 'message': 'API key and secret are required'}), 400
+            if not app_key and not app_secret:
+                return jsonify({'status': 'error', 'message': 'Please provide both Zerodha API Key and API Secret to enable live trading features.'}), 400
+            elif not app_key:
+                return jsonify({'status': 'error', 'message': 'Please provide your Zerodha API Key to enable live trading features.'}), 400
+            else:
+                return jsonify({'status': 'error', 'message': 'Please provide your Zerodha API Secret to enable live trading features.'}), 400
 
         conn.execute(
             'UPDATE users SET app_key = ?, app_secret = ? WHERE id = ?',
@@ -7223,7 +7303,7 @@ def api_start_ticker():
                 return jsonify({'status': 'error', 'message': 'User not found'}), 404
             
             if not user['app_key']:
-                return jsonify({'status': 'error', 'message': 'Zerodha credentials not configured'}), 400
+                return jsonify({'status': 'error', 'message': 'Zerodha API credentials are not configured. Please add your API Key and Secret from the Welcome page to enable this feature.'}), 400
             
             # Start ticker
             try:
@@ -8664,7 +8744,7 @@ def api_live_trade_preview():
     user = dict(user_row)
     api_key = user.get('app_key')
     if not api_key:
-        return jsonify({'status': 'error', 'message': 'Zerodha API key not configured for this user.'}), 400
+        return jsonify({'status': 'error', 'message': 'Zerodha API credentials are not configured. Please add your API Key and Secret from the Welcome page to enable live trading features.'}), 400
 
     try:
         kite_client = KiteConnect(api_key=api_key)
@@ -8724,7 +8804,7 @@ def api_live_trade_preview_order():
     user = dict(user_row)
     api_key = user.get('app_key')
     if not api_key:
-        return jsonify({'status': 'error', 'message': 'Zerodha API key not configured for this user.'}), 400
+        return jsonify({'status': 'error', 'message': 'Zerodha API credentials are not configured. Please add your API Key and Secret from the Welcome page to enable live trading features.'}), 400
 
     try:
         kite_client = KiteConnect(api_key=api_key)
@@ -8799,7 +8879,7 @@ def api_live_trade_deploy():
     user = dict(user_row)
     api_key = user.get('app_key')
     if not api_key:
-        return jsonify({'status': 'error', 'message': 'Zerodha API key not configured for this user.'}), 400
+        return jsonify({'status': 'error', 'message': 'Zerodha API credentials are not configured. Please add your API Key and Secret from the Welcome page to enable live trading features.'}), 400
 
     strategy_id: Optional[int] = None
     strategy_name = 'Ad-hoc Strategy'
@@ -9056,7 +9136,7 @@ def api_live_trade_square_off():
     user = dict(user_row)
     api_key = user.get('app_key')
     if not api_key:
-        return jsonify({'status': 'error', 'message': 'Zerodha API key not configured for this user.'}), 400
+        return jsonify({'status': 'error', 'message': 'Zerodha API credentials are not configured. Please add your API Key and Secret from the Welcome page to enable live trading features.'}), 400
 
     try:
         def _prepare_client(client: KiteConnect) -> KiteConnect:

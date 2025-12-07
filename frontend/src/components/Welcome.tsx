@@ -8,6 +8,7 @@ import PolicyLinks from './PolicyLinks';
 const API_TUTORIAL_URL = 'https://youtu.be/r88L9AqnNaE?si=kdMDw04MxVZ8WCax';
 
 const WelcomeContent: React.FC<{ message: { type: string; text: string } | null; onLogout: () => void }> = ({ message, onLogout }) => {
+  const navigate = useNavigate();
   const [loading, setLoading] = useState(true);
   const [hasCredentials, setHasCredentials] = useState(false);
   const [appKey, setAppKey] = useState('');
@@ -48,14 +49,27 @@ const WelcomeContent: React.FC<{ message: { type: string; text: string } | null;
       });
       const data = await response.json();
       if (!response.ok) {
-        throw new Error(data?.message || 'Failed to store credentials');
+        // Use backend error message which is now user-friendly
+        throw new Error(data?.message || 'Failed to store credentials. Please check that both API Key and Secret are provided.');
       }
       setFeedback({ type: 'success', text: data.message || 'Credentials saved successfully.' });
       setHasCredentials(true);
       setAppKey('');
       setAppSecret('');
     } catch (error: any) {
-      setFeedback({ type: 'danger', text: error.message || 'Unexpected error occurred.' });
+      // Display user-friendly error messages
+      let errorMessage = error.message || 'An unexpected error occurred. Please try again.';
+      
+      // Make error messages more user-friendly
+      if (errorMessage.includes('API key') || errorMessage.includes('API Secret')) {
+        // Already user-friendly from backend
+      } else if (errorMessage.includes('Failed to store')) {
+        errorMessage = 'Unable to save your API credentials. Please ensure both API Key and Secret are correct and try again.';
+      } else if (errorMessage.includes('Unexpected error')) {
+        errorMessage = 'An error occurred while saving your credentials. Please check your internet connection and try again.';
+      }
+      
+      setFeedback({ type: 'danger', text: errorMessage });
     } finally {
       setSubmitting(false);
     }
@@ -104,49 +118,64 @@ const WelcomeContent: React.FC<{ message: { type: string; text: string } | null;
           </button>
         </div>
       ) : (
-        <form onSubmit={handleSaveCredentials} className="d-flex flex-column gap-3">
-          <div>
-            <label htmlFor="app_key" className="form-label">
-              Zerodha API Key
-            </label>
-            <input
-              type="text"
-              id="app_key"
-              className="form-control"
-              value={appKey}
-              onChange={(event) => setAppKey(event.target.value)}
-              placeholder="kiteconnect_apikey"
-              required
-            />
+        <>
+          <form onSubmit={handleSaveCredentials} className="d-flex flex-column gap-3">
+            <div>
+              <label htmlFor="app_key" className="form-label">
+                Zerodha API Key
+              </label>
+              <input
+                type="text"
+                id="app_key"
+                className="form-control"
+                value={appKey}
+                onChange={(event) => setAppKey(event.target.value)}
+                placeholder="kiteconnect_apikey"
+                required
+              />
+            </div>
+            <div>
+              <label htmlFor="app_secret" className="form-label">
+                Zerodha API Secret
+              </label>
+              <input
+                type="password"
+                id="app_secret"
+                className="form-control"
+                value={appSecret}
+                onChange={(event) => setAppSecret(event.target.value)}
+                placeholder="kiteconnect_secret"
+                required
+              />
+            </div>
+            <button type="submit" className="btn btn-primary" disabled={submitting}>
+              {submitting ? (
+                <>
+                  <span className="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>
+                  Saving...
+                </>
+              ) : (
+                'Save Credentials'
+              )}
+            </button>
+          </form>
+          <div className="d-grid gap-2 mt-3">
+            <button 
+              onClick={() => navigate('/dashboard')} 
+              type="button"
+              className="btn btn-outline-secondary"
+            >
+              Skip for now - Go to Dashboard
+            </button>
+            <button onClick={onLogout} type="button" className="btn btn-outline-light">
+              Sign out
+            </button>
           </div>
-          <div>
-            <label htmlFor="app_secret" className="form-label">
-              Zerodha API Secret
-            </label>
-            <input
-              type="password"
-              id="app_secret"
-              className="form-control"
-              value={appSecret}
-              onChange={(event) => setAppSecret(event.target.value)}
-              placeholder="kiteconnect_secret"
-              required
-            />
+          <div className="alert alert-info mt-3 mb-0 small">
+            <i className="bi bi-info-circle me-2"></i>
+            You can add your API credentials later from the dashboard. You'll be able to use the platform as a freemium user without API credentials.
           </div>
-          <button type="submit" className="btn btn-primary" disabled={submitting}>
-            {submitting ? (
-              <>
-                <span className="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>
-                Saving...
-              </>
-            ) : (
-              'Save Credentials'
-            )}
-          </button>
-          <button onClick={onLogout} type="button" className="btn btn-outline-light">
-            Sign out
-          </button>
-        </form>
+        </>
       )}
       <div className="text-center text-white-50 mt-4 small">
         Need help generating your API key?{' '}
@@ -188,15 +217,17 @@ const Welcome: React.FC = () => {
 
         const data = await response.json();
 
-        if (data?.token_valid) {
+        // Only auto-redirect if user has valid token AND credentials
+        // If credentials are missing, let user stay on welcome page to add them or skip
+        if (data?.token_valid && data?.zerodha_credentials_present) {
           navigate('/dashboard', { replace: true });
           return;
         }
 
         if (!data?.zerodha_credentials_present) {
           setMessage({
-            type: 'warning',
-            text: 'Add your Zerodha API key and secret to continue.',
+            type: 'info',
+            text: 'Add your Zerodha API key and secret to enable live trading, or skip for now to use the platform as a freemium user.',
           });
         } else if (data?.message) {
           setMessage({
@@ -219,8 +250,29 @@ const Welcome: React.FC = () => {
       setMessage({ type: 'success', text: 'You have successfully logged in.' });
     }
     const credStatus = params.get('credentials');
+    const errorType = params.get('error');
     if (credStatus === 'missing') {
-      setMessage({ type: 'warning', text: 'Please add your Zerodha API credentials before authenticating.' });
+      if (errorType === 'api_key_missing') {
+        setMessage({ 
+          type: 'warning', 
+          text: 'Zerodha API credentials are required to enable live trading. Please add your API Key and Secret below, or skip for now to continue as a freemium user.' 
+        });
+      } else {
+        setMessage({ 
+          type: 'warning', 
+          text: 'Please add your Zerodha API credentials to enable live trading features. You can skip for now and add them later.' 
+        });
+      }
+    } else if (credStatus === 'invalid' || errorType === 'api_key_invalid') {
+      setMessage({ 
+        type: 'danger', 
+        text: 'The provided Zerodha API credentials are invalid or incorrect. Please check your API Key and Secret and try again. Make sure you copied them correctly from your Zerodha developer console.' 
+      });
+    } else if (credStatus === 'error' || errorType === 'session_failed') {
+      setMessage({ 
+        type: 'danger', 
+        text: 'Unable to authenticate with Zerodha. Please check your API credentials and try again. If the problem persists, contact support.' 
+      });
     } else if (credStatus === 'saved') {
       setMessage({ type: 'success', text: 'Zerodha API credentials saved successfully. You can authenticate now.' });
     }

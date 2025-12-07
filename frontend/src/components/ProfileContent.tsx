@@ -1,6 +1,155 @@
 import React, { useState, useEffect } from 'react';
 import { apiUrl } from '../config/api';
 
+interface Invoice {
+  payment_id: number;
+  invoice_number: string;
+  amount: number;
+  plan_type: string;
+  transaction_date: string;
+  user_name: string;
+  user_email: string;
+}
+
+const InvoiceSection: React.FC = () => {
+  const [invoices, setInvoices] = useState<Invoice[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [resending, setResending] = useState<number | null>(null);
+
+  useEffect(() => {
+    fetchInvoices();
+  }, []);
+
+  const fetchInvoices = async () => {
+    try {
+      setLoading(true);
+      const response = await fetch(apiUrl('/api/invoice/list'), {
+        credentials: 'include',
+      });
+      const data = await response.json();
+      if (data.status === 'success') {
+        setInvoices(data.invoices || []);
+      }
+    } catch (error) {
+      console.error('Error fetching invoices:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleResendInvoice = async (paymentId: number) => {
+    try {
+      setResending(paymentId);
+      const response = await fetch(apiUrl(`/api/invoice/resend/${paymentId}`), {
+        method: 'POST',
+        credentials: 'include',
+      });
+      const data = await response.json();
+      if (data.status === 'success') {
+        alert('Invoice email sent successfully!');
+      } else {
+        alert(`Error: ${data.message || 'Failed to resend invoice'}`);
+      }
+    } catch (error) {
+      alert('Error resending invoice. Please try again.');
+      console.error('Error resending invoice:', error);
+    } finally {
+      setResending(null);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="text-center py-3">
+        <div className="spinner-border spinner-border-sm" role="status">
+          <span className="visually-hidden">Loading...</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (invoices.length === 0) {
+    return (
+      <div className="alert alert-info mb-0">
+        <i className="bi bi-info-circle me-2"></i>
+        No invoices found. Invoices will appear here after successful payments.
+      </div>
+    );
+  }
+
+  return (
+    <div className="table-responsive">
+      <table className="table table-hover">
+        <thead>
+          <tr>
+            <th>Invoice #</th>
+            <th>Date</th>
+            <th>Plan</th>
+            <th>Amount</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {invoices.map((invoice) => (
+            <tr key={invoice.payment_id}>
+              <td>
+                <code className="small">{invoice.invoice_number}</code>
+              </td>
+              <td>
+                {invoice.transaction_date
+                  ? new Date(invoice.transaction_date).toLocaleDateString('en-IN', {
+                      year: 'numeric',
+                      month: 'short',
+                      day: 'numeric'
+                    })
+                  : 'N/A'}
+              </td>
+              <td>
+                <span className="badge bg-secondary">
+                  {invoice.plan_type.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                </span>
+              </td>
+              <td className="fw-bold">₹{invoice.amount.toFixed(2)}</td>
+              <td>
+                <div className="btn-group btn-group-sm">
+                  <a
+                    href={apiUrl(`/api/invoice/download/${invoice.payment_id}`)}
+                    className="btn btn-outline-primary"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    title="Download Invoice"
+                  >
+                    <i className="bi bi-download me-1"></i>
+                    Download
+                  </a>
+                  <button
+                    className="btn btn-outline-secondary"
+                    onClick={() => handleResendInvoice(invoice.payment_id)}
+                    disabled={resending === invoice.payment_id}
+                    title="Resend Invoice Email"
+                  >
+                    {resending === invoice.payment_id ? (
+                      <>
+                        <span className="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>
+                        Sending...
+                      </>
+                    ) : (
+                      <>
+                        <i className="bi bi-envelope me-1"></i>
+                        Resend
+                      </>
+                    )}
+                  </button>
+                </div>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+};
+
 interface UserProfile {
   user_name: string;
   email: string;
@@ -107,8 +256,9 @@ const ProfileContent: React.FC<ProfileContentProps> = ({ onSubscribeClick }) => 
       }
       
       if (userDataResponse && userDataResponse.ok && userData.status === 'success') {
+        // Backend now returns email as fallback for user_name, so use it directly
         setProfile({
-          user_name: userData.user_name || 'Guest',
+          user_name: userData.user_name || userDetails?.email || 'Guest',
           email: userDetails?.email || 'N/A',
           mobile: userDetails?.mobile || 'N/A',
           kite_client_id: userData.kite_client_id || 'N/A',
@@ -187,7 +337,7 @@ const ProfileContent: React.FC<ProfileContentProps> = ({ onSubscribeClick }) => 
                   <div className="mb-3">
                     <i className="bi bi-person-circle" style={{ fontSize: '4rem', color: '#0d6efd' }}></i>
                   </div>
-                  <h3 className="mb-0">{profile?.user_name || 'Guest'}</h3>
+                  <h3 className="mb-0">{profile?.user_name || profile?.email || 'Guest'}</h3>
                 </div>
               </div>
 
@@ -281,6 +431,17 @@ const ProfileContent: React.FC<ProfileContentProps> = ({ onSubscribeClick }) => 
                     style={{ backgroundColor: '#f8f9fa', color: profile?.account_balance && profile.account_balance > 0 ? '#198754' : '#6c757d' }}
                   />
                 </div>
+              </div>
+
+              <hr />
+
+              {/* Invoice Section */}
+              <div className="mb-4">
+                <h5 className="mb-3">
+                  <i className="bi bi-receipt me-2"></i>
+                  Invoices
+                </h5>
+                <InvoiceSection />
               </div>
 
               <hr />
