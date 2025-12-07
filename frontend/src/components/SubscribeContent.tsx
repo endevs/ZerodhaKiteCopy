@@ -169,19 +169,25 @@ const SubscribeContent: React.FC = () => {
       const backendPlanType = planTypeMap[planId] || planId;
       
       // Create order
-      const response = await fetch(apiUrl('/api/payment/create-order'), {
+      const paymentUrl = apiUrl('/api/payment/create-order');
+      console.log('[PAYMENT] Calling payment endpoint:', paymentUrl);
+      
+      const response = await fetch(paymentUrl, {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ plan_type: backendPlanType })
       });
 
+      console.log('[PAYMENT] Response status:', response.status, 'Content-Type:', response.headers.get('content-type'));
+      
       // Check Content-Type before parsing JSON
       const contentType = response.headers.get('content-type');
       if (!contentType || !contentType.includes('application/json')) {
         const text = await response.text();
-        console.error('Non-JSON response received:', text.substring(0, 200));
-        throw new Error('Server returned an invalid response. Please try again or contact support.');
+        console.error('[PAYMENT] Non-JSON response received. Status:', response.status, 'URL:', paymentUrl);
+        console.error('[PAYMENT] Response preview:', text.substring(0, 500));
+        throw new Error(`Server returned an invalid response (Status: ${response.status}). Please check if the backend is running and accessible.`);
       }
 
       const data = await response.json();
