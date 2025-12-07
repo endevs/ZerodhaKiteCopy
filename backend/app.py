@@ -10083,6 +10083,14 @@ try:
     from razorpay_routes import register_razorpay_routes
     register_razorpay_routes(app)
     logging.info("Razorpay routes registered successfully")
+    # Verify route registration
+    with app.app_context():
+        rules = [str(rule) for rule in app.url_map.iter_rules()]
+        payment_routes = [r for r in rules if 'payment' in r.lower() or 'razorpay' in r.lower()]
+        if payment_routes:
+            logging.info(f"Registered payment routes: {payment_routes}")
+        else:
+            logging.warning("No payment routes found in registered routes!")
 except ImportError as e:
     logging.warning(f"Could not import Razorpay routes: {e}")
 except Exception as e:
