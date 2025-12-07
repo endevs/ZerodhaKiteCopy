@@ -176,6 +176,14 @@ const SubscribeContent: React.FC = () => {
         body: JSON.stringify({ plan_type: backendPlanType })
       });
 
+      // Check Content-Type before parsing JSON
+      const contentType = response.headers.get('content-type');
+      if (!contentType || !contentType.includes('application/json')) {
+        const text = await response.text();
+        console.error('Non-JSON response received:', text.substring(0, 200));
+        throw new Error('Server returned an invalid response. Please try again or contact support.');
+      }
+
       const data = await response.json();
       
       if (!response.ok || data.status !== 'success') {
@@ -205,6 +213,14 @@ const SubscribeContent: React.FC = () => {
                 razorpay_signature: response.razorpay_signature
               })
             });
+
+            // Check Content-Type before parsing JSON
+            const verifyContentType = verifyResponse.headers.get('content-type');
+            if (!verifyContentType || !verifyContentType.includes('application/json')) {
+              const text = await verifyResponse.text();
+              console.error('Non-JSON response received during verification:', text.substring(0, 200));
+              throw new Error('Payment verification failed. Please contact support with your payment ID.');
+            }
 
             const verifyData = await verifyResponse.json();
             
@@ -269,6 +285,14 @@ const SubscribeContent: React.FC = () => {
         body: JSON.stringify({ plan_type: 'customization' })
       });
 
+      // Check Content-Type before parsing JSON
+      const contentType = response.headers.get('content-type');
+      if (!contentType || !contentType.includes('application/json')) {
+        const text = await response.text();
+        console.error('Non-JSON response received:', text.substring(0, 200));
+        throw new Error('Server returned an invalid response. Please try again or contact support.');
+      }
+
       const data = await response.json();
       
       if (!response.ok || data.status !== 'success') {
@@ -298,6 +322,14 @@ const SubscribeContent: React.FC = () => {
                 razorpay_signature: response.razorpay_signature
               })
             });
+
+            // Check Content-Type before parsing JSON
+            const verifyContentType = verifyResponse.headers.get('content-type');
+            if (!verifyContentType || !verifyContentType.includes('application/json')) {
+              const text = await verifyResponse.text();
+              console.error('Non-JSON response received during verification:', text.substring(0, 200));
+              throw new Error('Payment verification failed. Please contact support with your payment ID.');
+            }
 
             const verifyData = await verifyResponse.json();
             

@@ -51,9 +51,9 @@ const Navigation: React.FC<NavigationProps> = ({
     setShowDropdown(true);
   };
 
-  // Close dropdown when clicking outside
+  // Close dropdown when clicking/touching outside
   useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
+    const handleClickOutside = (event: MouseEvent | TouchEvent) => {
       if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
         setShowDropdown(false);
         clearCloseTimeout();
@@ -62,10 +62,12 @@ const Navigation: React.FC<NavigationProps> = ({
 
     if (showDropdown) {
       document.addEventListener('mousedown', handleClickOutside);
+      document.addEventListener('touchstart', handleClickOutside);
     }
 
     return () => {
       document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('touchstart', handleClickOutside);
       clearCloseTimeout();
     };
   }, [showDropdown]);
@@ -171,8 +173,18 @@ const Navigation: React.FC<NavigationProps> = ({
               >
                 <span 
                   className="nav-link text-light"
-                  style={{ cursor: 'pointer' }}
+                  style={{ cursor: 'pointer', touchAction: 'manipulation', userSelect: 'none' }}
                   onClick={() => {
+                    if (showDropdown) {
+                      setShowDropdown(false);
+                      clearCloseTimeout();
+                    } else {
+                      openDropdown();
+                    }
+                  }}
+                  onTouchStart={(e) => {
+                    // Prevent default to avoid double-tap zoom on mobile
+                    e.preventDefault();
                     if (showDropdown) {
                       setShowDropdown(false);
                       clearCloseTimeout();
@@ -200,7 +212,15 @@ const Navigation: React.FC<NavigationProps> = ({
                   >
                     <button
                       className="dropdown-item"
+                      style={{ touchAction: 'manipulation' }}
                       onClick={() => {
+                        setShowDropdown(false);
+                        if (onProfileClick) {
+                          onProfileClick();
+                        }
+                      }}
+                      onTouchStart={(e) => {
+                        e.stopPropagation();
                         setShowDropdown(false);
                         if (onProfileClick) {
                           onProfileClick();
@@ -212,7 +232,15 @@ const Navigation: React.FC<NavigationProps> = ({
                     </button>
                     <button
                       className="dropdown-item"
+                      style={{ touchAction: 'manipulation' }}
                       onClick={() => {
+                        setShowDropdown(false);
+                        if (onSubscribeClick) {
+                          onSubscribeClick();
+                        }
+                      }}
+                      onTouchStart={(e) => {
+                        e.stopPropagation();
                         setShowDropdown(false);
                         if (onSubscribeClick) {
                           onSubscribeClick();
@@ -225,7 +253,13 @@ const Navigation: React.FC<NavigationProps> = ({
                     <hr className="dropdown-divider" />
                     <button
                       className="dropdown-item text-danger"
+                      style={{ touchAction: 'manipulation' }}
                       onClick={() => {
+                        setShowDropdown(false);
+                        onLogout();
+                      }}
+                      onTouchStart={(e) => {
+                        e.stopPropagation();
                         setShowDropdown(false);
                         onLogout();
                       }}
