@@ -63,7 +63,8 @@ const Dashboard: React.FC = () => {
         const response = await fetch(apiUrl('/api/user-data'), { credentials: 'include' });
         const data = await response.json();
         if (response.ok) {
-          setUserName(data.user_name || 'User');
+          // Use user_name from backend (which falls back to email if name not set)
+          setUserName(data.user_name || data.email || 'User');
           setKiteClientId(data.kite_client_id || null);
           
           // Show risk disclosure modal after successful login (once per session)

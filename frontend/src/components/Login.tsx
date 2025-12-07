@@ -76,7 +76,13 @@ const Login: React.FC = () => {
           const data = await response.json();
           const isAuthenticated = data.authenticated === true || (data.user_id !== undefined && data.user_id !== null);
           if (isAuthenticated) {
-            navigate('/dashboard', { replace: true });
+            // Check if user has API credentials
+            // If not, redirect to welcome page; otherwise go to dashboard
+            if (!data.zerodha_credentials_present) {
+              navigate('/welcome', { replace: true });
+            } else {
+              navigate('/dashboard', { replace: true });
+            }
             return;
           }
         }

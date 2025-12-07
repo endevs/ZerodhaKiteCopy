@@ -256,8 +256,9 @@ const ProfileContent: React.FC<ProfileContentProps> = ({ onSubscribeClick }) => 
       }
       
       if (userDataResponse && userDataResponse.ok && userData.status === 'success') {
+        // Backend now returns email as fallback for user_name, so use it directly
         setProfile({
-          user_name: userData.user_name || 'Guest',
+          user_name: userData.user_name || userDetails?.email || 'Guest',
           email: userDetails?.email || 'N/A',
           mobile: userDetails?.mobile || 'N/A',
           kite_client_id: userData.kite_client_id || 'N/A',
@@ -336,7 +337,7 @@ const ProfileContent: React.FC<ProfileContentProps> = ({ onSubscribeClick }) => 
                   <div className="mb-3">
                     <i className="bi bi-person-circle" style={{ fontSize: '4rem', color: '#0d6efd' }}></i>
                   </div>
-                  <h3 className="mb-0">{profile?.user_name || 'Guest'}</h3>
+                  <h3 className="mb-0">{profile?.user_name || profile?.email || 'Guest'}</h3>
                 </div>
               </div>
 
