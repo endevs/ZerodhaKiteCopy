@@ -170,11 +170,23 @@ const Navigation: React.FC<NavigationProps> = ({
                 ref={dropdownRef}
                 onMouseEnter={openDropdown}
                 onMouseLeave={scheduleClose}
+                style={{ touchAction: 'manipulation' }}
               >
                 <span 
                   className="nav-link text-light"
-                  style={{ cursor: 'pointer', touchAction: 'manipulation', userSelect: 'none' }}
-                  onClick={() => {
+                  style={{ 
+                    cursor: 'pointer', 
+                    touchAction: 'manipulation', 
+                    userSelect: 'none',
+                    WebkitUserSelect: 'none',
+                    WebkitTapHighlightColor: 'transparent',
+                    display: 'inline-block',
+                    minWidth: '44px',
+                    minHeight: '44px',
+                    padding: '0.5rem 1rem'
+                  }}
+                  onClick={(e) => {
+                    e.stopPropagation();
                     if (showDropdown) {
                       setShowDropdown(false);
                       clearCloseTimeout();
@@ -182,8 +194,8 @@ const Navigation: React.FC<NavigationProps> = ({
                       openDropdown();
                     }
                   }}
-                  onTouchStart={(e) => {
-                    // Prevent default to avoid double-tap zoom on mobile
+                  onTouchEnd={(e) => {
+                    e.stopPropagation();
                     e.preventDefault();
                     if (showDropdown) {
                       setShowDropdown(false);

@@ -1369,6 +1369,13 @@ if ASYNC_MODE == 'eventlet':
 app = Flask(__name__)
 app.secret_key = config.SECRET_KEY
 
+# Generate a server startup timestamp to invalidate old sessions
+# This ensures sessions are cleared when server restarts
+import time
+SERVER_STARTUP_TIME = int(time.time())
+app.config['SERVER_STARTUP_TIME'] = SERVER_STARTUP_TIME
+logging.info(f"Server started at timestamp: {SERVER_STARTUP_TIME} - old sessions will be invalidated")
+
 # Configure CORS
 CORS(app, 
      origins=config.CORS_ORIGINS,
@@ -3272,6 +3279,7 @@ def verify_otp():
             else:
                 conn.close()
                 session['user_id'] = user['id']
+                session['server_startup_time'] = SERVER_STARTUP_TIME
                 return redirect('/welcome')
         else:
             return render_template('verify_otp.html', email=email, error='Invalid OTP or OTP expired!')
@@ -3404,6 +3412,7 @@ def api_verify_otp():
                     logging.warning(f"Failed to create freemium subscription for user {user_id}: {sub_error}")
                     # Don't fail login if subscription creation fails
                 session['user_id'] = user_id
+                session['server_startup_time'] = SERVER_STARTUP_TIME
                 return jsonify({
                     'status': 'success',
                     'message': 'OTP verified successfully!',
@@ -3905,6 +3914,7 @@ def api_google_callback():
             if user:
                 # Existing user - log them in
                 session['user_id'] = user['id']
+                session['server_startup_time'] = SERVER_STARTUP_TIME
                 # Update user name if available and different
                 if google_name and google_name != user.get('user_name', ''):
                     try:
@@ -3977,6 +3987,7 @@ def api_google_callback():
                             logging.warning(f"Failed to create freemium subscription for Google user {user_id}: {sub_error}")
                         
                         session['user_id'] = user_id
+                        session['server_startup_time'] = SERVER_STARTUP_TIME
                         
                         # New users don't have Zerodha credentials, redirect to welcome page
                         frontend_url = _get_frontend_url()
@@ -4556,6 +4567,17 @@ def api_admin_reject_strategy(strategy_id):
 
 @app.route("/api/user-data")
 def api_user_data():
+    # Check if session is from before server restart
+    if 'server_startup_time' not in session or session.get('server_startup_time') != SERVER_STARTUP_TIME:
+        # Session is from before server restart, clear it
+        session.clear()
+        return jsonify({
+            'status': 'error',
+            'authenticated': False,
+            'user_id': None,
+            'message': 'Session expired. Please log in again.'
+        }), 401
+    
     if 'user_id' not in session:
         return jsonify({
             'status': 'error', 
