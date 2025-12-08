@@ -263,6 +263,17 @@ def register_razorpay_routes(app):
     """Register all Razorpay-related routes with the Flask app."""
     logging.info("Registering Razorpay routes...")
     
+    # Test endpoint to verify route registration
+    @app.route("/api/payment/test", methods=['GET'])
+    def api_payment_test():
+        """Test endpoint to verify payment routes are registered."""
+        return jsonify({
+            'status': 'success',
+            'message': 'Payment routes are registered and accessible',
+            'route': '/api/payment/create-order',
+            'methods': ['POST', 'OPTIONS']
+        })
+    
     @app.route("/api/subscription/info", methods=['GET'])
     def api_subscription_info():
         """Get current user's subscription information."""
@@ -280,7 +291,7 @@ def register_razorpay_routes(app):
             logging.error(f"Error fetching subscription info: {e}", exc_info=True)
             return jsonify({'status': 'error', 'message': 'Failed to fetch subscription info'}), 500
 
-    @app.route("/api/payment/create-order", methods=['POST', 'OPTIONS'])
+    @app.route("/api/payment/create-order", methods=['GET', 'POST', 'OPTIONS'])
     def api_create_payment_order():
         """Create a Razorpay order for subscription payment."""
         # Handle CORS preflight requests
@@ -292,6 +303,16 @@ def register_razorpay_routes(app):
             response.headers.add('Access-Control-Allow-Credentials', 'true')
             response.headers['Content-Type'] = 'application/json'
             return response
+        
+        # Allow GET for testing/diagnostic purposes
+        if request.method == 'GET':
+            return jsonify({
+                'status': 'success',
+                'message': 'Payment create-order endpoint is accessible',
+                'method': request.method,
+                'path': request.path,
+                'note': 'This endpoint requires POST method with plan_type in body'
+            })
         
         logging.info(f"[PAYMENT] Payment create-order endpoint called: method={request.method}, path={request.path}, origin={request.headers.get('Origin', 'N/A')}, user_agent={request.headers.get('User-Agent', 'N/A')[:50]}")
         
