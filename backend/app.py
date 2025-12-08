@@ -3912,11 +3912,13 @@ def api_google_callback():
             user = conn.execute('SELECT * FROM users WHERE email = ?', (google_email,)).fetchone()
             
             if user:
+                user_dict = dict(user)
                 # Existing user - log them in
                 session['user_id'] = user['id']
                 session['server_startup_time'] = SERVER_STARTUP_TIME
                 # Update user name if available and different
-                if google_name and google_name != user.get('user_name', ''):
+                current_name = user_dict.get('user_name') or ''
+                if google_name and google_name != current_name:
                     try:
                         conn.execute('UPDATE users SET user_name = ? WHERE id = ?', (google_name, user['id']))
                         conn.commit()
@@ -3928,8 +3930,8 @@ def api_google_callback():
                             raise
                 
                 # Check if user has Zerodha credentials configured
-                has_app_key = bool(user.get('app_key'))
-                has_app_secret = bool(user.get('app_secret'))
+                has_app_key = bool(user_dict.get('app_key'))
+                has_app_secret = bool(user_dict.get('app_secret'))
                 
                 frontend_url = _get_frontend_url()
                 if has_app_key and has_app_secret:
