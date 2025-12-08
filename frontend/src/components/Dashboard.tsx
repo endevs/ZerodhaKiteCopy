@@ -165,6 +165,9 @@ const Dashboard: React.FC = () => {
       fetchUserData();
     }, 5000); // Check every 5 seconds
 
+    // Log Socket.IO connection URL for debugging
+    console.log('[Socket.IO] Connecting to:', SOCKET_BASE_URL, 'with path: /socket.io/');
+    
     const socket: Socket = io(SOCKET_BASE_URL, {
       path: '/socket.io/',
       transports: ['polling', 'websocket'],

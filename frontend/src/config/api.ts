@@ -90,14 +90,14 @@ if (resolvedSocketBase) {
 export const API_BASE_URL = resolvedApiBase;
 export const SOCKET_BASE_URL = resolvedSocketBase;
 
-// Debug logging - only show if explicitly enabled or in development
-// Note: In production builds, NODE_ENV is replaced at build time
-if (typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')) {
-  console.log('API_BASE_URL:', API_BASE_URL);
-  console.log('SOCKET_BASE_URL:', SOCKET_BASE_URL);
-  console.log('REACT_APP_API_BASE:', process.env.REACT_APP_API_BASE);
-  console.log('REACT_APP_SOCKET_BASE:', process.env.REACT_APP_SOCKET_BASE);
-  console.log('Window location:', window.location.href);
+// Debug logging - show in both development and production for troubleshooting
+if (typeof window !== 'undefined') {
+  console.log('[API Config] API_BASE_URL:', API_BASE_URL);
+  console.log('[API Config] SOCKET_BASE_URL:', SOCKET_BASE_URL);
+  console.log('[API Config] Window location:', window.location.href);
+  console.log('[API Config] Window protocol:', window.location.protocol);
+  console.log('[API Config] Window hostname:', window.location.hostname);
+  console.log('[API Config] Window port:', window.location.port);
 }
 
 export const apiUrl = (path: string): string => {
