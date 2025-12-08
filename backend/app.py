@@ -10108,18 +10108,6 @@ def api_health():
     response.headers['Content-Type'] = 'application/json'
     return response
 
-# Add a test endpoint to verify payment route is accessible
-@app.route("/api/payment/test", methods=['GET'])
-def api_payment_test():
-    """Test endpoint to verify payment routes are accessible."""
-    response = jsonify({
-        'status': 'success',
-        'message': 'Payment routes are accessible',
-        'timestamp': datetime.datetime.now(datetime.timezone.utc).isoformat()
-    })
-    response.headers['Content-Type'] = 'application/json'
-    return response
-
 # Register subscription routes
 try:
     from subscription_routes import register_subscription_routes
