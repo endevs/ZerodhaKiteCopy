@@ -291,18 +291,9 @@ def register_razorpay_routes(app):
             logging.error(f"Error fetching subscription info: {e}", exc_info=True)
             return jsonify({'status': 'error', 'message': 'Failed to fetch subscription info'}), 500
 
-    @app.route("/api/payment/create-order", methods=['GET', 'POST'])
+    @app.route("/api/payment/create-order", methods=['POST'])
     def api_create_payment_order():
         """Create a Razorpay order for subscription payment."""
-        # Allow GET for testing/diagnostic
-        if request.method == 'GET':
-            return jsonify({
-                'status': 'success',
-                'message': 'Payment create-order endpoint is accessible',
-                'method': 'GET (testing)',
-                'note': 'This endpoint requires POST method with plan_type in body'
-            })
-        
         logging.info(f"Payment create-order endpoint called: method={request.method}, path={request.path}")
         
         # Ensure we return JSON with proper Content-Type
