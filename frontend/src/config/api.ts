@@ -51,27 +51,35 @@ if (typeof window !== 'undefined') {
 }
 
 // Socket.IO should use the same base as API, but ensure it uses the correct protocol
-// Remove any port 3000 that might be inferred incorrectly
+// For production, always use the same domain without any port
 let resolvedSocketBase =
   sanitizeBase(process.env.REACT_APP_SOCKET_BASE) || resolvedApiBase;
 
-// Runtime override for Socket.IO as well
+// Runtime override for Socket.IO - ensure production uses correct URL
 if (typeof window !== 'undefined') {
-  const { protocol, hostname } = window.location;
+  const { protocol, hostname, port } = window.location;
   const isProduction = hostname !== 'localhost' && hostname !== '127.0.0.1';
-  const isLocalhostUrl = resolvedSocketBase && (resolvedSocketBase.includes('localhost') || resolvedSocketBase.includes('127.0.0.1'));
   
-  if (isProduction && isLocalhostUrl) {
-    // Override: use current domain for production
-    resolvedSocketBase = `${protocol}//${hostname}`;
+  if (isProduction) {
+    // For production, always use the same domain without port (CloudFront handles routing)
+    // Use wss:// for secure connections, ws:// for non-secure
+    const socketProtocol = protocol === 'https:' ? 'wss:' : 'ws:';
+    resolvedSocketBase = `${socketProtocol}//${hostname}`;
+  } else {
+    // For localhost, use the API base (which includes port 8000)
+    const isLocalhostUrl = resolvedSocketBase && (resolvedSocketBase.includes('localhost') || resolvedSocketBase.includes('127.0.0.1'));
+    if (isLocalhostUrl) {
+      // Keep localhost URL as is
+    } else {
+      resolvedSocketBase = resolvedApiBase;
+    }
   }
 }
 
-// Ensure we don't append port 3000 for production
+// Final cleanup: remove any port numbers from production URLs
 if (resolvedSocketBase && !resolvedSocketBase.includes('localhost') && !resolvedSocketBase.includes('127.0.0.1')) {
-  // For production, remove any port 3000 or other ports
-  resolvedSocketBase = resolvedSocketBase.replace(/:3000(\/|$)/, '$1');
-  resolvedSocketBase = resolvedSocketBase.replace(/:(\d+)(\/|$)/, '$2'); // Remove any port number in production
+  // Remove any port number (3000, 8000, etc.) from production URLs
+  resolvedSocketBase = resolvedSocketBase.replace(/:(\d+)(\/|$)/, '$2');
 }
 
 // Final cleanup: ensure no trailing slashes and proper format
