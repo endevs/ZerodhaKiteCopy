@@ -18,17 +18,19 @@ _spec.loader.exec_module(config)
 logger = logging.getLogger(__name__)
 
 
-def run_backtest(df: pd.DataFrame) -> tuple:
+def run_backtest(df: pd.DataFrame, orb_candle_number: int = 4) -> tuple:
     """Run ORB strategy backtest."""
     logger.info("=" * 60)
-    logger.info("ORB Strategy Backtest")
+    orb_time = f"{orb_candle_number}th candle (10:00 AM)" if orb_candle_number == 4 else f"{orb_candle_number}th candle"
+    logger.info(f"ORB Strategy Backtest - {orb_time} as ORB")
     logger.info("=" * 60)
     
     trades_df, results = backtest_orb_strategy(
         df,
         initial_balance=config.INITIAL_BALANCE,
         lot_size=config.LOT_SIZE,
-        ema_period=config.EMA_PERIOD
+        ema_period=config.EMA_PERIOD,
+        orb_candle_number=orb_candle_number
     )
     
     # Print results

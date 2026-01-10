@@ -2,7 +2,7 @@
 ORB (Opening Range Breakout) Strategy Implementation
 
 Strategy Rules:
-1. ORB Candle: First 15-minute candle (9:15 AM)
+1. ORB Candle: 4th 15-minute candle (10:00 AM)
 2. SELL Entry: Candle closes BELOW ORB low
 3. BUY Entry: Candle closes ABOVE ORB high
 4. SELL Exit: 2 consecutive candles close ABOVE EMA5
@@ -22,13 +22,14 @@ def calculate_ema(data: pd.Series, period: int) -> pd.Series:
     return data.ewm(span=period, adjust=False).mean()
 
 
-def identify_orb_candle(df: pd.DataFrame, orb_time: str = "09:15") -> pd.DataFrame:
+def identify_orb_candle(df: pd.DataFrame, orb_candle_number: int = 4) -> pd.DataFrame:
     """
     Identify ORB candle for each trading day.
     
     Args:
         df: DataFrame with timestamp column
-        orb_time: Time string in HH:MM format
+        orb_candle_number: Which candle to use as ORB (4 = 4th candle at 10:00 AM)
+                          Candle sequence: 1st (9:15 AM), 2nd (9:30 AM), 3rd (9:45 AM), 4th (10:00 AM)
     
     Returns:
         DataFrame with 'is_orb' column
@@ -38,14 +39,18 @@ def identify_orb_candle(df: pd.DataFrame, orb_time: str = "09:15") -> pd.DataFra
     df['time'] = df['timestamp'].dt.time
     df['is_orb'] = False
     
-    # Group by date and mark first candle of each day
+    # Group by date and mark the specified candle number
     for date, group in df.groupby('date'):
-        # Find first candle at or after ORB time
-        orb_time_obj = time.fromisoformat(orb_time)
-        day_candles = group[group['time'] >= orb_time_obj].sort_values('timestamp')
+        # Sort by timestamp to get candles in order
+        day_candles = group.sort_values('timestamp')
         
-        if len(day_candles) > 0:
-            orb_idx = day_candles.index[0]
+        # Select the nth candle (4th = index 3, since index starts at 0)
+        # 1st candle: 9:15 AM (index 0)
+        # 2nd candle: 9:30 AM (index 1)
+        # 3rd candle: 9:45 AM (index 2)
+        # 4th candle: 10:00 AM (index 3)
+        if len(day_candles) >= orb_candle_number:
+            orb_idx = day_candles.index[orb_candle_number - 1]  # -1 because index starts at 0
             df.loc[orb_idx, 'is_orb'] = True
     
     return df
@@ -55,16 +60,20 @@ def backtest_orb_strategy(
     df: pd.DataFrame,
     initial_balance: float = 100000.0,
     lot_size: int = 15,
-    ema_period: int = 5
+    ema_period: int = 5,
+    orb_candle_number: int = 4  # 4th candle (10:00 AM) as ORB
 ) -> Tuple[pd.DataFrame, Dict]:
     """
     Backtest ORB strategy on historical data.
+    
+    Args:
+        orb_candle_number: Which candle to use as ORB (4 = 10:00 AM)
     
     Returns:
         (trades_df, results_dict)
     """
     df = df.copy()
-    df = identify_orb_candle(df)
+    df = identify_orb_candle(df, orb_candle_number=orb_candle_number)
     
     # Calculate EMA5
     df['ema5'] = calculate_ema(df['close'], ema_period)

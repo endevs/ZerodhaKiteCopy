@@ -51,10 +51,10 @@ def main():
         logger.error(f"Failed to fetch data: {e}")
         return None, None
     
-    # Step 3: Run backtest
-    logger.info("\n[3/4] Running ORB strategy backtest...")
+    # Step 3: Run backtest with 4th candle (10:00 AM) as ORB
+    logger.info("\n[3/4] Running ORB strategy backtest (4th candle - 10:00 AM as ORB)...")
     try:
-        trades_df, results = run_backtest(df)
+        trades_df, results = run_backtest(df, orb_candle_number=4)
     except Exception as e:
         logger.error(f"Backtest failed: {e}")
         import traceback
