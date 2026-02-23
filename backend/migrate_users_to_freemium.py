@@ -63,3 +63,5 @@ def migrate_users_to_freemium():
 if __name__ == '__main__':
     migrate_users_to_freemium()
 
+
+
