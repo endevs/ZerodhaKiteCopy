@@ -25,8 +25,8 @@ const defaultRuleConfig: RuleConfig = {
     NIFTY: 50,
   },
   lot_sz: {
-    BANKNIFTY: 35,
-    NIFTY: 75,
+    BANKNIFTY: 30,
+    NIFTY: 65,
   },
   stop_loss: -0.17,
   target: 0.45,
@@ -86,7 +86,7 @@ const MountainSignalFlowDiagram: React.FC<MountainSignalFlowDiagramProps> = ({ s
 
   const instrumentKey = useMemo(() => strategy.instrument.toUpperCase(), [strategy.instrument]);
   const strikeRounding = ruleConfig.strike_rnd[instrumentKey] ?? (instrumentKey.includes('BANK') ? 100 : 50);
-  const lotSize = ruleConfig.lot_sz[instrumentKey] ?? (instrumentKey.includes('BANK') ? 35 : 75);
+  const lotSize = ruleConfig.lot_sz[instrumentKey] ?? (instrumentKey.includes('BANK') ? 30 : 65);
   const stopLossPercentLabel = formatPercent(ruleConfig.stop_loss);
   const stopLossAbsoluteLabel = formatAbsolutePercent(ruleConfig.stop_loss);
   const targetPercentLabel = formatPercent(ruleConfig.target);

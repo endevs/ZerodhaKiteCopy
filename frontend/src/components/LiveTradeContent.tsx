@@ -1373,7 +1373,7 @@ const LiveTradeContent: React.FC = () => {
                   onChange={(e) => setLotCount(Number(e.target.value))}
                 />
                 <div className="form-text">
-                  Lot size depends on the selected strategy (e.g., BankNifty 35 qty per lot).
+                  Lot size depends on the selected strategy (e.g., BankNifty 30 qty per lot).
                 </div>
               </div>
 

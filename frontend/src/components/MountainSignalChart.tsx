@@ -34,6 +34,8 @@ interface SignalCandle {
   high: number;
   low: number;
   time: string;
+  rsiAtSignal?: number | null;
+  emaAtSignal?: number | null;
 }
 
 interface TradeEvent {
@@ -56,7 +58,8 @@ interface IgnoredSignal {
 }
 
 interface WaitingSignal {
-  index: number;
+  index: number;            // latest evaluation candle index
+  signalIndex: number;      // original signal candle index
   signalTime: string;
   signalType: 'PE' | 'CE';
   signalHigh: number;
@@ -65,6 +68,7 @@ interface WaitingSignal {
   currentClose: number;
   rsiValue: number | null;
   emaValue: number;
+  currentRsi?: number | null;
 }
 
 interface RuleConfig {
@@ -368,8 +372,8 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
       NIFTY: 50,
     },
     lotSizes: {
-      BANKNIFTY: 35,
-      NIFTY: 75,
+      BANKNIFTY: 30,
+      NIFTY: 65,
     },
     optionTrade: {
       stopLossPercent: -0.17,
@@ -450,6 +454,10 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
   const [backtestError, setBacktestError] = useState<string | null>(null);
   const [filterPE, setFilterPE] = useState<boolean>(true);
   const [filterCE, setFilterCE] = useState<boolean>(false);
+  const [filterIgnoredPE, setFilterIgnoredPE] = useState<boolean>(true);
+  const [filterIgnoredCE, setFilterIgnoredCE] = useState<boolean>(false);
+  const [peRsiThreshold, setPeRsiThreshold] = useState<number>(70);
+  const [ceRsiThreshold, setCeRsiThreshold] = useState<number>(30);
   const [expandedDates, setExpandedDates] = useState<Set<string>>(new Set());
   const [backtestResults, setBacktestResults] = useState<{
     trades: Array<{
@@ -547,7 +555,7 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
 
   const getLotSize = (instrumentSymbol: string): number => {
     const key = getInstrumentKey(instrumentSymbol);
-    return ruleConfig.lotSizes[key] ?? (key.includes('BANK') ? 35 : 75);
+    return ruleConfig.lotSizes[key] ?? (key.includes('BANK') ? 30 : 65);
   };
 
   const formatPercentValue = (value: number): string => {
@@ -700,8 +708,8 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
   const stopLossPercentLabelWithSign = `${stopLossPercentSigned < 0 ? '-' : '+'}${stopLossPercentAbsLabel}`;
   const targetPercentLabelWithSign = `${targetPercentSigned < 0 ? '-' : '+'}${targetPercentAbsLabel}`;
 
-  const bankLotSizeDisplay = formatNumericValue(ruleConfig.lotSizes.BANKNIFTY ?? 35);
-  const niftyLotSizeDisplay = formatNumericValue(ruleConfig.lotSizes.NIFTY ?? 75);
+  const bankLotSizeDisplay = formatNumericValue(ruleConfig.lotSizes.BANKNIFTY ?? 30);
+  const niftyLotSizeDisplay = formatNumericValue(ruleConfig.lotSizes.NIFTY ?? 65);
   const bankRoundingDisplay = formatNumericValue(ruleConfig.strikeRounding.BANKNIFTY ?? 100);
   const niftyRoundingDisplay = formatNumericValue(ruleConfig.strikeRounding.NIFTY ?? 50);
   const evaluationSecondsDisplay = ruleConfig.evaluationSecondsBeforeClose;
@@ -860,7 +868,7 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
     } finally {
       setLoading(false);
     }
-  }, [selectedDate, strategy.instrument, candleTime]);
+  }, [selectedDate, strategy.instrument, candleTime, peRsiThreshold, ceRsiThreshold]);
 
   // Fetch chart data when date or strategy changes
   useEffect(() => {
@@ -920,10 +928,8 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
     const signals: SignalCandle[] = [];
     const trades: TradeEvent[] = [];
     const ignored: IgnoredSignal[] = [];
-    const waiting: WaitingSignal[] = [];
-    // Track latest waiting signal per type to avoid duplicates
-    let latestPeWaiting: WaitingSignal | null = null;
-    let latestCeWaiting: WaitingSignal | null = null;
+    // One row per signal candle that ever entered waiting state (key = signal candle index)
+    const waitingBySignalIndex = new Map<number, WaitingSignal>();
     let currentPeSignal: SignalCandle | null = null;
     let currentCeSignal: SignalCandle | null = null;
     let activeTradeEvent: TradeEvent | null = null;
@@ -953,11 +959,11 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
       // NOTE: In live trading, this evaluation happens 20 seconds before candle close
       // Here we use completed candle data for historical visualization
       
-      // PE Signal Candle Identification: LOW > 5 EMA AND RSI > 70
+      // PE Signal Candle Identification: LOW > 5 EMA AND RSI > peRsiThreshold
       if (candleLow > ema5) {
         // RSI condition must be met at signal identification time
-        if (currentRsi !== null && currentRsi > 70) {
-          // Signal Reset: If a newer candle meets the same criteria (LOW > 5 EMA + RSI > 70), 
+        if (currentRsi !== null && currentRsi > peRsiThreshold) {
+          // Signal Reset: If a newer candle meets the same criteria (LOW > 5 EMA + RSI > threshold), 
           // it REPLACES the previous PE signal candle
           if (currentPeSignal) {
             // New PE signal candle identified - old signal candle is now invalid
@@ -966,7 +972,9 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
               type: 'PE',
               high: candleHigh,
               low: candleLow,
-              time: candle.x
+              time: candle.x,
+              rsiAtSignal: currentRsi,
+              emaAtSignal: ema5
             };
             signals.push(currentPeSignal);
             // Old signal candle is replaced, reset price action tracking
@@ -981,7 +989,9 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
               type: 'PE',
               high: candleHigh,
               low: candleLow,
-              time: candle.x
+              time: candle.x,
+              rsiAtSignal: currentRsi,
+              emaAtSignal: ema5
             };
             signals.push(currentPeSignal);
             // Reset price action tracking for new signal
@@ -990,25 +1000,25 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
             signalCandlesWithEntry.delete(currentPeSignal.index);
           }
         }
-        // If RSI condition not met, log as ignored (only if no current signal exists)
-        else if (!currentPeSignal) {
+        // If RSI condition not met, log as ignored
+        else {
           ignored.push({
             index: i,
             signalTime: candle.x,
             signalType: 'PE',
             signalHigh: candleHigh,
             signalLow: candleLow,
-            reason: `Signal candle identified but RSI condition not met (RSI must be > 70, current: ${currentRsi !== null ? currentRsi.toFixed(2) : 'N/A'})`,
+            reason: `Signal candle identified but RSI condition not met (RSI must be > ${peRsiThreshold}, current: ${currentRsi !== null ? currentRsi.toFixed(2) : 'N/A'})`,
             rsiValue: currentRsi
           });
         }
       }
 
-      // CE Signal Candle Identification: HIGH < 5 EMA AND RSI < 30
+      // CE Signal Candle Identification: HIGH < 5 EMA AND RSI < ceRsiThreshold
       if (candleHigh < ema5) {
         // RSI condition must be met at signal identification time
-        if (currentRsi !== null && currentRsi < 30) {
-          // Signal Reset: If a newer candle meets the same criteria (HIGH < 5 EMA + RSI < 30), 
+        if (currentRsi !== null && currentRsi < ceRsiThreshold) {
+          // Signal Reset: If a newer candle meets the same criteria (HIGH < 5 EMA + RSI < threshold), 
           // it REPLACES the previous CE signal candle
           if (currentCeSignal) {
             // New CE signal candle identified - old signal candle is now invalid
@@ -1017,7 +1027,9 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
               type: 'CE',
               high: candleHigh,
               low: candleLow,
-              time: candle.x
+              time: candle.x,
+              rsiAtSignal: currentRsi,
+              emaAtSignal: ema5
             };
             signals.push(currentCeSignal);
             // Old signal candle is replaced, reset price action tracking
@@ -1032,7 +1044,9 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
               type: 'CE',
               high: candleHigh,
               low: candleLow,
-              time: candle.x
+              time: candle.x,
+              rsiAtSignal: currentRsi,
+              emaAtSignal: ema5
             };
             signals.push(currentCeSignal);
             // Reset price action tracking for new signal
@@ -1041,15 +1055,15 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
             signalCandlesWithEntry.delete(currentCeSignal.index);
           }
         }
-        // If RSI condition not met, log as ignored (only if no current signal exists)
-        else if (!currentCeSignal) {
+        // If RSI condition not met, log as ignored
+        else {
           ignored.push({
             index: i,
             signalTime: candle.x,
             signalType: 'CE',
             signalHigh: candleHigh,
             signalLow: candleLow,
-            reason: `Signal candle identified but RSI condition not met (RSI must be < 30, current: ${currentRsi !== null ? currentRsi.toFixed(2) : 'N/A'})`,
+            reason: `Signal candle identified but RSI condition not met (RSI must be < ${ceRsiThreshold}, current: ${currentRsi !== null ? currentRsi.toFixed(2) : 'N/A'})`,
             rsiValue: currentRsi
           });
         }
@@ -1102,18 +1116,30 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
           // Signal exists but entry condition not met yet - track as waiting
           // Only track if no active trade and entry not blocked
           if (peEntryAllowed) {
-            // Update latest waiting signal (replaces previous waiting states for same signal type)
-            latestPeWaiting = {
-              index: i,
-              signalTime: currentPeSignal.time,
-              signalType: 'PE',
-              signalHigh: currentPeSignal.high,
-              signalLow: currentPeSignal.low,
-              breakLevel: currentPeSignal.low,
-              currentClose: candleClose,
-              rsiValue: currentRsi,
-              emaValue: ema5
-            };
+            const key = currentPeSignal.index;
+            const existing = waitingBySignalIndex.get(key);
+            if (!existing) {
+              waitingBySignalIndex.set(key, {
+                index: i,
+                signalIndex: currentPeSignal.index,
+                signalTime: currentPeSignal.time,
+                signalType: 'PE',
+                signalHigh: currentPeSignal.high,
+                signalLow: currentPeSignal.low,
+                breakLevel: currentPeSignal.low,
+                currentClose: candleClose,
+                rsiValue: currentPeSignal.rsiAtSignal ?? currentRsi,
+                emaValue: currentPeSignal.emaAtSignal ?? ema5,
+                currentRsi
+              });
+            } else {
+              waitingBySignalIndex.set(key, {
+                ...existing,
+                index: i,
+                currentClose: candleClose,
+                currentRsi
+              });
+            }
           }
         }
         // CE Entry: Next candle CLOSE > signal candle HIGH
@@ -1143,18 +1169,30 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
             // Signal exists but entry condition not met yet - track as waiting
             // Only track if no active trade and entry not blocked
             if (ceEntryAllowed) {
-              // Update latest waiting signal (replaces previous waiting states for same signal type)
-              latestCeWaiting = {
-                index: i,
-                signalTime: currentCeSignal.time,
-                signalType: 'CE',
-                signalHigh: currentCeSignal.high,
-                signalLow: currentCeSignal.low,
-                breakLevel: currentCeSignal.high,
-                currentClose: candleClose,
-                rsiValue: currentRsi,
-                emaValue: ema5
-              };
+              const key = currentCeSignal.index;
+              const existing = waitingBySignalIndex.get(key);
+              if (!existing) {
+                waitingBySignalIndex.set(key, {
+                  index: i,
+                  signalIndex: currentCeSignal.index,
+                  signalTime: currentCeSignal.time,
+                  signalType: 'CE',
+                  signalHigh: currentCeSignal.high,
+                  signalLow: currentCeSignal.low,
+                  breakLevel: currentCeSignal.high,
+                  currentClose: candleClose,
+                  rsiValue: currentCeSignal.rsiAtSignal ?? currentRsi,
+                  emaValue: currentCeSignal.emaAtSignal ?? ema5,
+                  currentRsi
+                });
+              } else {
+                waitingBySignalIndex.set(key, {
+                  ...existing,
+                  index: i,
+                  currentClose: candleClose,
+                  currentRsi
+                });
+              }
             }
           }
         }
@@ -1297,10 +1335,9 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
       }
     }
 
-    // Add latest waiting signals to the array (only if they exist)
-    if (latestPeWaiting) waiting.push(latestPeWaiting);
-    if (latestCeWaiting) waiting.push(latestCeWaiting);
-    
+    // One row per signal that ever entered waiting state
+    const waiting = Array.from(waitingBySignalIndex.values());
+
     // Update all state at once (React automatically batches these)
     setSignalCandles(signals);
     setTradeEvents(trades);
@@ -1574,8 +1611,8 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
           {data.rsi14 !== null && data.rsi14 !== undefined && (
             <p className="mb-2 small border-top pt-2" style={{ color: '#82ca9d' }}>
               <strong>RSI 14:</strong> {data.rsi14.toFixed(2)}
-              {data.rsi14 > 70 && <span className="ms-2 text-danger">(Overbought)</span>}
-              {data.rsi14 < 30 && <span className="ms-2 text-success">(Oversold)</span>}
+              {data.rsi14 > peRsiThreshold && <span className="ms-2 text-danger">(Overbought)</span>}
+              {data.rsi14 < ceRsiThreshold && <span className="ms-2 text-success">(Oversold)</span>}
             </p>
           )}
 
@@ -2853,6 +2890,42 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
                 <strong>Instrument:</strong> {strategy.instrument} | <strong>EMA:</strong> {emaPeriod}
               </div>
             </div>
+            <div className="col-md-3">
+              <label className="form-label fw-bold">
+                <i className="bi bi-activity me-2"></i>RSI Thresholds
+              </label>
+              <div className="d-flex gap-3">
+                <div>
+                  <label htmlFor="pe-rsi-threshold" className="form-label small mb-1">PE RSI &gt;</label>
+                  <input
+                    id="pe-rsi-threshold"
+                    type="number"
+                    className="form-control form-control-sm"
+                    value={peRsiThreshold}
+                    min={0}
+                    max={100}
+                    step={1}
+                    onChange={(e) => setPeRsiThreshold(Number(e.target.value) || 0)}
+                  />
+                </div>
+                <div>
+                  <label htmlFor="ce-rsi-threshold" className="form-label small mb-1">CE RSI &lt;</label>
+                  <input
+                    id="ce-rsi-threshold"
+                    type="number"
+                    className="form-control form-control-sm"
+                    value={ceRsiThreshold}
+                    min={0}
+                    max={100}
+                    step={1}
+                    onChange={(e) => setCeRsiThreshold(Number(e.target.value) || 0)}
+                  />
+                </div>
+              </div>
+              <div className="text-muted small mt-1">
+                Default: PE {70}, CE {30}. Adjust to test different RSI behaviour.
+              </div>
+            </div>
           </div>
 
           {error && (
@@ -2986,8 +3059,22 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
                   {/* RSI 14 Reference Lines (Thresholds) */}
                   {chartDataFormatted.some(c => c.rsi14 !== null && c.rsi14 !== undefined) && (
                     <>
-                      <ReferenceLine yAxisId="rsi" y={70} stroke="#dc3545" strokeDasharray="3 3" strokeWidth={1} label={{ value: 'RSI 70 (PE Entry)', position: 'right', fill: '#dc3545' }} />
-                      <ReferenceLine yAxisId="rsi" y={30} stroke="#28a745" strokeDasharray="3 3" strokeWidth={1} label={{ value: 'RSI 30 (CE Entry)', position: 'right', fill: '#28a745' }} />
+                      <ReferenceLine
+                        yAxisId="rsi"
+                        y={peRsiThreshold}
+                        stroke="#dc3545"
+                        strokeDasharray="3 3"
+                        strokeWidth={1}
+                        label={{ value: `RSI ${peRsiThreshold} (PE Entry)`, position: 'right', fill: '#dc3545' }}
+                      />
+                      <ReferenceLine
+                        yAxisId="rsi"
+                        y={ceRsiThreshold}
+                        stroke="#28a745"
+                        strokeDasharray="3 3"
+                        strokeWidth={1}
+                        label={{ value: `RSI ${ceRsiThreshold} (CE Entry)`, position: 'right', fill: '#28a745' }}
+                      />
                     </>
                   )}
 
@@ -3099,6 +3186,22 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
             </h5>
           </div>
           <div className="card-body">
+            <div className="d-flex align-items-center gap-3 mb-3">
+              <span className="fw-semibold">Filter:</span>
+              <div className="form-check">
+                <input className="form-check-input" type="checkbox" id="filter-ignored-pe" checked={filterIgnoredPE} onChange={(e) => setFilterIgnoredPE(e.target.checked)} />
+                <label className="form-check-label" htmlFor="filter-ignored-pe">PE</label>
+              </div>
+              <div className="form-check">
+                <input className="form-check-input" type="checkbox" id="filter-ignored-ce" checked={filterIgnoredCE} onChange={(e) => setFilterIgnoredCE(e.target.checked)} />
+                <label className="form-check-label" htmlFor="filter-ignored-ce">CE</label>
+              </div>
+              {(!filterIgnoredPE || !filterIgnoredCE) && (
+                <small className="text-muted">
+                  Showing {ignoredSignals.filter(s => (s.signalType === 'PE' && filterIgnoredPE) || (s.signalType === 'CE' && filterIgnoredCE)).length} of {ignoredSignals.length}
+                </small>
+              )}
+            </div>
             <div className="table-responsive">
               <table className="table table-hover table-striped">
                 <thead className="table-warning">
@@ -3113,31 +3216,39 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
                   </tr>
                 </thead>
                 <tbody>
-                  {ignoredSignals.map((signal, index) => (
-                    <tr key={index}>
-                      <td><strong>{index + 1}</strong></td>
-                      <td>{formatDateTime(signal.signalTime)}</td>
-                      <td>
-                        <span className={`badge ${signal.signalType === 'PE' ? 'bg-danger' : 'bg-success'}`}>
-                          {signal.signalType}
-                        </span>
-                      </td>
-                      <td>{signal.signalHigh.toFixed(2)}</td>
-                      <td>{signal.signalLow.toFixed(2)}</td>
-                      <td>
-                        {signal.rsiValue !== null ? (
-                          <span className={signal.signalType === 'PE' && signal.rsiValue <= 70 ? 'text-danger' : signal.signalType === 'CE' && signal.rsiValue >= 30 ? 'text-danger' : 'text-muted'}>
-                            {signal.rsiValue.toFixed(2)}
-                          </span>
-                        ) : (
-                          <span className="text-muted">N/A</span>
-                        )}
-                      </td>
-                      <td>
-                        <small className="text-muted">{signal.reason}</small>
+                  {ignoredSignals.filter(s => (s.signalType === 'PE' && filterIgnoredPE) || (s.signalType === 'CE' && filterIgnoredCE)).length === 0 ? (
+                    <tr>
+                      <td colSpan={7} className="text-center text-muted py-3">
+                        No ignored signals match the selected filter.
                       </td>
                     </tr>
-                  ))}
+                  ) : (
+                    ignoredSignals.filter(s => (s.signalType === 'PE' && filterIgnoredPE) || (s.signalType === 'CE' && filterIgnoredCE)).map((signal, index) => (
+                      <tr key={`${signal.index}-${signal.signalType}`}>
+                        <td><strong>{index + 1}</strong></td>
+                        <td>{formatDateTime(signal.signalTime)}</td>
+                        <td>
+                          <span className={`badge ${signal.signalType === 'PE' ? 'bg-danger' : 'bg-success'}`}>
+                            {signal.signalType}
+                          </span>
+                        </td>
+                        <td>{signal.signalHigh.toFixed(2)}</td>
+                        <td>{signal.signalLow.toFixed(2)}</td>
+                        <td>
+                          {signal.rsiValue !== null ? (
+                            <span className={signal.signalType === 'PE' && signal.rsiValue <= 70 ? 'text-danger' : signal.signalType === 'CE' && signal.rsiValue >= 30 ? 'text-danger' : 'text-muted'}>
+                              {signal.rsiValue.toFixed(2)}
+                            </span>
+                          ) : (
+                            <span className="text-muted">N/A</span>
+                          )}
+                        </td>
+                        <td>
+                          <small className="text-muted">{signal.reason}</small>
+                        </td>
+                      </tr>
+                    ))
+                  )}
                 </tbody>
               </table>
             </div>
@@ -3170,7 +3281,8 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
                     <th>Break Level</th>
                     <th>Current Close</th>
                     <th>Gap to Entry</th>
-                    <th>RSI</th>
+                    <th>RSI @ Signal</th>
+                    <th>Current RSI</th>
                     <th>EMA</th>
                     <th>Status</th>
                   </tr>
@@ -3181,6 +3293,10 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
                       ? signal.currentClose - signal.breakLevel 
                       : signal.breakLevel - signal.currentClose;
                     const gapPercent = (gap / signal.breakLevel) * 100;
+                    const matchingTrade = tradeHistory.find(t =>
+                      t.signalIndex === signal.signalIndex ||
+                      (t.signalTime === signal.signalTime && t.signalType === signal.signalType)
+                    );
                     
                     return (
                       <tr key={index}>
@@ -3204,12 +3320,33 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
                         </td>
                         <td>
                           {signal.rsiValue !== null ? (
-                            <span className={
-                              signal.signalType === 'PE' && signal.rsiValue > 70 ? 'text-success' : 
-                              signal.signalType === 'CE' && signal.rsiValue < 30 ? 'text-success' : 
-                              'text-muted'
-                            }>
+                            <span
+                              className={
+                                signal.signalType === 'PE' && signal.rsiValue > peRsiThreshold
+                                  ? 'text-success'
+                                  : signal.signalType === 'CE' && signal.rsiValue < ceRsiThreshold
+                                  ? 'text-success'
+                                  : 'text-muted'
+                              }
+                            >
                               {signal.rsiValue.toFixed(2)}
+                            </span>
+                          ) : (
+                            <span className="text-muted">N/A</span>
+                          )}
+                        </td>
+                        <td>
+                          {signal.currentRsi !== null && signal.currentRsi !== undefined ? (
+                            <span
+                              className={
+                                signal.signalType === 'PE' && signal.currentRsi > peRsiThreshold
+                                  ? 'text-success'
+                                  : signal.signalType === 'CE' && signal.currentRsi < ceRsiThreshold
+                                  ? 'text-success'
+                                  : 'text-muted'
+                              }
+                            >
+                              {signal.currentRsi.toFixed(2)}
                             </span>
                           ) : (
                             <span className="text-muted">N/A</span>
@@ -3217,10 +3354,14 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
                         </td>
                         <td>{signal.emaValue.toFixed(2)}</td>
                         <td>
-                          <span className="badge bg-info">
-                            {signal.signalType === 'PE' ? 'Waiting: Close < ' : 'Waiting: Close > '}
-                            {signal.breakLevel.toFixed(2)}
-                          </span>
+                          {matchingTrade ? (
+                            <span className="badge bg-success">Trade Executed</span>
+                          ) : (
+                            <span className="badge bg-info">
+                              {signal.signalType === 'PE' ? 'Waiting: Close < ' : 'Waiting: Close > '}
+                              {signal.breakLevel.toFixed(2)}
+                            </span>
+                          )}
                         </td>
                       </tr>
                     );
