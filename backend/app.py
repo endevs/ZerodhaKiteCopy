@@ -74,6 +74,7 @@ BANKNIFTY_SPOT_SYMBOL = 'NSE:NIFTY BANK'
 NIFTY_SPOT_SYMBOL = 'NSE:NIFTY 50'
 IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 from chat import chat_bp
+from options_routes import options_bp
 from utils.backtest_metrics import calculate_all_metrics
 from ai_ml import train_lstm_on_candles, load_model_and_predict, load_lstm_checkpoint
 from ai_ml import candles_to_dataframe, prepare_training_data
@@ -1389,10 +1390,10 @@ CORS(app,
 # In production, CORS_ORIGINS should include production domain
 socketio_cors_origins = list(config.CORS_ORIGINS)
 # Add localhost origins for development (safe to include even in production)
-if 'http://localhost:8000' not in socketio_cors_origins:
-    socketio_cors_origins.append('http://localhost:8000')
-if 'http://127.0.0.1:8000' not in socketio_cors_origins:
-    socketio_cors_origins.append('http://127.0.0.1:8000')
+if 'http://localhost:8001' not in socketio_cors_origins:
+    socketio_cors_origins.append('http://localhost:8001')
+if 'http://127.0.0.1:8001' not in socketio_cors_origins:
+    socketio_cors_origins.append('http://127.0.0.1:8001')
 # Add production domain if FRONTEND_URL is set and not localhost
 if config.FRONTEND_URL and 'localhost' not in config.FRONTEND_URL:
     production_origin = config.FRONTEND_URL.rstrip('/')
@@ -1447,11 +1448,11 @@ def _get_backend_url() -> str:
     Forces HTTPS for production domains.
     
     Returns:
-        Backend URL string (e.g., 'https://drpinfotech.com' or 'http://localhost:8000')
+        Backend URL string (e.g., 'https://drpinfotech.com' or 'http://localhost:8001')
     """
     if has_request_context():
         # Use request to get the current backend URL
-        host = request.host  # 'localhost:8000' or 'drpinfotech.com'
+        host = request.host  # 'localhost:8001' or 'drpinfotech.com'
         
         # Force HTTPS for production domains (drpinfotech.com)
         if 'drpinfotech.com' in host or 'localhost' not in host and '127.0.0.1' not in host:
@@ -1465,7 +1466,7 @@ def _get_backend_url() -> str:
             scheme = request.scheme  # 'http' or 'https'
             return f"{scheme}://{host}"
     # Fallback if no request context (shouldn't happen in normal flow)
-    return os.getenv('BACKEND_URL', 'http://localhost:8000')
+    return os.getenv('BACKEND_URL', 'http://localhost:8001')
 
 def _get_frontend_url(default: str = 'http://localhost:3000') -> str:
     """
@@ -5292,11 +5293,12 @@ def deploy_strategy(strategy_id):
     if 'access_token' not in session:
         return jsonify({'status': 'error', 'message': 'Zerodha not connected. Please connect your Zerodha account first.'}), 401
     
-    # Check subscription for live deployment
+    # Check subscription for live deployment (admin can always deploy)
     try:
         from subscription_manager import check_feature_access
         user_id = session['user_id']
-        has_access = check_feature_access(user_id, 'live_deployment')
+        is_admin = _require_admin()
+        has_access = is_admin or check_feature_access(user_id, 'live_deployment')
         if not has_access:
             return jsonify({
                 'status': 'error',
@@ -8853,11 +8855,12 @@ def api_live_trade_deploy():
     if 'access_token' not in session:
         return jsonify({'status': 'error', 'message': 'Zerodha access token missing. Please login with Zerodha first.'}), 401
 
-    # Check subscription for live deployment
+    # Check subscription for live deployment (admin can always deploy)
     try:
         from subscription_manager import check_feature_access
         user_id = session['user_id']
-        has_access = check_feature_access(user_id, 'live_deployment')
+        is_admin = _require_admin()
+        has_access = is_admin or check_feature_access(user_id, 'live_deployment')
         if not has_access:
             return jsonify({
                 'status': 'error',
@@ -10079,6 +10082,7 @@ def api_rl_status_compat():
 
 
 app.register_blueprint(chat_bp)
+app.register_blueprint(options_bp)
 
 # Register Razorpay routes
 try:
@@ -10144,6 +10148,14 @@ if __name__ == "__main__":
     logging.info(f"RL module available: {RL_AVAILABLE}")
     logging.info("=" * 60)
     try:
+        # Start options data collection scheduler
+        try:
+            from options_scheduler import start_scheduler
+            start_scheduler()
+            logging.info("Options data collection scheduler initialized")
+        except Exception as e:
+            logging.warning(f"Could not start options scheduler: {e}")
+        
         # Use socketio.run() which properly handles Socket.IO paths
         # This is critical - don't use app.run() when using Socket.IO
         socketio.run(

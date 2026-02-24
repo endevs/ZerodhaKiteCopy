@@ -1,5 +1,5 @@
 """
-Simple data fetcher for 15-minute Bank Nifty data
+Simple data fetcher for Bank Nifty data (5-minute or 15-minute intervals)
 """
 import logging
 import pandas as pd
@@ -76,42 +76,56 @@ def get_kite_client(user_email: Optional[str] = None) -> KiteConnect:
         conn.close()
 
 
-def fetch_15min_data(kite: KiteConnect, from_date: datetime.date, to_date: datetime.date) -> pd.DataFrame:
+def fetch_data(kite: KiteConnect, from_date: datetime.date, to_date: datetime.date, 
+               interval: str = "5minute") -> pd.DataFrame:
     """
-    Fetch 15-minute Bank Nifty data.
+    Fetch Bank Nifty data for specified interval.
     
     Args:
         kite: KiteConnect client
         from_date: Start date
         to_date: End date
+        interval: Candle interval ('5minute' or '15minute')
     
     Returns:
         DataFrame with columns: timestamp, open, high, low, close, volume
     """
-    logger.info(f"Fetching 15-minute Bank Nifty data from {from_date} to {to_date}...")
+    interval_map = {
+        '5minute': '5minute',
+        '15minute': '15minute'
+    }
+    
+    if interval not in interval_map:
+        raise ValueError(f"Unsupported interval: {interval}. Use '5minute' or '15minute'")
+    
+    logger.info(f"Fetching {interval} Bank Nifty data from {from_date} to {to_date}...")
     
     # Use Bank Nifty Index directly (token 260105)
     instrument_token = 260105  # Bank Nifty Index
-    logger.info("Using instrument: Bank Nifty Index (260105)")
+    logger.info(f"Using instrument: Bank Nifty Index (260105) with {interval} candles")
     
     # Fetch data in chunks (Zerodha limit: 2000 candles)
+    # For 5-minute: smaller chunks (about 30 days max)
+    # For 15-minute: larger chunks (about 60 days max)
+    chunk_days = 30 if interval == '5minute' else 60
+    
     all_data = []
     current_date = from_date
     
     while current_date <= to_date:
-        chunk_end = min(current_date + datetime.timedelta(days=60), to_date)
+        chunk_end = min(current_date + datetime.timedelta(days=chunk_days), to_date)
         
         try:
             data = kite.historical_data(
                 instrument_token=instrument_token,
                 from_date=current_date,
                 to_date=chunk_end,
-                interval='15minute'
+                interval=interval_map[interval]
             )
             
             if data:
                 all_data.extend(data)
-                logger.info(f"✓ Fetched {len(data)} candles ({current_date} to {chunk_end})")
+                logger.info(f"✓ Fetched {len(data)} {interval} candles ({current_date} to {chunk_end})")
             
             current_date = chunk_end + datetime.timedelta(days=1)
             time.sleep(0.2)  # Rate limiting
@@ -121,15 +135,20 @@ def fetch_15min_data(kite: KiteConnect, from_date: datetime.date, to_date: datet
             break
     
     if not all_data:
-        raise ValueError("No data fetched")
+        raise ValueError(f"No {interval} data fetched")
     
     # Convert to DataFrame
     df = pd.DataFrame(all_data)
     df['timestamp'] = pd.to_datetime(df['date'])
     df = df.sort_values('timestamp').reset_index(drop=True)
     
-    logger.info(f"✓ Total candles fetched: {len(df)}")
+    logger.info(f"✓ Total {interval} candles fetched: {len(df)}")
     logger.info(f"  Date range: {df['timestamp'].min()} to {df['timestamp'].max()}")
     
     return df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
+
+
+def fetch_15min_data(kite: KiteConnect, from_date: datetime.date, to_date: datetime.date) -> pd.DataFrame:
+    """Backward compatibility wrapper for 15-minute data."""
+    return fetch_data(kite, from_date, to_date, interval="15minute")
 

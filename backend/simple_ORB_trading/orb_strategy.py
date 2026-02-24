@@ -1,12 +1,21 @@
 """
 ORB (Opening Range Breakout) Strategy Implementation
 
-Strategy Rules:
-1. ORB Candle: 4th 15-minute candle (10:00 AM)
-2. SELL Entry: Candle closes BELOW ORB low
-3. BUY Entry: Candle closes ABOVE ORB high
+Strategy Rules (Scalping Mode - 5-minute candles):
+1. ORB Candle: 1st 5-minute candle (9:15 AM)
+2. SELL Entry: Candle closes BELOW ORB low AND candle high must have touched/gone above ORB low
+3. BUY Entry: Candle closes ABOVE ORB high AND candle low must have touched/gone below ORB high
 4. SELL Exit: 2 consecutive candles close ABOVE EMA5
 5. BUY Exit: 2 consecutive candles close BELOW EMA5
+6. Force close all positions at 15:25 PM (end of day)
+
+Strategy Rules (Swing Mode - 15-minute candles):
+1. ORB Candle: 4th 15-minute candle (10:00 AM)
+2. SELL Entry: Candle closes BELOW ORB low AND candle high must have touched/gone above ORB low
+3. BUY Entry: Candle closes ABOVE ORB high AND candle low must have touched/gone below ORB high
+4. SELL Exit: 2 consecutive candles close ABOVE EMA5
+5. BUY Exit: 2 consecutive candles close BELOW EMA5
+6. Force close all positions at 15:25 PM (end of day)
 """
 import pandas as pd
 import numpy as np
@@ -22,14 +31,29 @@ def calculate_ema(data: pd.Series, period: int) -> pd.Series:
     return data.ewm(span=period, adjust=False).mean()
 
 
+def calculate_rsi(data: pd.Series, period: int = 14) -> pd.Series:
+    """Calculate Relative Strength Index (RSI)."""
+    delta = data.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    
+    return rsi.fillna(50.0)  # Fill NaN with neutral RSI value
+
+
 def identify_orb_candle(df: pd.DataFrame, orb_candle_number: int = 4) -> pd.DataFrame:
     """
     Identify ORB candle for each trading day.
     
     Args:
         df: DataFrame with timestamp column
-        orb_candle_number: Which candle to use as ORB (4 = 4th candle at 10:00 AM)
-                          Candle sequence: 1st (9:15 AM), 2nd (9:30 AM), 3rd (9:45 AM), 4th (10:00 AM)
+        orb_candle_number: Which candle to use as ORB
+                          For 5-minute candles: 1 = 1st candle (9:15 AM)
+                          For 15-minute candles: 4 = 4th candle (10:00 AM)
+                          Candle sequence for 15-min: 1st (9:15 AM), 2nd (9:30 AM), 3rd (9:45 AM), 4th (10:00 AM)
+                          Candle sequence for 5-min: 1st (9:15 AM), 2nd (9:20 AM), 3rd (9:25 AM), etc.
     
     Returns:
         DataFrame with 'is_orb' column
@@ -61,13 +85,17 @@ def backtest_orb_strategy(
     initial_balance: float = 100000.0,
     lot_size: int = 15,
     ema_period: int = 5,
-    orb_candle_number: int = 4  # 4th candle (10:00 AM) as ORB
+    orb_candle_number: int = 4,  # 1st candle (9:15 AM) for scalping, 4th candle (10:00 AM) for swing
+    one_trade_per_day: bool = False  # NEW: Limit to one trade per day
 ) -> Tuple[pd.DataFrame, Dict]:
     """
     Backtest ORB strategy on historical data.
     
     Args:
-        orb_candle_number: Which candle to use as ORB (4 = 10:00 AM)
+        orb_candle_number: Which candle to use as ORB
+                          - 1 = 1st candle (9:15 AM) for 5-minute scalping
+                          - 4 = 4th candle (10:00 AM) for 15-minute swing
+        one_trade_per_day: If True, take only one trade per day (for scalping)
     
     Returns:
         (trades_df, results_dict)
@@ -78,14 +106,19 @@ def backtest_orb_strategy(
     # Calculate EMA5
     df['ema5'] = calculate_ema(df['close'], ema_period)
     
+    # Calculate RSI(14)
+    df['rsi'] = calculate_rsi(df['close'], period=14)
+    
     # Initialize trading state
     current_position = None  # 'BUY' or 'SELL' or None
     entry_price = None
     entry_index = None
     entry_timestamp = None
+    entry_rsi = None  # NEW: Store entry RSI
     orb_high = None
     orb_low = None
     orb_date = None
+    trade_taken_today = False  # NEW: Track if trade taken for current day
     
     # Track consecutive candles for exit
     consecutive_above_ema = 0
@@ -133,7 +166,9 @@ def backtest_orb_strategy(
                     'exit_reason': 'End of day (market close)',
                     'orb_high': orb_high,
                     'orb_low': orb_low,
-                    'exit_ema5': prev_row.get('ema5', ema5)
+                    'exit_ema5': prev_row.get('ema5', ema5),
+                    'entry_rsi': entry_rsi,  # NEW: Add entry RSI
+                    'exit_rsi': prev_row.get('rsi', 50.0)  # NEW: Add exit RSI
                 })
                 
                 logger.info(
@@ -149,16 +184,22 @@ def backtest_orb_strategy(
                 entry_price = None
                 entry_index = None
                 entry_timestamp = None
+                entry_rsi = None  # NEW: Reset entry RSI
                 consecutive_above_ema = 0
                 consecutive_below_ema = 0
         
-        # Reset ORB at start of new day (after closing position if any)
+        # Reset ORB and trade flag at start of new day (after closing position if any)
         if orb_date is None or current_date != orb_date:
             orb_high = None
             orb_low = None
             orb_date = current_date
+            trade_taken_today = False  # NEW: Reset trade flag for new day
             consecutive_above_ema = 0
             consecutive_below_ema = 0
+        
+        # NEW: Skip all candles for this day if one trade per day is enabled and trade already taken
+        if one_trade_per_day and trade_taken_today:
+            continue
         
         # Identify ORB candle
         if is_orb:
@@ -221,8 +262,9 @@ def backtest_orb_strategy(
                 balance += pnl
                 pnl_pct = (pnl / (entry_price * lot_size)) * 100
                 
-                # Get EMA5 value at exit for CSV report
+                # Get EMA5 and RSI values at exit for CSV report
                 exit_ema5 = ema5
+                exit_rsi = row.get('rsi', 50.0)  # NEW: Get exit RSI
                 
                 trades.append({
                     'entry_timestamp': entry_timestamp,
@@ -235,7 +277,9 @@ def backtest_orb_strategy(
                     'exit_reason': exit_reason,
                     'orb_high': orb_high,
                     'orb_low': orb_low,
-                    'exit_ema5': exit_ema5  # Add EMA5 at exit
+                    'exit_ema5': exit_ema5,
+                    'entry_rsi': entry_rsi,  # NEW: Add entry RSI
+                    'exit_rsi': exit_rsi  # NEW: Add exit RSI
                 })
                 
                 logger.info(
@@ -251,14 +295,20 @@ def backtest_orb_strategy(
                 entry_price = None
                 entry_index = None
                 entry_timestamp = None
+                entry_rsi = None  # NEW: Reset entry RSI
                 consecutive_above_ema = 0
                 consecutive_below_ema = 0
+                
+                # NEW: Mark trade as taken for this day (if one trade per day is enabled)
+                if one_trade_per_day:
+                    trade_taken_today = True
+                    logger.info(f"[ONE TRADE PER DAY] Trade completed for {current_date}. Skipping remaining candles for today.")
                 
                 # Continue to next iteration (don't check entry conditions for this candle)
                 continue
         
-        # Check entry conditions (only if no position)
-        if current_position is None:
+        # Check entry conditions (only if no position AND no trade taken today)
+        if current_position is None and not trade_taken_today:
             # SELL Entry: Candle closes BELOW ORB low AND candle high must have touched/gone above ORB low
             # This ensures the candle actually broke through the ORB range
             if close < orb_low and high > orb_low:
@@ -266,13 +316,15 @@ def backtest_orb_strategy(
                 entry_price = close
                 entry_index = idx
                 entry_timestamp = timestamp
+                entry_rsi = row.get('rsi', 50.0)  # NEW: Store entry RSI
                 consecutive_above_ema = 0
                 consecutive_below_ema = 0
                 
                 logger.info(
                     f"[ENTRY] SELL SHORT at ₹{close:.2f} | "
                     f"ORB Low: ₹{orb_low:.2f} | "
-                    f"Candle High: ₹{high:.2f} (touched ORB range)"
+                    f"Candle High: ₹{high:.2f} (touched ORB range) | "
+                    f"Date: {current_date}"
                 )
             
             # BUY Entry: Candle closes ABOVE ORB high AND candle low must have touched/gone below ORB high
@@ -282,13 +334,15 @@ def backtest_orb_strategy(
                 entry_price = close
                 entry_index = idx
                 entry_timestamp = timestamp
+                entry_rsi = row.get('rsi', 50.0)  # NEW: Store entry RSI
                 consecutive_above_ema = 0
                 consecutive_below_ema = 0
                 
                 logger.info(
                     f"[ENTRY] BUY LONG at ₹{close:.2f} | "
                     f"ORB High: ₹{orb_high:.2f} | "
-                    f"Candle Low: ₹{low:.2f} (touched ORB range)"
+                    f"Candle Low: ₹{low:.2f} (touched ORB range) | "
+                    f"Date: {current_date}"
                 )
     
     # Close any open position at end
@@ -312,7 +366,10 @@ def backtest_orb_strategy(
             'pnl_pct': pnl_pct,
             'exit_reason': 'End of data',
             'orb_high': orb_high,
-            'orb_low': orb_low
+            'orb_low': orb_low,
+            'exit_ema5': last_row.get('ema5', 0),
+            'entry_rsi': entry_rsi,  # NEW: Add entry RSI
+            'exit_rsi': last_row.get('rsi', 50.0)  # NEW: Add exit RSI
         })
     
     # Create trades DataFrame

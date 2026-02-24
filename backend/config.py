@@ -18,11 +18,11 @@ DATABASE_PATH = os.getenv('DATABASE_PATH', 'database.db')
 
 # Server Configuration
 SERVER_HOST = os.getenv('SERVER_HOST', '0.0.0.0')
-SERVER_PORT = int(os.getenv('SERVER_PORT', 8000))
+SERVER_PORT = int(os.getenv('SERVER_PORT', 8001))
 DEBUG = os.getenv('DEBUG', 'False').lower() == 'true'
 
 # CORS Configuration
-CORS_ORIGINS = [origin.strip() for origin in os.getenv('CORS_ORIGINS', 'http://localhost:3000').split(',')]
+CORS_ORIGINS = [origin.strip() for origin in os.getenv('CORS_ORIGINS', 'http://localhost:3000,http://localhost:3001').split(',')]
 
 # Frontend URL Configuration
 FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:3000')

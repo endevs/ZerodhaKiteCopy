@@ -980,8 +980,8 @@ const LiveTradeContent: React.FC = () => {
     setError(null);
     setActionMessage(null);
 
-    // Check subscription status before deploying
-    if (subscriptionStatus && subscriptionStatus.is_free_user) {
+    // Check subscription status before deploying (admin can always deploy)
+    if (subscriptionStatus && !canDeploy) {
       setShowSubscriptionPopup(true);
       return;
     }
@@ -1050,6 +1050,8 @@ const LiveTradeContent: React.FC = () => {
     setShowSubscriptionPopup(false);
     navigate('/dashboard?tab=subscribe');
   };
+
+  const canDeploy = isAdmin || subscriptionStatus?.has_live_deployment_access;
 
   const handleTestOrder = async () => {
     if (!selectedStrategy) {
@@ -1496,9 +1498,9 @@ const LiveTradeContent: React.FC = () => {
               <div className="d-grid gap-2">
                 <button
                   className="btn btn-primary"
-                  disabled={loading || (subscriptionStatus?.is_free_user ?? false)}
+                  disabled={loading || !canDeploy}
                   onClick={handleDeploy}
-                  title={subscriptionStatus?.is_free_user ? 'Premium or Super Premium subscription required to deploy strategies' : ''}
+                  title={!canDeploy ? 'Premium or Super Premium subscription required to deploy strategies' : ''}
                 >
                   {loading ? (
                     <>
@@ -1508,7 +1510,7 @@ const LiveTradeContent: React.FC = () => {
                   ) : (
                     <>
                       <i className="bi bi-play-circle me-2"></i>
-                      {subscriptionStatus?.is_free_user ? (
+                      {!canDeploy ? (
                         <>
                           <i className="bi bi-lock-fill me-2"></i>
                           Deploy Strategy (Premium Required)
@@ -1519,7 +1521,7 @@ const LiveTradeContent: React.FC = () => {
                     </>
                   )}
                 </button>
-                {subscriptionStatus?.is_free_user && (
+                {!canDeploy && (
                   <small className="text-muted text-center">
                     <i className="bi bi-info-circle me-1"></i>
                     Upgrade to Premium or Super Premium to deploy strategies

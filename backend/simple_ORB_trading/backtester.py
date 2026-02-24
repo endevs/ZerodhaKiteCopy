@@ -18,11 +18,18 @@ _spec.loader.exec_module(config)
 logger = logging.getLogger(__name__)
 
 
-def run_backtest(df: pd.DataFrame, orb_candle_number: int = 4) -> tuple:
+def run_backtest(df: pd.DataFrame, orb_candle_number: int = 4, one_trade_per_day: bool = False) -> tuple:
     """Run ORB strategy backtest."""
     logger.info("=" * 60)
-    orb_time = f"{orb_candle_number}th candle (10:00 AM)" if orb_candle_number == 4 else f"{orb_candle_number}th candle"
-    logger.info(f"ORB Strategy Backtest - {orb_time} as ORB")
+    if orb_candle_number == 1:
+        orb_time = f"{orb_candle_number}st candle (9:15 AM)"
+    elif orb_candle_number == 4:
+        orb_time = f"{orb_candle_number}th candle (10:00 AM)"
+    else:
+        orb_time = f"{orb_candle_number}th candle"
+    
+    mode_text = " - ONE TRADE PER DAY" if one_trade_per_day else ""
+    logger.info(f"ORB Strategy Backtest - {orb_time} as ORB{mode_text}")
     logger.info("=" * 60)
     
     trades_df, results = backtest_orb_strategy(
@@ -30,7 +37,8 @@ def run_backtest(df: pd.DataFrame, orb_candle_number: int = 4) -> tuple:
         initial_balance=config.INITIAL_BALANCE,
         lot_size=config.LOT_SIZE,
         ema_period=config.EMA_PERIOD,
-        orb_candle_number=orb_candle_number
+        orb_candle_number=orb_candle_number,
+        one_trade_per_day=one_trade_per_day  # NEW: Pass one trade per day flag
     )
     
     # Print results

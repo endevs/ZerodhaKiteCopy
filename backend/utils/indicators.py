@@ -280,4 +280,89 @@ def identify_candlestick_patterns(df: pd.DataFrame) -> pd.DataFrame:
     return patterns
 
 
+def calculate_vwap(high: pd.Series, low: pd.Series, close: pd.Series, volume: pd.Series) -> pd.Series:
+    """
+    Volume Weighted Average Price (VWAP)
+    
+    Calculates VWAP using typical price (H+L+C)/3 weighted by volume.
+    VWAP is typically calculated from the start of the trading day, but for
+    intraday 5-minute data, we calculate it cumulatively.
+    
+    Args:
+        high: High price series
+        low: Low price series
+        close: Close price series
+        volume: Volume series
+    
+    Returns:
+        Series containing VWAP values
+    """
+    # Typical price
+    typical_price = (high + low + close) / 3.0
+    
+    # Cumulative sum of (typical_price * volume) divided by cumulative sum of volume
+    cumulative_tpv = (typical_price * volume).cumsum()
+    cumulative_volume = volume.cumsum()
+    
+    # Avoid division by zero
+    vwap = cumulative_tpv / cumulative_volume.replace(0, np.nan)
+    
+    # Forward fill NaN values, then fill remaining with typical price
+    vwap = vwap.ffill().fillna(typical_price)
+    
+    return vwap
+
+
+def calculate_adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> Tuple[pd.Series, pd.Series, pd.Series]:
+    """
+    Average Directional Index (ADX) with +DI and -DI
+    
+    ADX measures trend strength regardless of direction.
+    +DI measures upward price movement, -DI measures downward price movement.
+    
+    Args:
+        high: High price series
+        low: Low price series
+        close: Close price series
+        period: Period for ADX calculation (default: 14)
+    
+    Returns:
+        Tuple of (ADX, +DI, -DI) series
+    """
+    # Calculate True Range
+    high_low = high - low
+    high_close = np.abs(high - close.shift())
+    low_close = np.abs(low - close.shift())
+    
+    ranges = pd.concat([high_low, high_close, low_close], axis=1)
+    true_range = np.max(ranges, axis=1)
+    
+    # Calculate Directional Movement
+    plus_dm = high.diff()
+    minus_dm = -low.diff()
+    
+    # Filter: +DM only if +DM > -DM and +DM > 0, else 0
+    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0)
+    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0)
+    
+    # Smooth TR, +DM, -DM using Wilder's smoothing
+    atr = true_range.ewm(alpha=1/period, adjust=False).mean()
+    plus_di = 100 * (plus_dm.ewm(alpha=1/period, adjust=False).mean() / atr)
+    minus_di = 100 * (minus_dm.ewm(alpha=1/period, adjust=False).mean() / atr)
+    
+    # Calculate DX (Directional Index)
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    dx = dx.replace([np.inf, -np.inf], np.nan)
+    
+    # Calculate ADX as smoothed DX
+    adx = dx.ewm(alpha=1/period, adjust=False).mean()
+    
+    # Fill initial NaN values
+    plus_di = plus_di.fillna(0)
+    minus_di = minus_di.fillna(0)
+    adx = adx.fillna(0)
+    
+    return adx, plus_di, minus_di
+
+
 

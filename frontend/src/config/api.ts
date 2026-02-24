@@ -1,4 +1,4 @@
-const DEFAULT_API_PORT = 8000;
+const DEFAULT_API_PORT = 8001;
 const LOCALHOST = 'localhost';
 
 const sanitizeBase = (input?: string | null): string | null => {
@@ -66,7 +66,7 @@ if (typeof window !== 'undefined') {
     const socketProtocol = protocol === 'https:' ? 'wss:' : 'ws:';
     resolvedSocketBase = `${socketProtocol}//${hostname}`;
   } else {
-    // For localhost, use the API base (which includes port 8000)
+    // For localhost, use the API base (which includes port 8001)
     const isLocalhostUrl = resolvedSocketBase && (resolvedSocketBase.includes('localhost') || resolvedSocketBase.includes('127.0.0.1'));
     if (isLocalhostUrl) {
       // Keep localhost URL as is
@@ -78,7 +78,7 @@ if (typeof window !== 'undefined') {
 
 // Final cleanup: remove any port numbers from production URLs
 if (resolvedSocketBase && !resolvedSocketBase.includes('localhost') && !resolvedSocketBase.includes('127.0.0.1')) {
-  // Remove any port number (3000, 8000, etc.) from production URLs
+  // Remove any port number (3000, 8001, etc.) from production URLs
   resolvedSocketBase = resolvedSocketBase.replace(/:(\d+)(\/|$)/, '$2');
 }
 

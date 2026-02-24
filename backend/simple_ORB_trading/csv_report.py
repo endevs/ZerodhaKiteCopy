@@ -43,6 +43,7 @@ def generate_trade_report(trades_df: pd.DataFrame, output_dir: str = None) -> st
         'exit_datetime',
         'position_type', 'entry_price', 'exit_price',
         'pnl', 'pnl_pct', 'exit_reason',
+        'entry_rsi', 'exit_rsi',  # NEW: Add RSI columns
         'exit_ema5',
         'orb_high', 'orb_low'
     ]
@@ -91,6 +92,8 @@ def generate_trade_report(trades_df: pd.DataFrame, output_dir: str = None) -> st
         'pnl': '',
         'pnl_pct': '',
         'exit_reason': '',
+        'entry_rsi': '',
+        'exit_rsi': '',
         'exit_ema5': '',
         'orb_high': '',
         'orb_low': ''
@@ -106,6 +109,8 @@ def generate_trade_report(trades_df: pd.DataFrame, output_dir: str = None) -> st
         'pnl': '',
         'pnl_pct': '',
         'exit_reason': '',
+        'entry_rsi': '',
+        'exit_rsi': '',
         'exit_ema5': '',
         'orb_high': '',
         'orb_low': ''
@@ -120,6 +125,8 @@ def generate_trade_report(trades_df: pd.DataFrame, output_dir: str = None) -> st
         'pnl': '',
         'pnl_pct': '',
         'exit_reason': '',
+        'entry_rsi': '',
+        'exit_rsi': '',
         'exit_ema5': '',
         'orb_high': '',
         'orb_low': ''
@@ -134,6 +141,8 @@ def generate_trade_report(trades_df: pd.DataFrame, output_dir: str = None) -> st
         'pnl': '',
         'pnl_pct': '',
         'exit_reason': '',
+        'entry_rsi': '',
+        'exit_rsi': '',
         'exit_ema5': '',
         'orb_high': '',
         'orb_low': ''
@@ -148,6 +157,8 @@ def generate_trade_report(trades_df: pd.DataFrame, output_dir: str = None) -> st
         'pnl': '',
         'pnl_pct': '',
         'exit_reason': '',
+        'entry_rsi': '',
+        'exit_rsi': '',
         'exit_ema5': '',
         'orb_high': '',
         'orb_low': ''
@@ -162,6 +173,8 @@ def generate_trade_report(trades_df: pd.DataFrame, output_dir: str = None) -> st
         'pnl': '',
         'pnl_pct': '',
         'exit_reason': '',
+        'entry_rsi': '',
+        'exit_rsi': '',
         'exit_ema5': '',
         'orb_high': '',
         'orb_low': ''
@@ -176,6 +189,8 @@ def generate_trade_report(trades_df: pd.DataFrame, output_dir: str = None) -> st
         'pnl': '',
         'pnl_pct': '',
         'exit_reason': '',
+        'entry_rsi': '',
+        'exit_rsi': '',
         'exit_ema5': '',
         'orb_high': '',
         'orb_low': ''
@@ -190,6 +205,8 @@ def generate_trade_report(trades_df: pd.DataFrame, output_dir: str = None) -> st
         'pnl': '',
         'pnl_pct': '',
         'exit_reason': '',
+        'entry_rsi': '',
+        'exit_rsi': '',
         'exit_ema5': '',
         'orb_high': '',
         'orb_low': ''
@@ -204,6 +221,8 @@ def generate_trade_report(trades_df: pd.DataFrame, output_dir: str = None) -> st
         'pnl': '',
         'pnl_pct': '',
         'exit_reason': '',
+        'entry_rsi': '',
+        'exit_rsi': '',
         'exit_ema5': '',
         'orb_high': '',
         'orb_low': ''
@@ -218,6 +237,8 @@ def generate_trade_report(trades_df: pd.DataFrame, output_dir: str = None) -> st
         'pnl': '',
         'pnl_pct': '',
         'exit_reason': '',
+        'entry_rsi': '',
+        'exit_rsi': '',
         'exit_ema5': '',
         'orb_high': '',
         'orb_low': ''
@@ -232,6 +253,8 @@ def generate_trade_report(trades_df: pd.DataFrame, output_dir: str = None) -> st
         'pnl': '',
         'pnl_pct': '',
         'exit_reason': '',
+        'entry_rsi': '',
+        'exit_rsi': '',
         'exit_ema5': '',
         'orb_high': '',
         'orb_low': ''
@@ -246,6 +269,8 @@ def generate_trade_report(trades_df: pd.DataFrame, output_dir: str = None) -> st
         'pnl': '',
         'pnl_pct': '',
         'exit_reason': '',
+        'entry_rsi': '',
+        'exit_rsi': '',
         'exit_ema5': '',
         'orb_high': '',
         'orb_low': ''
@@ -260,6 +285,8 @@ def generate_trade_report(trades_df: pd.DataFrame, output_dir: str = None) -> st
         'pnl': '',
         'pnl_pct': '',
         'exit_reason': '',
+        'entry_rsi': '',
+        'exit_rsi': '',
         'exit_ema5': '',
         'orb_high': '',
         'orb_low': ''
@@ -274,6 +301,8 @@ def generate_trade_report(trades_df: pd.DataFrame, output_dir: str = None) -> st
         'pnl': '',
         'pnl_pct': '',
         'exit_reason': '',
+        'entry_rsi': '',
+        'exit_rsi': '',
         'exit_ema5': '',
         'orb_high': '',
         'orb_low': ''
@@ -288,6 +317,8 @@ def generate_trade_report(trades_df: pd.DataFrame, output_dir: str = None) -> st
         'pnl': '',
         'pnl_pct': '',
         'exit_reason': '',
+        'entry_rsi': '',
+        'exit_rsi': '',
         'exit_ema5': '',
         'orb_high': '',
         'orb_low': ''
@@ -303,6 +334,8 @@ def generate_trade_report(trades_df: pd.DataFrame, output_dir: str = None) -> st
         'pnl': '',
         'pnl_pct': '',
         'exit_reason': '',
+        'entry_rsi': '',
+        'exit_rsi': '',
         'exit_ema5': '',
         'orb_high': '',
         'orb_low': ''
@@ -317,6 +350,8 @@ def generate_trade_report(trades_df: pd.DataFrame, output_dir: str = None) -> st
         'pnl': '',
         'pnl_pct': '',
         'exit_reason': '',
+        'entry_rsi': '',
+        'exit_rsi': '',
         'exit_ema5': '',
         'orb_high': '',
         'orb_low': ''
@@ -331,6 +366,8 @@ def generate_trade_report(trades_df: pd.DataFrame, output_dir: str = None) -> st
         'pnl': '',
         'pnl_pct': '',
         'exit_reason': '',
+        'entry_rsi': '',
+        'exit_rsi': '',
         'exit_ema5': '',
         'orb_high': '',
         'orb_low': ''
@@ -361,6 +398,8 @@ def generate_trade_report(trades_df: pd.DataFrame, output_dir: str = None) -> st
         'pnl': '',
         'pnl_pct': '',
         'exit_reason': '',
+        'entry_rsi': '',
+        'exit_rsi': '',
         'exit_ema5': '',
         'orb_high': '',
         'orb_low': ''
@@ -375,6 +414,8 @@ def generate_trade_report(trades_df: pd.DataFrame, output_dir: str = None) -> st
         'pnl': '',
         'pnl_pct': '',
         'exit_reason': '',
+        'entry_rsi': '',
+        'exit_rsi': '',
         'exit_ema5': '',
         'orb_high': '',
         'orb_low': ''
@@ -389,6 +430,8 @@ def generate_trade_report(trades_df: pd.DataFrame, output_dir: str = None) -> st
         'pnl': '',
         'pnl_pct': '',
         'exit_reason': '',
+        'entry_rsi': '',
+        'exit_rsi': '',
         'exit_ema5': '',
         'orb_high': '',
         'orb_low': ''
@@ -403,6 +446,8 @@ def generate_trade_report(trades_df: pd.DataFrame, output_dir: str = None) -> st
         'pnl': '',
         'pnl_pct': '',
         'exit_reason': '',
+        'entry_rsi': '',
+        'exit_rsi': '',
         'exit_ema5': '',
         'orb_high': '',
         'orb_low': ''

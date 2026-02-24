@@ -76,6 +76,7 @@ const Navigation: React.FC<NavigationProps> = ({
     { id: 'algo-visualization', label: 'Algo Visualization', icon: '🎯' },
     { id: 'live-trade', label: 'Live Trade', icon: '⚡' },
     { id: 'ai-ml', label: 'AI / ML', icon: '🤖' },
+    { id: 'options', label: 'Options', icon: '📈' },
     ...(isAdmin ? [{ id: 'admin', label: 'Admin', icon: '🛡️' }] : []),
   ];
 

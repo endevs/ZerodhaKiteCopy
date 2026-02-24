@@ -11,6 +11,7 @@ import LiveTradeContent from './LiveTradeContent';
 import AdminContent from './AdminContent';
 import ProfileContent from './ProfileContent';
 import SubscribeContent from './SubscribeContent';
+import OptionsContent from './OptionsContent';
 import RiskDisclosureModal from './RiskDisclosureModal';
 import { apiUrl, SOCKET_BASE_URL } from '../config/api';
 
@@ -344,6 +345,8 @@ const Dashboard: React.FC = () => {
         return <AIMLContent onSubscribeClick={handleSubscribeClick} />;
       case 'admin':
         return <AdminContent />;
+      case 'options':
+        return <OptionsContent />;
       case 'profile':
         return <ProfileContent onSubscribeClick={handleSubscribeClick} />;
       case 'subscribe':

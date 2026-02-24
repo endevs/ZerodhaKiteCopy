@@ -6,6 +6,7 @@ import json
 import logging
 import time
 import random
+import sqlite3
 from typing import Dict, List, Optional, Any
 from database import get_db_connection
 
@@ -218,11 +219,12 @@ def create_subscription(
                 raise
             
             try:
-                # Cancel any existing active subscriptions for this user (all plan types)
+                # Delete any existing active/trial subscriptions for this user (all plan types)
+                # We delete instead of updating to 'cancelled' to avoid UNIQUE constraint violations
+                # when multiple subscriptions with the same plan_type exist
                 conn.execute(
                     """
-                    UPDATE subscriptions 
-                    SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP
+                    DELETE FROM subscriptions 
                     WHERE user_id = ? AND status IN ('active', 'trial')
                     """,
                     (user_id,)
@@ -256,35 +258,67 @@ def create_subscription(
                         )
                     )
                 else:
-                    # Before creating, delete any existing subscription with same user_id, plan_type, and status
-                    # This handles edge cases where a cancelled/expired subscription might still exist
-                    conn.execute(
-                        """
-                        DELETE FROM subscriptions 
-                        WHERE user_id = ? AND plan_type = ? AND status = ?
-                        """,
-                        (user_id, plan_type, subscription_status)
-                    )
-                    
-                    # Create new subscription
-                    cursor = conn.execute(
-                        """
-                        INSERT INTO subscriptions (
-                            user_id, plan_type, status, start_date, end_date, trial_end_date, auto_renew
+                    # Try to insert new subscription atomically
+                    # If UNIQUE constraint violation occurs (race condition), update instead
+                    try:
+                        cursor = conn.execute(
+                            """
+                            INSERT INTO subscriptions (
+                                user_id, plan_type, status, start_date, end_date, trial_end_date, auto_renew
+                            )
+                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                user_id,
+                                plan_type,
+                                subscription_status,
+                                start_date.isoformat(),
+                                end_date.isoformat() if end_date else None,
+                                trial_end_date.isoformat() if trial_end_date else None,
+                                1 if plan_type != 'freemium' else 0
+                            )
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            user_id,
-                            plan_type,
-                            subscription_status,
-                            start_date.isoformat(),
-                            end_date.isoformat() if end_date else None,
-                            trial_end_date.isoformat() if trial_end_date else None,
-                            1 if plan_type != 'freemium' else 0
-                        )
-                    )
-                    subscription_id = cursor.lastrowid
+                        subscription_id = cursor.lastrowid
+                    except sqlite3.IntegrityError as integrity_err:
+                        # UNIQUE constraint violation - another request created it concurrently
+                        # Fetch the existing subscription and update it
+                        error_str = str(integrity_err).lower()
+                        if 'unique' in error_str or 'constraint' in error_str:
+                            logging.warning(
+                                f"Subscription already exists (race condition), updating instead: "
+                                f"user_id={user_id}, plan_type={plan_type}, status={subscription_status}"
+                            )
+                            existing_row = conn.execute(
+                                """
+                                SELECT id FROM subscriptions 
+                                WHERE user_id = ? AND plan_type = ? AND status = ?
+                                """,
+                                (user_id, plan_type, subscription_status)
+                            ).fetchone()
+                            
+                            if existing_row:
+                                subscription_id = existing_row['id']
+                                conn.execute(
+                                    """
+                                    UPDATE subscriptions 
+                                    SET start_date = ?, end_date = ?, trial_end_date = ?, 
+                                        auto_renew = ?, updated_at = CURRENT_TIMESTAMP
+                                    WHERE id = ?
+                                    """,
+                                    (
+                                        start_date.isoformat(),
+                                        end_date.isoformat() if end_date else None,
+                                        trial_end_date.isoformat() if trial_end_date else None,
+                                        1 if plan_type != 'freemium' else 0,
+                                        subscription_id
+                                    )
+                                )
+                            else:
+                                # Should not happen, but re-raise if it does
+                                raise
+                        else:
+                            # Different integrity error, re-raise
+                            raise
                 
                 # Update user's current subscription
                 conn.execute(
