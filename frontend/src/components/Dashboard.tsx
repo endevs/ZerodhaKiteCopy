@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import Layout from './Layout';
 import Navigation from './Navigation';
-import { io, Socket } from 'socket.io-client';
 import DashboardContent from './DashboardContent';
 import AlgoVisualizationContent from './AlgoVisualizationContent';
 import ChartModal from './ChartModal';
@@ -12,8 +11,10 @@ import AdminContent from './AdminContent';
 import ProfileContent from './ProfileContent';
 import SubscribeContent from './SubscribeContent';
 import OptionsContent from './OptionsContent';
+import AdvancedChartsContent from './AdvancedChartsContent';
 import RiskDisclosureModal from './RiskDisclosureModal';
-import { apiUrl, SOCKET_BASE_URL } from '../config/api';
+import { apiUrl } from '../config/api';
+import { useSocket } from '../hooks/useSocket';
 
 const Dashboard: React.FC = () => {
   const [activeTab, setActiveTab] = useState<string>('dashboard');
@@ -28,8 +29,8 @@ const Dashboard: React.FC = () => {
   const [showLiveStrategyModal, setShowLiveStrategyModal] = useState<boolean>(false);
   const [liveStrategyId, setLiveStrategyId] = useState<string | null>(null);
   const [showRiskDisclosure, setShowRiskDisclosure] = useState<boolean>(false);
-  const socketRef = useRef<Socket | null>(null);
   const warningShownRef = useRef<boolean>(false);
+  const socket = useSocket();
 
   const handleViewChart = useCallback((instrumentToken: string) => {
     setChartInstrumentToken(instrumentToken);
@@ -126,8 +127,6 @@ const Dashboard: React.FC = () => {
                 }
               });
           }
-        } else {
-          console.error('Error fetching user data:', data.message);
         }
       } catch (error) {
         console.error('Error fetching user data:', error);
@@ -139,16 +138,13 @@ const Dashboard: React.FC = () => {
         const resp = await fetch(apiUrl('/api/market_snapshot'), { credentials: 'include' });
         const data = await resp.json();
         if (resp.ok && data.status === 'success') {
-          if (typeof data.nifty === 'number') setNiftyPrice(data.nifty.toFixed(2));
-          if (typeof data.banknifty === 'number') setBankNiftyPrice(data.banknifty.toFixed(2));
-        } else if (resp.status === 401) {
-          // 401 is expected if user is not logged in or Zerodha is not connected
-          // Don't log as error, just set default values
+          setNiftyPrice(typeof data.nifty === 'number' ? data.nifty.toFixed(2) : '—');
+          setBankNiftyPrice(typeof data.banknifty === 'number' ? data.banknifty.toFixed(2) : '—');
+        } else {
           setNiftyPrice('Not Connected');
           setBankNiftyPrice('Not Connected');
         }
       } catch (error) {
-        // Only log non-401 errors
         const errorMessage = error instanceof Error ? error.message : String(error);
         if (!errorMessage.includes('401')) {
           console.error('Error fetching initial market data:', error);
@@ -160,99 +156,47 @@ const Dashboard: React.FC = () => {
 
     fetchUserData();
     fetchInitialMarketData();
-    
-    // Also check periodically if access token becomes available (after login)
-    const checkAccessTokenInterval = setInterval(() => {
-      fetchUserData();
-    }, 5000); // Check every 5 seconds
+    // Retry market snapshot once after 3s so banner updates if first request was before session/ticker ready
+    const retryMarketSnapshot = setTimeout(fetchInitialMarketData, 3000);
 
-    // Log Socket.IO connection URL for debugging
-    console.log('[Socket.IO] Connecting to:', SOCKET_BASE_URL, 'with path: /socket.io/');
-    
-    const socket: Socket = io(SOCKET_BASE_URL, {
-      path: '/socket.io/',
-      transports: ['polling', 'websocket'],
-      reconnection: true,
-      reconnectionDelay: 1000,
-      reconnectionDelayMax: 5000,
-      reconnectionAttempts: Infinity,
-      timeout: 20000,
-      forceNew: false,
-      // Explicitly set autoConnect to prevent premature connections
-      autoConnect: true
-    });
-    
-    socketRef.current = socket;
-
-    socket.on('connect', () => {
-      console.log('Connected to WebSocket');
-      socket.emit('my_event', { data: 'I\'m connected!' });
-      
-      // Request ticker startup if user is logged in and has access token
-      // Check if access token is present and start ticker via HTTP endpoint
-      fetch(apiUrl('/api/user-data'), { credentials: 'include' })
-        .then(response => response.json())
-        .then(data => {
-          if (data.access_token_present) {
-            fetch(apiUrl('/api/ticker/start'), {
-              method: 'POST',
-              credentials: 'include'
-            })
-              .then(response => response.json())
-              .then(result => {
-                if (result.status !== 'success') {
-                  console.error('Failed to start ticker:', result.message);
-                }
-              })
-              .catch(err => console.error('Error starting ticker:', err));
-          } else {
-            // silent
+    // Periodically refresh Nifty/Bank Nifty in the banner so they stay in sync (fallback when socket ticks are missing)
+    const MARKET_SNAPSHOT_INTERVAL_MS = 30 * 1000; // 30 seconds
+    const marketSnapshotInterval = setInterval(() => {
+      fetch(apiUrl('/api/market_snapshot'), { credentials: 'include' })
+        .then(async (resp) => {
+          const data = await resp.json();
+          if (resp.ok && data.status === 'success') {
+            setNiftyPrice(typeof data.nifty === 'number' ? data.nifty.toFixed(2) : '—');
+            setBankNiftyPrice(typeof data.banknifty === 'number' ? data.banknifty.toFixed(2) : '—');
           }
         })
-        .catch(err => console.error('Error checking access token:', err));
-    });
+        .catch(() => {});
+    }, MARKET_SNAPSHOT_INTERVAL_MS);
 
-    socket.on('disconnect', (reason: string) => {
-      console.log('WebSocket disconnected:', reason);
+    // Periodically re-check user data (e.g. after Zerodha login redirect)
+    const checkAccessTokenInterval = setInterval(() => {
+      fetchUserData();
+    }, 30_000);
+
+    const onConnect = () => {
+      console.log('Connected to WebSocket');
+      socket.emit('my_event', { data: 'I\'m connected!' });
+    };
+    const onDisconnect = (reason: string) => {
       if (reason === 'io server disconnect') {
-        // Server disconnected the socket, need to reconnect manually
         socket.connect();
       }
-      // Otherwise, it will automatically reconnect
-    });
-
-    socket.on('connect_error', (error: any) => {
-      console.error('WebSocket connection error:', error);
-      // Don't set error state immediately - let reconnection handle it
-    });
-
-    socket.on('reconnect', (attemptNumber: number) => {
-      console.log('WebSocket reconnected after', attemptNumber, 'attempts');
-    });
-
-    socket.on('reconnect_attempt', (attemptNumber: number) => {
-      console.log('WebSocket reconnection attempt', attemptNumber);
-    });
-
-    socket.on('reconnect_error', (error: any) => {
-      console.error('WebSocket reconnection error:', error);
-    });
-
-    socket.on('reconnect_failed', () => {
-      console.error('WebSocket reconnection failed');
+    };
+    const onReconnectFailed = () => {
       setNiftyPrice('Connection Lost');
       setBankNiftyPrice('Connection Lost');
-    });
-
-    socket.on('unauthorized', (msg: { message: string }) => {
+    };
+    const onUnauthorized = (msg: { message: string }) => {
       alert(msg.message);
-      window.location.href = '/login'; // Redirect to login page
-    });
-
-    socket.on('market_data', (msg: any) => {
-      // Handle both separate and combined market data formats
+      window.location.href = '/login';
+    };
+    const onMarketData = (msg: any) => {
       if (msg.nifty_price) {
-        // Convert to number and format if needed
         const price = typeof msg.nifty_price === 'string' ? msg.nifty_price : msg.nifty_price.toFixed(2);
         setNiftyPrice(price);
       }
@@ -260,36 +204,36 @@ const Dashboard: React.FC = () => {
         const price = typeof msg.banknifty_price === 'string' ? msg.banknifty_price : msg.banknifty_price.toFixed(2);
         setBankNiftyPrice(price);
       }
-      // Also handle the new format with instrument_token
       if (msg.instrument_token === 256265 && msg.last_price !== undefined) {
         setNiftyPrice(typeof msg.last_price === 'number' ? msg.last_price.toFixed(2) : String(msg.last_price));
       }
       if (msg.instrument_token === 260105 && msg.last_price !== undefined) {
         setBankNiftyPrice(typeof msg.last_price === 'number' ? msg.last_price.toFixed(2) : String(msg.last_price));
       }
-    });
-
-    socket.on('info', (msg: { message: string }) => {
-      // Reduce console noise; keep only warnings/errors elsewhere
-    });
-
-    socket.on('error', (msg: { message: string }) => {
+    };
+    const onError = (msg: { message: string }) => {
       console.error('SocketIO error:', msg.message);
       if (msg.message.includes('Failed to start market data feed')) {
         setNiftyPrice('Error');
         setBankNiftyPrice('Error');
       }
-    });
-
-    socket.on('warning', (msg: { message: string }) => {
+    };
+    const onWarning = (msg: { message: string }) => {
       console.warn('SocketIO warning:', msg.message);
       if (msg.message.includes('Zerodha session expired') || msg.message.includes('Zerodha credentials not configured')) {
         setNiftyPrice('Not Connected');
         setBankNiftyPrice('Not Connected');
       }
-    });
+    };
 
-    // Set timeout to show warning if no data received after 10 seconds (only once)
+    socket.on('connect', onConnect);
+    socket.on('disconnect', onDisconnect);
+    socket.on('reconnect_failed', onReconnectFailed);
+    socket.on('unauthorized', onUnauthorized);
+    socket.on('market_data', onMarketData);
+    socket.on('error', onError);
+    socket.on('warning', onWarning);
+
     const timeoutId = setTimeout(() => {
       if (!warningShownRef.current && (niftyPrice === 'Loading...' || bankNiftyPrice === 'Loading...')) {
         console.warn('Market data not received yet. Make sure Zerodha is connected and market is open.');
@@ -299,13 +243,18 @@ const Dashboard: React.FC = () => {
 
     return () => {
       clearTimeout(timeoutId);
+      clearTimeout(retryMarketSnapshot);
       clearInterval(checkAccessTokenInterval);
-      if (socketRef.current) {
-        socketRef.current.disconnect();
-        socketRef.current = null;
-      }
+      clearInterval(marketSnapshotInterval);
+      socket.off('connect', onConnect);
+      socket.off('disconnect', onDisconnect);
+      socket.off('reconnect_failed', onReconnectFailed);
+      socket.off('unauthorized', onUnauthorized);
+      socket.off('market_data', onMarketData);
+      socket.off('error', onError);
+      socket.off('warning', onWarning);
     };
-  }, []);
+  }, [socket]);
 
   const handleLogout = async () => {
     try {
@@ -347,6 +296,8 @@ const Dashboard: React.FC = () => {
         return <AdminContent />;
       case 'options':
         return <OptionsContent />;
+      case 'advanced-charts':
+        return <AdvancedChartsContent />;
       case 'profile':
         return <ProfileContent onSubscribeClick={handleSubscribeClick} />;
       case 'subscribe':

@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { ComposedChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ReferenceLine, Customized } from 'recharts';
+import { ComposedChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ReferenceLine } from 'recharts';
 import { io } from 'socket.io-client';
 import { apiUrl, SOCKET_BASE_URL } from '../config/api';
+import PaperTradeApexCandles from './PaperTradeApexCandles';
 
 interface Strategy {
   id: number;
@@ -440,145 +441,6 @@ const PaperTradeContent: React.FC<PaperTradeContentProps> = () => {
     return null;
   };
 
-  // Custom Candlestick Renderer
-  const CandlestickRenderer = (props: any) => {
-    try {
-      const { xAxisMap, yAxisMap } = props;
-      if (!xAxisMap || !yAxisMap) return null;
-      
-      const xKey = Object.keys(xAxisMap)[0];
-      const yKey = Object.keys(yAxisMap)[0];
-      
-      if (!xKey || !yKey) return null;
-
-      const xAxis = xAxisMap[xKey];
-      const yAxis = yAxisMap[yKey];
-      const xScale = xAxis?.scale;
-      const yScale = yAxis?.scale;
-      
-      if (!xScale || !yScale) return null;
-
-      const dataLength = chartDataFormatted.length;
-      const chartWidth = props.width || 800;
-      const bandSize = dataLength > 0 ? chartWidth / dataLength : 10;
-      const candleWidth = Math.max(4, Math.floor(bandSize * 0.5));
-      const half = Math.floor(candleWidth / 2);
-
-      return (
-        <g>
-          {chartDataFormatted.map((candle, index) => {
-            let xPos: number;
-            if (typeof xScale === 'function') {
-              xPos = xScale(candle.timeFormatted);
-            } else if (xScale && typeof xScale.bandwidth === 'function') {
-              xPos = xScale(candle.timeFormatted) || (index * bandSize);
-            } else {
-              xPos = index * bandSize;
-            }
-
-            if (typeof xPos !== 'number' || isNaN(xPos)) return null;
-
-            const centerX = xPos + (bandSize / 2);
-            const startX = centerX - half;
-
-            const isRising = candle.close >= candle.open;
-            const highY = yScale(candle.high);
-            const lowY = yScale(candle.low);
-            const openY = yScale(candle.open);
-            const closeY = yScale(candle.close);
-
-            if ([highY, lowY, openY, closeY].some(v => typeof v !== 'number' || isNaN(v))) return null;
-
-            const bodyTop = isRising ? closeY : openY;
-            const bodyBottom = isRising ? openY : closeY;
-            const bodyHeight = Math.max(2, Math.abs(bodyBottom - bodyTop));
-
-            const signalCandle = signalCandles.find(s => s.index === index);
-            const tradeEvent = tradeEvents.find(t => t.index === index);
-            const borderColor = signalCandle 
-              ? (signalCandle.type === 'PE' ? '#dc3545' : '#28a745')
-              : 'transparent';
-            const borderWidth = signalCandle ? 3 : 0;
-
-            return (
-              <g key={index}>
-                {/* Wick */}
-                <line
-                  x1={centerX}
-                  y1={highY}
-                  x2={centerX}
-                  y2={lowY}
-                  stroke={isRising ? '#28a745' : '#dc3545'}
-                  strokeWidth={2}
-                />
-                {/* Body */}
-                <rect
-                  x={startX}
-                  y={bodyTop}
-                  width={candleWidth}
-                  height={bodyHeight}
-                  fill={isRising ? '#28a745' : '#dc3545'}
-                  stroke={borderColor}
-                  strokeWidth={borderWidth}
-                  opacity={0.9}
-                />
-                {/* Entry marker */}
-                {tradeEvent?.type === 'ENTRY' && (
-                  <g>
-                    <circle
-                      cx={centerX}
-                      cy={yScale(tradeEvent.price)}
-                      r={8}
-                      fill={tradeEvent.tradeType === 'PE' ? '#dc3545' : '#28a745'}
-                      stroke="white"
-                      strokeWidth={2}
-                    />
-                    <text
-                      x={centerX}
-                      y={yScale(tradeEvent.price) - 12}
-                      textAnchor="middle"
-                      fill={tradeEvent.tradeType === 'PE' ? '#dc3545' : '#28a745'}
-                      fontSize="10"
-                      fontWeight="bold"
-                    >
-                      ENTRY
-                    </text>
-                  </g>
-                )}
-                {/* Exit marker */}
-                {(tradeEvent?.type === 'STOP_LOSS' || tradeEvent?.type === 'TARGET' || tradeEvent?.type === 'MKT_CLOSE') && (
-                  <g>
-                    <circle
-                      cx={centerX}
-                      cy={yScale(tradeEvent.price)}
-                      r={8}
-                      fill={tradeEvent.type === 'STOP_LOSS' ? '#dc3545' : tradeEvent.type === 'MKT_CLOSE' ? '#6c757d' : '#ffc107'}
-                      stroke="white"
-                      strokeWidth={2}
-                    />
-                    <text
-                      x={centerX}
-                      y={yScale(tradeEvent.price) - 12}
-                      textAnchor="middle"
-                      fill={tradeEvent.type === 'STOP_LOSS' ? '#dc3545' : tradeEvent.type === 'MKT_CLOSE' ? '#6c757d' : '#ffc107'}
-                      fontSize="10"
-                      fontWeight="bold"
-                    >
-                      {tradeEvent.type === 'STOP_LOSS' ? 'SL' : tradeEvent.type === 'MKT_CLOSE' ? 'MC' : 'TP'}
-                    </text>
-                  </g>
-                )}
-              </g>
-            );
-          })}
-        </g>
-      );
-    } catch (e) {
-      console.error('Error rendering candlesticks:', e);
-      return null;
-    }
-  };
-
   return (
     <div className="container-fluid">
       <div className="card shadow-sm border-0 mb-4">
@@ -813,69 +675,65 @@ const PaperTradeContent: React.FC<PaperTradeContentProps> = () => {
               </div>
               <div className="card-body">
                 <div style={{ width: '100%', height: '500px', minWidth: 0 }}>
-                  <ResponsiveContainer>
-                    <ComposedChart data={chartDataFormatted}>
-                      <CartesianGrid strokeDasharray="3 3" />
-                      <XAxis 
-                        dataKey="timeFormatted" 
-                        angle={-45} 
-                        textAnchor="end" 
-                        height={80}
-                        interval="preserveStartEnd"
-                      />
-                      <YAxis yAxisId="price" orientation="left" />
-                      <YAxis yAxisId="rsi" orientation="right" domain={[0, 100]} />
-                      <Tooltip content={<CustomTooltip />} />
-                      <Legend />
-                      {chartType === 'candlestick' ? (
-                        <>
-                          {/* Render candlesticks using Customized component */}
-                          <Customized component={CandlestickRenderer} />
-                          <Line 
-                            yAxisId="price"
-                            type="monotone" 
-                            dataKey="ema5" 
-                            stroke="#ff7300" 
-                            strokeWidth={2}
-                            name="EMA 5"
-                            dot={false}
-                          />
-                        </>
-                      ) : (
-                        <>
-                          <Line 
-                            yAxisId="price"
-                            type="monotone" 
-                            dataKey="close" 
-                            stroke="#8884d8" 
-                            strokeWidth={2}
-                            name="Price"
-                            dot={false}
-                          />
-                          <Line 
-                            yAxisId="price"
-                            type="monotone" 
-                            dataKey="ema5" 
-                            stroke="#ff7300" 
-                            strokeWidth={2}
-                            name="EMA 5"
-                            dot={false}
-                          />
-                        </>
-                      )}
-                      <Line 
-                        yAxisId="rsi"
-                        type="monotone" 
-                        dataKey="rsi14" 
-                        stroke="#82ca9d" 
-                        strokeWidth={2}
-                        name="RSI 14"
-                        dot={false}
-                      />
-                      <ReferenceLine yAxisId="rsi" y={70} stroke="#dc3545" strokeDasharray="3 3" label="Overbought" />
-                      <ReferenceLine yAxisId="rsi" y={30} stroke="#28a745" strokeDasharray="3 3" label="Oversold" />
-                    </ComposedChart>
-                  </ResponsiveContainer>
+                  {chartType === 'candlestick' ? (
+                    <PaperTradeApexCandles
+                      data={chartDataFormatted.map((c) => ({
+                        time: c.time,
+                        open: c.open,
+                        high: c.high,
+                        low: c.low,
+                        close: c.close,
+                        ema5: c.ema5,
+                      }))}
+                      height={500}
+                    />
+                  ) : (
+                    <ResponsiveContainer>
+                      <ComposedChart data={chartDataFormatted}>
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis 
+                          dataKey="timeFormatted" 
+                          angle={-45} 
+                          textAnchor="end" 
+                          height={80}
+                          interval="preserveStartEnd"
+                        />
+                        <YAxis yAxisId="price" orientation="left" />
+                        <YAxis yAxisId="rsi" orientation="right" domain={[0, 100]} />
+                        <Tooltip content={<CustomTooltip />} />
+                        <Legend />
+                        <Line 
+                          yAxisId="price"
+                          type="monotone" 
+                          dataKey="close" 
+                          stroke="#8884d8" 
+                          strokeWidth={2}
+                          name="Price"
+                          dot={false}
+                        />
+                        <Line 
+                          yAxisId="price"
+                          type="monotone" 
+                          dataKey="ema5" 
+                          stroke="#ff7300" 
+                          strokeWidth={2}
+                          name="EMA 5"
+                          dot={false}
+                        />
+                        <Line 
+                          yAxisId="rsi"
+                          type="monotone" 
+                          dataKey="rsi14" 
+                          stroke="#82ca9d" 
+                          strokeWidth={2}
+                          name="RSI 14"
+                          dot={false}
+                        />
+                        <ReferenceLine yAxisId="rsi" y={70} stroke="#dc3545" strokeDasharray="3 3" label="Overbought" />
+                        <ReferenceLine yAxisId="rsi" y={30} stroke="#28a745" strokeDasharray="3 3" label="Oversold" />
+                      </ComposedChart>
+                    </ResponsiveContainer>
+                  )}
                 </div>
               </div>
             </div>

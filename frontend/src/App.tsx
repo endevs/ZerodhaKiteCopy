@@ -30,7 +30,6 @@ const App: React.FC = () => {
             // The Welcome page will handle showing the credentials form
           }
         } else {
-          console.log('[App] Authentication check failed:', response.status);
           setIsAuthenticated(false);
         }
       } catch (error) {

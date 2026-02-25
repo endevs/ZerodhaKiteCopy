@@ -15,11 +15,16 @@
     "@types/react": "^19.2.2",
     "@types/react-dom": "^19.2.2",
     "@types/recharts": "^1.8.29",
+    "apexcharts": "^4.7.0",
     "bootstrap": "^5.3.8",
     "http-proxy-middleware": "^3.0.5",
+    "lightweight-charts": "^4.2.0",
+    "plotly.js-finance-dist-min": "^2.35.3",
     "react": "^19.2.0",
+    "react-apexcharts": "^1.9.0",
     "react-bootstrap": "^2.10.10",
     "react-dom": "^19.2.0",
+    "react-plotly.js": "^2.6.0",
     "react-router-dom": "^7.9.5",
     "react-scripts": "5.0.1",
     "recharts": "^3.3.0",
@@ -50,5 +55,8 @@
       "last 1 firefox version",
       "last 1 safari version"
     ]
+  },
+  "devDependencies": {
+    "@types/react-plotly.js": "^2.6.4"
   }
 }

@@ -1381,6 +1381,42 @@ class CaptureMountainSignal(BaseStrategy):
         # Initialize historical data from market open if deployed during market hours
         self._initialize_historical_data_from_market_open()
 
+    def get_chart_data(self) -> Optional[Dict[str, Any]]:
+        """Build chart payload (candles, ema5, rsi14) for frontend real-time chart. Used when paper trading."""
+        if not self.historical_data or len(self.historical_data) < 1:
+            return None
+        try:
+            df = pd.DataFrame(self.historical_data)
+            df['ema5'] = df['close'].ewm(span=self.ema_period, adjust=False).mean()
+            if len(df) >= 15:
+                df['rsi14'] = calculate_rsi(df['close'], period=14)
+            else:
+                df['rsi14'] = None
+
+            candles = []
+            ema5 = []
+            rsi14 = []
+            for _, row in df.iterrows():
+                ts = row['date']
+                if isinstance(ts, (datetime.datetime, pd.Timestamp)):
+                    x_str = ts.isoformat()
+                else:
+                    x_str = str(ts)
+                candles.append({
+                    'x': x_str,
+                    'o': float(row['open']),
+                    'h': float(row['high']),
+                    'l': float(row['low']),
+                    'c': float(row['close'])
+                })
+                ema5.append({'x': x_str, 'y': float(row['ema5']) if pd.notna(row['ema5']) else None})
+                rsi14.append({'x': x_str, 'y': float(row['rsi14']) if pd.notna(row['rsi14']) else None})
+
+            return {'candles': candles, 'ema5': ema5, 'rsi14': rsi14}
+        except Exception as e:
+            logging.warning(f"get_chart_data failed: {e}")
+            return None
+
     def process_ticks(self, ticks):
         if not ticks:
             return

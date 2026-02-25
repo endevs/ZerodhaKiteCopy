@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { ComposedChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, ReferenceLine, Customized, XAxisProps, YAxisProps } from 'recharts';
-import { apiUrl } from '../config/api';
+import { io, Socket } from 'socket.io-client';
+import { apiUrl, SOCKET_BASE_URL } from '../config/api';
 
 interface Strategy {
   id: number;
@@ -458,6 +459,25 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
   const [filterIgnoredCE, setFilterIgnoredCE] = useState<boolean>(false);
   const [peRsiThreshold, setPeRsiThreshold] = useState<number>(70);
   const [ceRsiThreshold, setCeRsiThreshold] = useState<number>(30);
+  const [liveTrade, setLiveTrade] = useState<boolean>(false);
+  const [liveTradeLots, setLiveTradeLots] = useState<number>(1);
+  const [liveTradeBalance, setLiveTradeBalance] = useState<number | null>(null);
+  const [liveTradeBalanceLoading, setLiveTradeBalanceLoading] = useState<boolean>(false);
+  const [zerodhaOrders, setZerodhaOrders] = useState<Array<Record<string, unknown>>>([]);
+  const [liveTradeMessage, setLiveTradeMessage] = useState<{ text: string; type: 'success' | 'error' | 'info' } | null>(null);
+  const [lastNotifiedOrderIds, setLastNotifiedOrderIds] = useState<Set<string>>(new Set());
+  const [sentSignalKeys, setSentSignalKeys] = useState<Set<string>>(new Set());
+  const [manualEntryOptionType, setManualEntryOptionType] = useState<'PE' | 'CE'>('PE');
+  const [entryExitLoading, setEntryExitLoading] = useState<{ entry: boolean; exit: boolean }>({ entry: false, exit: false });
+  const [showEntryConfirm, setShowEntryConfirm] = useState<boolean>(false);
+  const [showExitConfirm, setShowExitConfirm] = useState<boolean>(false);
+  const [entryPreview, setEntryPreview] = useState<{ tradingsymbol: string; quantity: number; instrument: string; optionType: string; lots: number; indexLtp: number } | null>(null);
+  const [positionsForConfirm, setPositionsForConfirm] = useState<Array<{ tradingsymbol: string; quantity: number; product?: string; exchange?: string }>>([]);
+  const [liveTradeMessageSource, setLiveTradeMessageSource] = useState<'zerodha' | null>(null);
+  const openPositionBySignalKeyRef = useRef<Record<string, { tradingsymbol: string; quantity: number }>>({});
+  const sentSignalKeysRef = useRef<Set<string>>(new Set());
+  const lastLiveOrderBlockRef = useRef<'market_closed' | 'session_expired' | null>(null);
+  const processMountainSignalLogicRef = useRef<(data: ChartDataResponse) => void>(() => {});
   const [expandedDates, setExpandedDates] = useState<Set<string>>(new Set());
   const [backtestResults, setBacktestResults] = useState<{
     trades: Array<{
@@ -762,6 +782,48 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
     setSelectedDate(today);
   }, []);
 
+  const playTradeAlertSound = useCallback(() => {
+    try {
+      const audio = new Audio('/sounds/trade-executed.mp3');
+      audio.volume = 0.6;
+      audio.play().catch(() => {});
+    } catch {
+      try {
+        const ctx = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.frequency.value = 880;
+        gain.gain.setValueAtTime(0.15, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.15);
+        osc.start(ctx.currentTime);
+        osc.stop(ctx.currentTime + 0.15);
+      } catch { /* no sound */ }
+    }
+  }, []);
+
+  const fetchZerodhaOrders = useCallback(async () => {
+    try {
+      const res = await fetch(apiUrl('/api/zerodha/orders?tag=mountain_signal'), { credentials: 'include' });
+      if (res.status === 401) {
+        lastLiveOrderBlockRef.current = 'session_expired';
+        setLiveTradeMessage({ text: 'Session expired. Please log in again.', type: 'error' });
+        return;
+      }
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data.authExpired) {
+        lastLiveOrderBlockRef.current = 'session_expired';
+        setLiveTradeMessage({ text: 'Session expired. Please log in again.', type: 'error' });
+        return;
+      }
+      if (data.status === 'success' && Array.isArray(data.orders)) setZerodhaOrders(data.orders);
+    } catch (e) {
+      console.error('Failed to fetch Zerodha orders:', e);
+    }
+  }, []);
+
   const fetchChartData = useCallback(async () => {
     if (!selectedDate) {
       setError('Please select a date');
@@ -791,6 +853,11 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
       if (data.candles.length === 0) {
         setError('No data available for the selected date');
       } else {
+        // Clear lists when data is insufficient so we don't show stale lists from a previous date
+        if (data.candles.length < emaPeriod + 1) {
+          setIgnoredSignals([]);
+          setWaitingSignals([]);
+        }
         // Process Mountain Signal logic (returns simulated option trades as fallback)
         const simulatedOptionTrades = processMountainSignalLogic(data) || [];
         setOptionLtpMap({});
@@ -861,6 +928,132 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
           setOptionTradeHistory(simulatedOptionTrades);
           setOptionLtpMap({});
         }
+
+        if (liveTrade && selectedDate === new Date().toISOString().split('T')[0] && simulatedOptionTrades.length > 0) {
+          (async () => {
+            const todayStr = new Date().toISOString().split('T')[0];
+            if (selectedDate !== todayStr) return;
+            if (lastLiveOrderBlockRef.current === 'session_expired' || lastLiveOrderBlockRef.current === 'market_closed') {
+              return;
+            }
+            for (const trade of simulatedOptionTrades) {
+              const key = `${trade.signalIndex}-${trade.signalType}`;
+              if (trade.entryTime && !sentSignalKeysRef.current.has(`${key}-ENTRY`)) {
+                try {
+                  const res = await fetch(apiUrl('/api/mountain_signal/live/place_order'), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'include',
+                    body: JSON.stringify({
+                      instrument: strategy.instrument.toUpperCase(),
+                      optionType: trade.signalType,
+                      transactionType: 'BUY',
+                      indexLtp: trade.indexAtEntry,
+                      lots: liveTradeLots,
+                    }),
+                  });
+                  const orderData = await res.json();
+                  if (res.status === 401 || orderData.authExpired) {
+                    lastLiveOrderBlockRef.current = 'session_expired';
+                    setLiveTradeMessage({ text: 'Session expired. Please log in again.', type: 'error' });
+                    setLiveTradeMessageSource(null);
+                    return;
+                  }
+                  if (orderData.status === 'success') {
+                    lastLiveOrderBlockRef.current = null;
+                    sentSignalKeysRef.current.add(`${key}-ENTRY`);
+                    setSentSignalKeys((prev) => new Set(prev).add(`${key}-ENTRY`));
+                    openPositionBySignalKeyRef.current[key] = {
+                      tradingsymbol: orderData.tradingsymbol,
+                      quantity: orderData.quantity,
+                    };
+                    setLiveTradeMessage({
+                      text: orderData.message || `Order ${orderData.order_id} placed.`,
+                      type: 'success',
+                    });
+                    setLiveTradeMessageSource(null);
+                    if (orderData.order_id) {
+                      setLastNotifiedOrderIds((prev) => new Set(prev).add(String(orderData.order_id)));
+                      playTradeAlertSound();
+                    }
+                    fetchZerodhaOrders();
+                  } else {
+                    const msg = orderData.message || 'Order failed.';
+                    if (orderData.reason === 'market_closed' || (typeof msg === 'string' && msg.includes('Market is closed'))) {
+                      lastLiveOrderBlockRef.current = 'market_closed';
+                    }
+                    setLiveTradeMessage({ text: msg, type: 'error' });
+                    setLiveTradeMessageSource(orderData.source || null);
+                  }
+                } catch (e) {
+                  setLiveTradeMessage({
+                    text: (e as Error).message || 'Place order failed.',
+                    type: 'error',
+                  });
+                  setLiveTradeMessageSource(null);
+                }
+              }
+              if (
+                trade.exitTime &&
+                sentSignalKeysRef.current.has(`${key}-ENTRY`) &&
+                !sentSignalKeysRef.current.has(`${key}-EXIT`)
+              ) {
+                const pos = openPositionBySignalKeyRef.current[key];
+                if (pos) {
+                  try {
+                    const res = await fetch(apiUrl('/api/mountain_signal/live/place_order'), {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      credentials: 'include',
+                      body: JSON.stringify({
+                        instrument: strategy.instrument.toUpperCase(),
+                        tradingsymbol: pos.tradingsymbol,
+                        quantity: pos.quantity,
+                        transactionType: 'SELL',
+                      }),
+                    });
+                    const orderData = await res.json();
+                    if (res.status === 401 || orderData.authExpired) {
+                      lastLiveOrderBlockRef.current = 'session_expired';
+                      setLiveTradeMessage({ text: 'Session expired. Please log in again.', type: 'error' });
+                      setLiveTradeMessageSource(null);
+                      return;
+                    }
+                    if (orderData.status === 'success') {
+                      lastLiveOrderBlockRef.current = null;
+                      sentSignalKeysRef.current.add(`${key}-EXIT`);
+                      setSentSignalKeys((prev) => new Set(prev).add(`${key}-EXIT`));
+                      delete openPositionBySignalKeyRef.current[key];
+                      setLiveTradeMessage({
+                        text: orderData.message || `Exit order ${orderData.order_id} placed.`,
+                        type: 'success',
+                      });
+                      setLiveTradeMessageSource(null);
+                      if (orderData.order_id) {
+                        setLastNotifiedOrderIds((prev) => new Set(prev).add(String(orderData.order_id)));
+                        playTradeAlertSound();
+                      }
+                      fetchZerodhaOrders();
+                    } else {
+                      const msg = orderData.message || 'Exit order failed.';
+                      if (orderData.reason === 'market_closed' || (typeof msg === 'string' && msg.includes('Market is closed'))) {
+                        lastLiveOrderBlockRef.current = 'market_closed';
+                      }
+                      setLiveTradeMessage({ text: msg, type: 'error' });
+                      setLiveTradeMessageSource(orderData.source || null);
+                    }
+                  } catch (e) {
+                    setLiveTradeMessage({
+                      text: (e as Error).message || 'Exit order failed.',
+                      type: 'error',
+                    });
+                    setLiveTradeMessageSource(null);
+                  }
+                }
+              }
+            }
+          })();
+        }
       }
     } catch (err) {
       console.error('Error fetching chart data:', err);
@@ -868,7 +1061,7 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
     } finally {
       setLoading(false);
     }
-  }, [selectedDate, strategy.instrument, candleTime, peRsiThreshold, ceRsiThreshold]);
+  }, [selectedDate, strategy.instrument, candleTime, peRsiThreshold, ceRsiThreshold, liveTrade, liveTradeLots, fetchZerodhaOrders, playTradeAlertSound]);
 
   // Fetch chart data when date or strategy changes
   useEffect(() => {
@@ -885,15 +1078,81 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
     const isToday = selectedDate === today;
     
     if (isToday && activeTab === 'chart') {
-      // Set up auto-refresh interval
+      // Set up auto-refresh interval (10s for faster sync with live trading)
       const refreshInterval = setInterval(() => {
-        console.log('Auto-refreshing chart data for live P&L updates...');
         fetchChartData();
-      }, 30000); // Refresh every 30 seconds
-      
+      }, 10000); // Refresh every 10 seconds
+
       return () => clearInterval(refreshInterval);
     }
   }, [selectedDate, activeTab, fetchChartData]);
+
+  // Socket.IO: receive real-time chart updates when viewing today (backend emits paper_trade_update with chartData)
+  useEffect(() => {
+    const today = new Date().toISOString().split('T')[0];
+    if (selectedDate !== today || activeTab !== 'chart' || !strategy?.id) return;
+
+    const socket: Socket = io(SOCKET_BASE_URL, {
+      path: '/socket.io/',
+      transports: ['polling', 'websocket'],
+      withCredentials: true,
+      autoConnect: true
+    });
+
+    socket.on('connect', () => {
+      socket.emit('join_paper_trade', { strategy_id: strategy.id });
+    });
+
+    socket.on('paper_trade_update', (data: any) => {
+      if (data?.chartData && Array.isArray(data.chartData.candles)) {
+        const payload: ChartDataResponse = {
+          candles: data.chartData.candles,
+          ema5: data.chartData.ema5 || [],
+          ema20: data.chartData.ema20,
+          rsi14: data.chartData.rsi14
+        };
+        setChartData(payload);
+        processMountainSignalLogicRef.current(payload);
+        setLastUpdateTime(new Date());
+      }
+    });
+
+    return () => {
+      socket.disconnect();
+    };
+  }, [selectedDate, activeTab, strategy?.id]);
+
+  useEffect(() => {
+    if (!liveTrade) {
+      lastLiveOrderBlockRef.current = null;
+      setLiveTradeBalance(null);
+      return;
+    }
+    let cancelled = false;
+    setLiveTradeBalanceLoading(true);
+    fetch(apiUrl('/api/zerodha/margins'), { credentials: 'include' })
+      .then((r) => r.json())
+      .then((data) => {
+        if (cancelled) return;
+        setLiveTradeBalanceLoading(false);
+        if (data.status === 'success' && data.balance != null) setLiveTradeBalance(Number(data.balance));
+        else if (data.authExpired) {
+          lastLiveOrderBlockRef.current = 'session_expired';
+          setLiveTradeMessage({ text: 'Session expired. Please log in again.', type: 'error' });
+        } else setLiveTradeBalance(null);
+      })
+      .catch(() => {
+        if (!cancelled) setLiveTradeBalanceLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [liveTrade]);
+
+  useEffect(() => {
+    if (!liveTrade) return;
+    fetchZerodhaOrders();
+    const t = setInterval(fetchZerodhaOrders, 20000);
+    return () => clearInterval(t);
+  }, [liveTrade, fetchZerodhaOrders]);
 
   const processMountainSignalLogic = (data: ChartDataResponse) => {
     /**
@@ -918,9 +1177,10 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
      * - Reduces lag between signal detection and entry execution
      */
     const candles = data.candles;
-    const ema5Values = data.ema5.map(e => e.y).filter(v => v !== null && v !== undefined) as number[];
-    const rsi14Values = data.rsi14 ? data.rsi14.map(e => e.y).filter(v => v !== null && v !== undefined) as number[] : [];
-    
+    // Keep index-aligned with candles so candle index i maps to ema5Values[i] / rsi14Values[i]
+    const ema5Values: (number | null)[] = data.ema5 ? data.ema5.map(e => e.y ?? null) : [];
+    const rsi14Values: (number | null)[] = data.rsi14 ? data.rsi14.map(e => e.y ?? null) : [];
+
     if (candles.length < emaPeriod + 1 || ema5Values.length < emaPeriod + 1) {
       return; // Not enough data
     }
@@ -946,14 +1206,14 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
     for (let i = emaPeriod; i < candles.length; i++) {
       const candle = candles[i];
       const prevCandle = candles[i - 1];
-      const ema5 = ema5Values[i] || ema5Values[i - 1] || 0;
+      const ema5 = ema5Values[i] ?? ema5Values[i - 1] ?? 0;
       const candleLow = candle.l;
       const candleHigh = candle.h;
       const candleClose = candle.c;
       const prevCandleClose = prevCandle.c;
 
-      // Get RSI value for current candle (for signal identification only)
-      const currentRsi = rsi14Values.length > i ? rsi14Values[i] : null;
+      // Get RSI value for current candle (for signal identification only; index-aligned)
+      const currentRsi = rsi14Values[i] ?? null;
 
       // --- SIGNAL CANDLE IDENTIFICATION ---
       // NOTE: In live trading, this evaluation happens 20 seconds before candle close
@@ -1540,6 +1800,10 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
     
     return optionHistory;
   };
+
+  useEffect(() => {
+    processMountainSignalLogicRef.current = processMountainSignalLogic;
+  });
 
   // Format time for display
   const formatTime = (dateString: string): string => {
@@ -2926,7 +3190,359 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
                 Default: PE {70}, CE {30}. Adjust to test different RSI behaviour.
               </div>
             </div>
+            <div className="col-md-3">
+              <label className="form-label fw-bold">
+                <i className="bi bi-broadcast me-2"></i>Live Trade
+              </label>
+              <div className="d-flex align-items-center gap-2 flex-wrap">
+                <div className="form-check mb-0">
+                  <input
+                    className="form-check-input"
+                    type="checkbox"
+                    id="live-trade-checkbox"
+                    checked={liveTrade}
+                    onChange={(e) => setLiveTrade(e.target.checked)}
+                  />
+                  <label className="form-check-label" htmlFor="live-trade-checkbox">Live Trade</label>
+                </div>
+                {liveTrade && (
+                  <>
+                    <div className="d-flex align-items-center gap-1">
+                      <label htmlFor="live-trade-lots" className="small mb-0">Lots</label>
+                      <input
+                        id="live-trade-lots"
+                        type="number"
+                        min={1}
+                        className="form-control form-control-sm"
+                        style={{ width: '60px' }}
+                        value={liveTradeLots}
+                        onChange={(e) => setLiveTradeLots(Math.max(1, Number(e.target.value) || 1))}
+                      />
+                    </div>
+                    {liveTradeBalanceLoading ? (
+                      <span className="small text-muted">Loading balance...</span>
+                    ) : liveTradeBalance != null ? (
+                      <span className="small fw-bold text-success">Balance: &#8377;{liveTradeBalance.toLocaleString('en-IN')}</span>
+                    ) : null}
+                  </>
+                )}
+              </div>
+              {liveTrade && (
+                <div className="d-flex gap-2 mt-2 flex-wrap">
+                  <div className="d-flex align-items-center gap-1">
+                    <select
+                      className="form-select form-select-sm"
+                      style={{ width: 'auto' }}
+                      value={manualEntryOptionType}
+                      onChange={(e) => setManualEntryOptionType(e.target.value as 'PE' | 'CE')}
+                    >
+                      <option value="PE">PE</option>
+                      <option value="CE">CE</option>
+                    </select>
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-success"
+                      disabled={entryExitLoading.entry || liveTradeBalanceLoading}
+                      onClick={async () => {
+                        const indexLtp = chartData?.candles?.length ? chartData.candles[chartData.candles.length - 1].c : undefined;
+                        if (indexLtp == null) {
+                          setLiveTradeMessage({ text: 'No chart data. Load today\'s chart first.', type: 'error' });
+                          setLiveTradeMessageSource(null);
+                          return;
+                        }
+                        setEntryExitLoading((p) => ({ ...p, entry: true }));
+                        setLiveTradeMessage(null);
+                        setLiveTradeMessageSource(null);
+                        try {
+                          const previewRes = await fetch(apiUrl('/api/mountain_signal/live/order_preview'), {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            credentials: 'include',
+                            body: JSON.stringify({
+                              instrument: strategy.instrument.toUpperCase(),
+                              optionType: manualEntryOptionType,
+                              indexLtp,
+                              lots: liveTradeLots,
+                            }),
+                          });
+                          const previewData = await previewRes.json();
+                          if (previewRes.status === 401 || previewData.authExpired) {
+                            lastLiveOrderBlockRef.current = 'session_expired';
+                            setLiveTradeMessage({ text: 'Session expired. Please log in again.', type: 'error' });
+                            setLiveTradeMessageSource(null);
+                          } else if (previewData.status === 'success') {
+                            setEntryPreview({
+                              tradingsymbol: previewData.tradingsymbol,
+                              quantity: previewData.quantity,
+                              instrument: previewData.instrument,
+                              optionType: previewData.optionType,
+                              lots: previewData.lots,
+                              indexLtp,
+                            });
+                            setShowEntryConfirm(true);
+                          } else {
+                            setLiveTradeMessage({ text: previewData.message || 'Preview failed.', type: 'error' });
+                            setLiveTradeMessageSource(previewData.source || null);
+                          }
+                        } catch (e) {
+                          setLiveTradeMessage({ text: (e as Error).message || 'Request failed.', type: 'error' });
+                          setLiveTradeMessageSource(null);
+                        } finally {
+                          setEntryExitLoading((p) => ({ ...p, entry: false }));
+                        }
+                      }}
+                    >
+                      {entryExitLoading.entry ? 'Loading...' : 'Entry (ATM)'}
+                    </button>
+                  </div>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-danger"
+                    disabled={entryExitLoading.exit || liveTradeBalanceLoading}
+                    onClick={async () => {
+                      setEntryExitLoading((p) => ({ ...p, exit: true }));
+                      setLiveTradeMessage(null);
+                      setLiveTradeMessageSource(null);
+                      try {
+                        const posRes = await fetch(apiUrl('/api/zerodha/positions'), { credentials: 'include' });
+                        const posData = await posRes.json();
+                        if (posRes.status === 401 || posData.authExpired) {
+                          lastLiveOrderBlockRef.current = 'session_expired';
+                          setLiveTradeMessage({ text: 'Session expired. Please log in again.', type: 'error' });
+                        } else if (posData.status === 'success' && Array.isArray(posData.positions)) {
+                          const withQty = posData.positions.filter((p: { quantity?: number }) => p.quantity != null && Number(p.quantity) !== 0);
+                          setPositionsForConfirm(withQty.map((p: { tradingsymbol?: string; quantity?: number; product?: string; exchange?: string }) => ({
+                            tradingsymbol: p.tradingsymbol || '',
+                            quantity: Math.abs(Number(p.quantity)),
+                            product: p.product,
+                            exchange: p.exchange,
+                          })));
+                          setShowExitConfirm(true);
+                        } else {
+                          setLiveTradeMessage({ text: posData.message || 'Failed to fetch positions.', type: 'error' });
+                        }
+                      } catch (e) {
+                        setLiveTradeMessage({ text: (e as Error).message || 'Request failed.', type: 'error' });
+                      } finally {
+                        setEntryExitLoading((p) => ({ ...p, exit: false }));
+                      }
+                    }}
+                  >
+                    {entryExitLoading.exit ? 'Loading...' : 'Exit (Square Off All)'}
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
+
+          {liveTradeMessage && (
+            <div className={`alert alert-${liveTradeMessage.type} py-2 mb-2`} role="alert">
+              <i className={`bi ${liveTradeMessage.type === 'success' ? 'bi-check-circle' : liveTradeMessage.type === 'error' ? 'bi-exclamation-triangle' : 'bi-info-circle'} me-2`}></i>
+              {liveTradeMessageSource === 'zerodha' ? 'Zerodha: ' : ''}{liveTradeMessage.text}
+            </div>
+          )}
+
+          {showEntryConfirm && entryPreview && (
+            <div className="modal fade show d-block" style={{ backgroundColor: 'rgba(0,0,0,0.5)' }} tabIndex={-1}>
+              <div className="modal-dialog modal-dialog-centered">
+                <div className="modal-content">
+                  <div className="modal-header">
+                    <h5 className="modal-title">Confirm Entry Order</h5>
+                    <button type="button" className="btn-close" aria-label="Close" onClick={() => { setShowEntryConfirm(false); setEntryPreview(null); }}></button>
+                  </div>
+                  <div className="modal-body">
+                    <p className="mb-2">You are about to place the following order:</p>
+                    <ul className="list-unstyled mb-0">
+                      <li><strong>Contract:</strong> {entryPreview.tradingsymbol}</li>
+                      <li><strong>Type:</strong> BUY {entryPreview.optionType}</li>
+                      <li><strong>Quantity:</strong> {entryPreview.quantity} ({entryPreview.lots} lot(s))</li>
+                      <li><strong>Order type:</strong> Market</li>
+                      <li><strong>Instrument:</strong> {entryPreview.instrument}</li>
+                    </ul>
+                  </div>
+                  <div className="modal-footer">
+                    <button type="button" className="btn btn-secondary" onClick={() => { setShowEntryConfirm(false); setEntryPreview(null); }}>Cancel</button>
+                    <button
+                      type="button"
+                      className="btn btn-success"
+                      onClick={async () => {
+                        setEntryExitLoading((p) => ({ ...p, entry: true }));
+                        setLiveTradeMessage(null);
+                        setLiveTradeMessageSource(null);
+                        try {
+                          const res = await fetch(apiUrl('/api/mountain_signal/live/place_order'), {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            credentials: 'include',
+                            body: JSON.stringify({
+                              instrument: entryPreview.instrument,
+                              optionType: entryPreview.optionType,
+                              transactionType: 'BUY',
+                              indexLtp: entryPreview.indexLtp,
+                              lots: entryPreview.lots,
+                            }),
+                          });
+                          const data = await res.json();
+                          setShowEntryConfirm(false);
+                          setEntryPreview(null);
+                          if (res.status === 401 || data.authExpired) {
+                            lastLiveOrderBlockRef.current = 'session_expired';
+                            setLiveTradeMessage({ text: 'Session expired. Please log in again.', type: 'error' });
+                            setLiveTradeMessageSource(null);
+                          } else if (data.status === 'success') {
+                            lastLiveOrderBlockRef.current = null;
+                            setLiveTradeMessage({ text: data.message || `Order ${data.order_id} placed.`, type: 'success' });
+                            setLiveTradeMessageSource(null);
+                            if (data.order_id) {
+                              setLastNotifiedOrderIds((s) => new Set(s).add(String(data.order_id)));
+                              playTradeAlertSound();
+                            }
+                            fetchZerodhaOrders();
+                          } else {
+                            setLiveTradeMessage({ text: data.message || 'Order failed.', type: 'error' });
+                            setLiveTradeMessageSource(data.source || null);
+                          }
+                        } catch (e) {
+                          setLiveTradeMessage({ text: (e as Error).message || 'Request failed.', type: 'error' });
+                          setLiveTradeMessageSource(null);
+                        } finally {
+                          setEntryExitLoading((p) => ({ ...p, entry: false }));
+                        }
+                      }}
+                    >
+                      Confirm
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {showExitConfirm && (
+            <div className="modal fade show d-block" style={{ backgroundColor: 'rgba(0,0,0,0.5)' }} tabIndex={-1}>
+              <div className="modal-dialog modal-dialog-centered">
+                <div className="modal-content">
+                  <div className="modal-header">
+                    <h5 className="modal-title">Confirm Square Off</h5>
+                    <button type="button" className="btn-close" aria-label="Close" onClick={() => { setShowExitConfirm(false); setPositionsForConfirm([]); }}></button>
+                  </div>
+                  <div className="modal-body">
+                    {positionsForConfirm.length === 0 ? (
+                      <p className="mb-0">You have no open positions to square off.</p>
+                    ) : (
+                      <>
+                        <p className="mb-2">The following position(s) will be closed:</p>
+                        <div className="table-responsive">
+                          <table className="table table-sm mb-0">
+                            <thead><tr><th>Symbol</th><th>Qty</th><th>Product</th><th>Exchange</th></tr></thead>
+                            <tbody>
+                              {positionsForConfirm.map((p, i) => (
+                                <tr key={i}>
+                                  <td><code>{p.tradingsymbol}</code></td>
+                                  <td>{p.quantity}</td>
+                                  <td>{p.product ?? '-'}</td>
+                                  <td>{p.exchange ?? '-'}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                  <div className="modal-footer">
+                    <button type="button" className="btn btn-secondary" onClick={() => { setShowExitConfirm(false); setPositionsForConfirm([]); }}>{positionsForConfirm.length === 0 ? 'Close' : 'Cancel'}</button>
+                    {positionsForConfirm.length > 0 && (
+                      <button
+                        type="button"
+                        className="btn btn-danger"
+                        onClick={async () => {
+                          setEntryExitLoading((p) => ({ ...p, exit: true }));
+                          setLiveTradeMessage(null);
+                          setLiveTradeMessageSource(null);
+                          try {
+                            const res = await fetch(apiUrl('/api/mountain_signal/live/square_off_all'), {
+                              method: 'POST',
+                              headers: { 'Content-Type': 'application/json' },
+                              credentials: 'include',
+                              body: JSON.stringify({}),
+                            });
+                            const data = await res.json();
+                            setShowExitConfirm(false);
+                            setPositionsForConfirm([]);
+                            if (res.status === 401 || data.authExpired) {
+                              lastLiveOrderBlockRef.current = 'session_expired';
+                              setLiveTradeMessage({ text: 'Session expired. Please log in again.', type: 'error' });
+                              setLiveTradeMessageSource(null);
+                            } else if (data.status === 'success') {
+                              lastLiveOrderBlockRef.current = null;
+                              const msg = (data.results?.length ? `Squared off ${data.results.length} position(s).` : 'Square-off completed.');
+                              setLiveTradeMessage({ text: msg, type: 'success' });
+                              setLiveTradeMessageSource(null);
+                              playTradeAlertSound();
+                              fetchZerodhaOrders();
+                            } else {
+                              setLiveTradeMessage({ text: data.message || 'Square-off failed.', type: 'error' });
+                              setLiveTradeMessageSource(data.source || null);
+                            }
+                          } catch (e) {
+                            setLiveTradeMessage({ text: (e as Error).message || 'Request failed.', type: 'error' });
+                            setLiveTradeMessageSource(null);
+                          } finally {
+                            setEntryExitLoading((p) => ({ ...p, exit: false }));
+                          }
+                        }}
+                      >
+                        Confirm
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {liveTrade && zerodhaOrders.length >= 0 && (
+            <div className="card border-0 shadow-sm mb-3">
+              <div className="card-header bg-dark text-white">
+                <h6 className="mb-0"><i className="bi bi-list-ul me-2"></i>Zerodha Order</h6>
+              </div>
+              <div className="card-body p-0">
+                {zerodhaOrders.length === 0 ? (
+                  <div className="p-3 text-muted small">No orders (tag: mountain_signal). Place an order or run with Live Trade on today.</div>
+                ) : (
+                  <div className="table-responsive">
+                    <table className="table table-sm table-hover mb-0">
+                      <thead className="table-light">
+                        <tr>
+                          <th>Order ID</th>
+                          <th>Symbol</th>
+                          <th>Type</th>
+                          <th>Qty</th>
+                          <th>Status</th>
+                          <th>Avg Price</th>
+                          <th>Time</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {zerodhaOrders.map((o, idx) => (
+                          <tr key={(o.order_id as string) || idx}>
+                            <td><code>{String(o.order_id ?? '')}</code></td>
+                            <td>{String(o.tradingsymbol ?? '')}</td>
+                            <td>{String(o.transaction_type ?? '')}</td>
+                            <td>{String(o.quantity ?? o.filled_quantity ?? '')}</td>
+                            <td><span className="badge bg-secondary">{String(o.status ?? '')}</span></td>
+                            <td>{o.average_price != null ? Number(o.average_price).toFixed(2) : '-'}</td>
+                            <td className="small">{o.order_timestamp ? new Date(o.order_timestamp as string).toLocaleString() : '-'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
 
           {error && (
             <div className="alert alert-warning" role="alert">
@@ -2960,6 +3576,17 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
                 }
                 return null;
               })()}
+              {lastUpdateTime && (
+                <div className="mb-2 text-center">
+                  <small className="text-muted">
+                    <i className="bi bi-clock me-1"></i>
+                    Last refreshed: {lastUpdateTime.toLocaleTimeString()}
+                    {selectedDate && (
+                      <span className="ms-2">({new Date(selectedDate).toLocaleDateString()})</span>
+                    )}
+                  </small>
+                </div>
+              )}
               <div className="row text-center">
                 <div className="col-md-3">
                   <span className="badge bg-danger me-2">PE Signal</span>
@@ -3176,8 +3803,8 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
         </div>
       )}
 
-      {/* Ignored Signals Table */}
-      {ignoredSignals.length > 0 && (
+      {/* Ignored Signals Table - show when chart has data */}
+      {chartDataFormatted.length > 0 && (
         <div className="card border-0 shadow-sm mt-3">
           <div className="card-header bg-warning text-dark">
             <h5 className="card-title mb-0">
@@ -3186,78 +3813,84 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
             </h5>
           </div>
           <div className="card-body">
-            <div className="d-flex align-items-center gap-3 mb-3">
-              <span className="fw-semibold">Filter:</span>
-              <div className="form-check">
-                <input className="form-check-input" type="checkbox" id="filter-ignored-pe" checked={filterIgnoredPE} onChange={(e) => setFilterIgnoredPE(e.target.checked)} />
-                <label className="form-check-label" htmlFor="filter-ignored-pe">PE</label>
-              </div>
-              <div className="form-check">
-                <input className="form-check-input" type="checkbox" id="filter-ignored-ce" checked={filterIgnoredCE} onChange={(e) => setFilterIgnoredCE(e.target.checked)} />
-                <label className="form-check-label" htmlFor="filter-ignored-ce">CE</label>
-              </div>
-              {(!filterIgnoredPE || !filterIgnoredCE) && (
-                <small className="text-muted">
-                  Showing {ignoredSignals.filter(s => (s.signalType === 'PE' && filterIgnoredPE) || (s.signalType === 'CE' && filterIgnoredCE)).length} of {ignoredSignals.length}
-                </small>
-              )}
-            </div>
-            <div className="table-responsive">
-              <table className="table table-hover table-striped">
-                <thead className="table-warning">
-                  <tr>
-                    <th>#</th>
-                    <th>Signal Time</th>
-                    <th>Signal Type</th>
-                    <th>Signal High</th>
-                    <th>Signal Low</th>
-                    <th>RSI Value</th>
-                    <th>Reason</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {ignoredSignals.filter(s => (s.signalType === 'PE' && filterIgnoredPE) || (s.signalType === 'CE' && filterIgnoredCE)).length === 0 ? (
-                    <tr>
-                      <td colSpan={7} className="text-center text-muted py-3">
-                        No ignored signals match the selected filter.
-                      </td>
-                    </tr>
-                  ) : (
-                    ignoredSignals.filter(s => (s.signalType === 'PE' && filterIgnoredPE) || (s.signalType === 'CE' && filterIgnoredCE)).map((signal, index) => (
-                      <tr key={`${signal.index}-${signal.signalType}`}>
-                        <td><strong>{index + 1}</strong></td>
-                        <td>{formatDateTime(signal.signalTime)}</td>
-                        <td>
-                          <span className={`badge ${signal.signalType === 'PE' ? 'bg-danger' : 'bg-success'}`}>
-                            {signal.signalType}
-                          </span>
-                        </td>
-                        <td>{signal.signalHigh.toFixed(2)}</td>
-                        <td>{signal.signalLow.toFixed(2)}</td>
-                        <td>
-                          {signal.rsiValue !== null ? (
-                            <span className={signal.signalType === 'PE' && signal.rsiValue <= 70 ? 'text-danger' : signal.signalType === 'CE' && signal.rsiValue >= 30 ? 'text-danger' : 'text-muted'}>
-                              {signal.rsiValue.toFixed(2)}
-                            </span>
-                          ) : (
-                            <span className="text-muted">N/A</span>
-                          )}
-                        </td>
-                        <td>
-                          <small className="text-muted">{signal.reason}</small>
-                        </td>
-                      </tr>
-                    ))
+            {ignoredSignals.length === 0 ? (
+              <p className="text-muted mb-0">No ignored signals (all candidate candles met RSI condition or no EMA crossover).</p>
+            ) : (
+              <>
+                <div className="d-flex align-items-center gap-3 mb-3">
+                  <span className="fw-semibold">Filter:</span>
+                  <div className="form-check">
+                    <input className="form-check-input" type="checkbox" id="filter-ignored-pe" checked={filterIgnoredPE} onChange={(e) => setFilterIgnoredPE(e.target.checked)} />
+                    <label className="form-check-label" htmlFor="filter-ignored-pe">PE</label>
+                  </div>
+                  <div className="form-check">
+                    <input className="form-check-input" type="checkbox" id="filter-ignored-ce" checked={filterIgnoredCE} onChange={(e) => setFilterIgnoredCE(e.target.checked)} />
+                    <label className="form-check-label" htmlFor="filter-ignored-ce">CE</label>
+                  </div>
+                  {(!filterIgnoredPE || !filterIgnoredCE) && (
+                    <small className="text-muted">
+                      Showing {ignoredSignals.filter(s => (s.signalType === 'PE' && filterIgnoredPE) || (s.signalType === 'CE' && filterIgnoredCE)).length} of {ignoredSignals.length}
+                    </small>
                   )}
-                </tbody>
-              </table>
-            </div>
+                </div>
+                <div className="table-responsive">
+                  <table className="table table-hover table-striped">
+                    <thead className="table-warning">
+                      <tr>
+                        <th>#</th>
+                        <th>Signal Time</th>
+                        <th>Signal Type</th>
+                        <th>Signal High</th>
+                        <th>Signal Low</th>
+                        <th>RSI Value</th>
+                        <th>Reason</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {ignoredSignals.filter(s => (s.signalType === 'PE' && filterIgnoredPE) || (s.signalType === 'CE' && filterIgnoredCE)).length === 0 ? (
+                        <tr>
+                          <td colSpan={7} className="text-center text-muted py-3">
+                            No ignored signals match the selected filter. Enable PE or CE filter to see rows.
+                          </td>
+                        </tr>
+                      ) : (
+                        ignoredSignals.filter(s => (s.signalType === 'PE' && filterIgnoredPE) || (s.signalType === 'CE' && filterIgnoredCE)).map((signal, index) => (
+                          <tr key={`${signal.index}-${signal.signalType}`}>
+                            <td><strong>{index + 1}</strong></td>
+                            <td>{formatDateTime(signal.signalTime)}</td>
+                            <td>
+                              <span className={`badge ${signal.signalType === 'PE' ? 'bg-danger' : 'bg-success'}`}>
+                                {signal.signalType}
+                              </span>
+                            </td>
+                            <td>{signal.signalHigh.toFixed(2)}</td>
+                            <td>{signal.signalLow.toFixed(2)}</td>
+                            <td>
+                              {signal.rsiValue !== null ? (
+                                <span className={signal.signalType === 'PE' && signal.rsiValue <= 70 ? 'text-danger' : signal.signalType === 'CE' && signal.rsiValue >= 30 ? 'text-danger' : 'text-muted'}>
+                                  {signal.rsiValue.toFixed(2)}
+                                </span>
+                              ) : (
+                                <span className="text-muted">N/A</span>
+                              )}
+                            </td>
+                            <td>
+                              <small className="text-muted">{signal.reason}</small>
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}
 
-      {/* Signals Identified - Waiting for Trade */}
-      {waitingSignals.length > 0 && (
+      {/* Signals Identified - Waiting for Trade - show when chart has data */}
+      {chartDataFormatted.length > 0 && (
         <div className="card border-0 shadow-sm mt-3">
           <div className="card-header bg-primary text-white">
             <h5 className="card-title mb-0">
@@ -3269,6 +3902,10 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
             </small>
           </div>
           <div className="card-body">
+            {waitingSignals.length === 0 ? (
+              <p className="text-muted mb-0">No signals currently waiting for entry.</p>
+            ) : (
+              <>
             <div className="table-responsive">
               <table className="table table-hover table-striped">
                 <thead className="table-primary">
@@ -3377,6 +4014,8 @@ const MountainSignalChart: React.FC<MountainSignalChartProps> = ({ strategy, act
                 <li><strong>CE Signals:</strong> Waiting for next candle to close above {waitingSignals.filter(s => s.signalType === 'CE').length > 0 ? waitingSignals.filter(s => s.signalType === 'CE')[0]?.breakLevel.toFixed(2) : 'signal high'}</li>
               </ul>
             </div>
+              </>
+            )}
           </div>
         </div>
       )}

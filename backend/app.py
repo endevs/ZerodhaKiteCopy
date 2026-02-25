@@ -73,6 +73,19 @@ from live_trade import (
 BANKNIFTY_SPOT_SYMBOL = 'NSE:NIFTY BANK'
 NIFTY_SPOT_SYMBOL = 'NSE:NIFTY 50'
 IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+
+
+def is_nse_fo_market_open(utc_now: datetime.datetime) -> Tuple[bool, str]:
+    """Return (True, '') if NSE F&O market is open (Mon-Fri 09:15-15:30 IST), else (False, message)."""
+    ist_now = utc_now.astimezone(IST)
+    if ist_now.weekday() >= 5:  # Saturday=5, Sunday=6
+        return False, "Market is closed on weekends. NSE F&O hours: Mon–Fri 9:15 AM–3:30 PM IST."
+    t = ist_now.time()
+    if t < datetime.time(9, 15) or t > datetime.time(15, 30):
+        return False, "Market is closed. NSE F&O hours: 9:15 AM–3:30 PM IST. Place orders during market hours."
+    return True, ""
+
+
 from chat import chat_bp
 from options_routes import options_bp
 from utils.backtest_metrics import calculate_all_metrics
@@ -116,6 +129,32 @@ def _is_retryable_exception(exc: Exception) -> bool:
         return True
     message = str(exc).lower()
     return any(keyword in message for keyword in RETRYABLE_ERROR_KEYWORDS)
+
+
+# region agent log
+def _debug_log(hypothesis_id: str, message: str, data: Dict[str, Any], location: str, run_id: str = "run1") -> None:
+    """
+    Lightweight NDJSON logger for debug session c3dc96.
+    Writes to debug-c3dc96.log as required by the debug harness.
+    """
+    try:
+        payload = {
+            "sessionId": "c3dc96",
+            "id": f"log_{int(time.time() * 1000)}",
+            "timestamp": int(time.time() * 1000),
+            "location": location,
+            "message": message,
+            "data": data,
+            "runId": run_id,
+            "hypothesisId": hypothesis_id,
+        }
+        line = json.dumps(payload, default=str)
+        with open("debug-c3dc96.log", "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        # Never let debug logging break the app
+        pass
+# endregion agent log
 
 
 def execute_with_retries(description: str, func: Callable[[], Any], *, max_attempts: int = 3, base_delay: float = 1.5) -> Any:
@@ -1308,13 +1347,27 @@ def aggregate_trades_by_period(trades: List[Dict[str, Any]], period: str) -> Lis
     return results
 
 
-# Configure logging
-# Configure logging with timestamp format
+# Configure logging: console with timestamp, level from env (default INFO; use DEBUG for more detail)
+_log_level_name = (os.environ.get('LOG_LEVEL') or 'INFO').strip().upper()
+_log_level = getattr(logging, _log_level_name, logging.INFO)
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
+    level=_log_level,
+    format='%(asctime)s | %(levelname)-8s | %(name)s:%(lineno)d | %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+    force=True,
 )
+# Ensure root logger outputs to console
+_root = logging.getLogger()
+_root.setLevel(_log_level)
+if not _root.handlers:
+    _console = logging.StreamHandler()
+    _console.setLevel(_log_level)
+    _console.setFormatter(logging.Formatter(
+        '%(asctime)s | %(levelname)-8s | %(name)s:%(lineno)d | %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    ))
+    _root.addHandler(_console)
+logging.info("Logging configured: level=%s", _log_level_name)
 
 # Reduce noisy werkzeug/socket logs (but keep ERROR level for debugging)
 try:
@@ -1883,6 +1936,64 @@ def _sanitize_positions(raw_positions: Dict[str, Any]) -> List[Dict[str, Any]]:
             'm2m': pos.get('m2m'),
         })
     return positions
+
+
+def _round_to_multiple(value: float, multiple: int) -> int:
+    try:
+        return int(round(float(value) / multiple) * multiple)
+    except Exception:
+        return int(value)
+
+
+def _resolve_nfo_atm_for_mountain_signal(
+    kite_client: KiteConnect,
+    instrument: str,
+    option_type: str,
+    index_ltp: float,
+) -> Tuple[Optional[str], Optional[int]]:
+    """Resolve NFO tradingsymbol and lot_size for ATM option. Returns (tradingsymbol, lot_size)."""
+    name = (instrument or '').strip().upper()
+    if name not in ('NIFTY', 'BANKNIFTY'):
+        return None, None
+    option_type = (option_type or '').strip().upper()
+    if option_type not in ('PE', 'CE'):
+        return None, None
+    try:
+        instruments = execute_with_retries(
+            "fetching NFO instruments for mountain signal",
+            lambda: kite_client.instruments('NFO')
+        )
+    except Exception as e:
+        logging.warning("Failed to fetch NFO instruments for mountain signal: %s", e)
+        return None, None
+    all_expiries = sorted(list(set([
+        inst['expiry'] for inst in instruments
+        if inst.get('name') == name and inst.get('expiry')
+    ])))
+    today = datetime.date.today()
+    expiry_date = next((d for d in all_expiries if d >= today), None)
+    if not expiry_date and all_expiries:
+        expiry_date = min(all_expiries, key=lambda d: abs((d - today).days))
+    if not expiry_date:
+        return None, None
+    expiry_str = expiry_date.strftime('%Y-%m-%d')
+    filtered = [
+        inst for inst in instruments
+        if inst.get('name') == name
+        and inst.get('instrument_type') == option_type
+        and inst.get('expiry') and inst['expiry'].strftime('%Y-%m-%d') == expiry_str
+    ]
+    if not filtered:
+        return None, None
+    strike_prices = [inst['strike'] for inst in filtered]
+    atm_strike = min(strike_prices, key=lambda x: abs(x - index_ltp))
+    for inst in filtered:
+        if inst['strike'] == atm_strike:
+            lot_size = inst.get('lot_size')
+            if not lot_size:
+                lot_size = 30 if 'BANK' in name else 25
+            return inst.get('tradingsymbol'), int(lot_size)
+    return None, None
 
 
 def _last_thursday(year: int, month: int) -> datetime.date:
@@ -2679,6 +2790,33 @@ paper_trade_strategies = {}  # Store paper trade strategy instances
 # Ticker instance
 ticker = None
 
+
+def _paper_trade_chart_emitter_loop():
+    """Background loop: every 10s emit chart_data to each paper trade room for real-time chart sync."""
+    while True:
+        try:
+            time.sleep(10)
+            for strategy_id, pt_info in list(paper_trade_strategies.items()):
+                try:
+                    strategy = pt_info.get('strategy')
+                    if strategy and hasattr(strategy, 'get_chart_data'):
+                        chart_data = strategy.get_chart_data()
+                        if chart_data:
+                            socketio.emit(
+                                'paper_trade_update',
+                                {'chartData': chart_data},
+                                room=f'paper_trade_{strategy_id}'
+                            )
+                except Exception as e:
+                    logging.warning(f"Paper trade chart emit for strategy {strategy_id}: {e}")
+        except Exception as e:
+            logging.warning(f"Paper trade chart emitter loop: {e}")
+
+
+# Start background thread to emit chart updates for paper trade (real-time chart sync)
+_paper_trade_chart_emitter_thread = Thread(target=_paper_trade_chart_emitter_loop, daemon=True)
+_paper_trade_chart_emitter_thread.start()
+
 # Synchronization lock for live trade scheduler
 live_trade_lock = Lock()
 
@@ -3056,6 +3194,286 @@ def api_chart_data():
     except Exception as e:
         logging.error(f"/api/chart_data error: {e}", exc_info=True)
         return jsonify({'candles': [], 'ema': []}), 200
+
+
+@app.route('/api/plotly/index-candles', methods=['GET'])
+def api_plotly_index_candles():
+    """Fetch index OHLC candles directly from Kite historical_data API (no DB)."""
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'error': 'User not logged in'}), 401
+
+    index = request.args.get('index', 'BANKNIFTY').upper()
+    date_str = request.args.get('date')
+    interval = request.args.get('interval', '5minute')
+
+    if not date_str:
+        return jsonify({'error': 'date parameter is required'}), 400
+    if index not in ('NIFTY', 'BANKNIFTY'):
+        return jsonify({'error': 'Invalid index. Use NIFTY or BANKNIFTY'}), 400
+
+    allowed_intervals = {'minute', '3minute', '5minute', '15minute', '30minute', '60minute'}
+    if interval not in allowed_intervals:
+        return jsonify({'error': f'Invalid interval. Allowed: {", ".join(sorted(allowed_intervals))}'}), 400
+
+    try:
+        selected_date = datetime.datetime.strptime(date_str, '%Y-%m-%d').date()
+    except ValueError:
+        return jsonify({'error': 'Invalid date format. Use YYYY-MM-DD'}), 400
+
+    token = 256265 if index == 'NIFTY' else 260105
+    from_dt = datetime.datetime.combine(selected_date, datetime.time(9, 15))
+    to_dt = datetime.datetime.combine(selected_date, datetime.time(15, 30))
+
+    def _fetch(kite_client):
+        return execute_with_retries(
+            f"plotly index candles {index} {date_str} {interval}",
+            lambda: kite_client.historical_data(token, from_dt, to_dt, interval),
+        )
+
+    try:
+        hist = _with_valid_kite_client(
+            session['user_id'],
+            f"plotly index candles for {index}",
+            _fetch,
+            preferred_tokens=[session.get('access_token')],
+        )
+    except kite_exceptions.TokenException:
+        return jsonify({'error': 'Zerodha session expired. Please log in again.', 'authExpired': True}), 401
+    except RuntimeError as err:
+        return jsonify({'error': str(err)}), 400
+    except Exception as err:
+        logging.error(f"/api/plotly/index-candles error: {err}", exc_info=True)
+        return jsonify({'error': f'Failed to fetch candles: {str(err)}'}), 500
+
+    if not hist:
+        return jsonify({
+            'index': index,
+            'date': date_str,
+            'interval': interval,
+            'candles': [],
+            'warning': f'No data returned from Zerodha for {index} on {date_str}. The date may be outside Kite retention or a non-trading day.',
+        })
+
+    candles = []
+    for row in hist:
+        ts = row.get('date')
+        if isinstance(ts, (datetime.datetime, datetime.date)):
+            ts_str = ts.isoformat()
+        else:
+            ts_str = str(ts)
+        candles.append({
+            'timestamp': ts_str,
+            'open': float(row.get('open', 0) or 0),
+            'high': float(row.get('high', 0) or 0),
+            'low': float(row.get('low', 0) or 0),
+            'close': float(row.get('close', 0) or 0),
+            'volume': int(row.get('volume', 0) or 0),
+        })
+
+    logging.info(f"[Plotly] Returned {len(candles)} {interval} candles for {index} on {date_str}")
+    return jsonify({
+        'index': index,
+        'date': date_str,
+        'interval': interval,
+        'candles': candles,
+    })
+
+
+@app.route('/api/backtest/run', methods=['POST'])
+def api_backtest_run():
+    """Run a lightweight EMA-crossover or ORB backtest and return trade markers + equity curve."""
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+
+    data = request.get_json(silent=True) or {}
+    index = (data.get('index') or 'BANKNIFTY').upper()
+    from_date_str = data.get('from_date')
+    to_date_str = data.get('to_date')
+    interval = data.get('interval', '5minute')
+    strategy = (data.get('strategy') or 'ema_crossover').lower()
+    ema_fast = int(data.get('ema_fast', 5))
+    ema_slow = int(data.get('ema_slow', 20))
+
+    if index not in ('NIFTY', 'BANKNIFTY'):
+        return jsonify({'status': 'error', 'message': 'Invalid index'}), 400
+    if not from_date_str or not to_date_str:
+        return jsonify({'status': 'error', 'message': 'from_date and to_date are required'}), 400
+
+    try:
+        from_date = datetime.datetime.strptime(from_date_str, '%Y-%m-%d').date()
+        to_date = datetime.datetime.strptime(to_date_str, '%Y-%m-%d').date()
+    except ValueError:
+        return jsonify({'status': 'error', 'message': 'Invalid date format. Use YYYY-MM-DD'}), 400
+
+    if (to_date - from_date).days > 30:
+        return jsonify({'status': 'error', 'message': 'Maximum 30 days allowed'}), 400
+    if to_date < from_date:
+        return jsonify({'status': 'error', 'message': 'to_date must be >= from_date'}), 400
+
+    token = 256265 if index == 'NIFTY' else 260105
+    user_id = session['user_id']
+
+    def _fetch_range(kite_client):
+        all_candles = []
+        cur = from_date
+        kite_interval = interval
+        while cur <= to_date:
+            if cur.weekday() < 5:
+                sd = datetime.datetime.combine(cur, datetime.time(9, 15))
+                ed = datetime.datetime.combine(cur, datetime.time(15, 30))
+                try:
+                    hist = execute_with_retries(
+                        f"backtest candles {index} {cur}",
+                        lambda t=token, s=sd, e=ed, ki=kite_interval: kite_client.historical_data(t, s, e, ki),
+                    )
+                    if hist:
+                        all_candles.extend(hist)
+                except kite_exceptions.TokenException:
+                    raise
+                except Exception as e:
+                    logging.error("Backtest fetch error for %s: %s", cur, e)
+            cur += datetime.timedelta(days=1)
+        return all_candles
+
+    try:
+        raw = _with_valid_kite_client(user_id, f"backtest {index}", _fetch_range,
+                                       preferred_tokens=[session.get('access_token')])
+    except kite_exceptions.TokenException:
+        return jsonify({'status': 'error', 'message': 'Zerodha session expired.', 'authExpired': True}), 401
+    except RuntimeError as err:
+        return jsonify({'status': 'error', 'message': str(err)}), 400
+    except Exception as err:
+        logging.error("Backtest error: %s", err, exc_info=True)
+        return jsonify({'status': 'error', 'message': str(err)}), 500
+
+    if not raw:
+        return jsonify({'status': 'error', 'message': 'No data for selected range'}), 404
+
+    raw.sort(key=lambda x: x['date'])
+
+    import pandas as pd
+    import numpy as np
+    from utils.indicators import calculate_ema, calculate_rsi
+
+    rows = [{
+        'date': r['date'],
+        'open': float(r.get('open', 0) or 0),
+        'high': float(r.get('high', 0) or 0),
+        'low': float(r.get('low', 0) or 0),
+        'close': float(r.get('close', 0) or 0),
+        'volume': int(r.get('volume', 0) or 0),
+    } for r in raw]
+    df = pd.DataFrame(rows)
+
+    df['ema_fast'] = calculate_ema(df['close'], ema_fast)
+    df['ema_slow'] = calculate_ema(df['close'], ema_slow)
+
+    trades = []
+    equity = [0.0]
+    position = None
+    entry_idx = None
+    entry_price = 0.0
+    cumulative_pnl = 0.0
+
+    for i in range(1, len(df)):
+        fast_prev = df['ema_fast'].iloc[i - 1]
+        slow_prev = df['ema_slow'].iloc[i - 1]
+        fast_cur = df['ema_fast'].iloc[i]
+        slow_cur = df['ema_slow'].iloc[i]
+
+        if pd.isna(fast_prev) or pd.isna(slow_prev) or pd.isna(fast_cur) or pd.isna(slow_cur):
+            equity.append(cumulative_pnl)
+            continue
+
+        if position is None and fast_prev <= slow_prev and fast_cur > slow_cur:
+            position = 'long'
+            entry_price = float(df['close'].iloc[i])
+            entry_idx = i
+
+        elif position is None and fast_prev >= slow_prev and fast_cur < slow_cur:
+            position = 'short'
+            entry_price = float(df['close'].iloc[i])
+            entry_idx = i
+
+        elif position == 'long' and fast_cur < slow_cur:
+            exit_price = float(df['close'].iloc[i])
+            pnl = exit_price - entry_price
+            cumulative_pnl += pnl
+            ts_entry = df['date'].iloc[entry_idx]
+            ts_exit = df['date'].iloc[i]
+            trades.append({
+                'entry_time': ts_entry.isoformat() if hasattr(ts_entry, 'isoformat') else str(ts_entry),
+                'entry_price': entry_price,
+                'exit_time': ts_exit.isoformat() if hasattr(ts_exit, 'isoformat') else str(ts_exit),
+                'exit_price': exit_price,
+                'direction': 'long',
+                'pnl': round(pnl, 2),
+            })
+            position = None
+
+        elif position == 'short' and fast_cur > slow_cur:
+            exit_price = float(df['close'].iloc[i])
+            pnl = entry_price - exit_price
+            cumulative_pnl += pnl
+            ts_entry = df['date'].iloc[entry_idx]
+            ts_exit = df['date'].iloc[i]
+            trades.append({
+                'entry_time': ts_entry.isoformat() if hasattr(ts_entry, 'isoformat') else str(ts_entry),
+                'entry_price': entry_price,
+                'exit_time': ts_exit.isoformat() if hasattr(ts_exit, 'isoformat') else str(ts_exit),
+                'exit_price': exit_price,
+                'direction': 'short',
+                'pnl': round(pnl, 2),
+            })
+            position = None
+
+        equity.append(cumulative_pnl)
+
+    candles_out = []
+    for _, r in df.iterrows():
+        ts = r['date']
+        candles_out.append({
+            'timestamp': ts.isoformat() if hasattr(ts, 'isoformat') else str(ts),
+            'open': float(r['open']),
+            'high': float(r['high']),
+            'low': float(r['low']),
+            'close': float(r['close']),
+            'volume': int(r['volume']),
+        })
+
+    equity_out = []
+    for idx, val in enumerate(equity):
+        ts = df['date'].iloc[idx] if idx < len(df) else df['date'].iloc[-1]
+        equity_out.append({
+            'timestamp': ts.isoformat() if hasattr(ts, 'isoformat') else str(ts),
+            'value': round(val, 2),
+        })
+
+    winning = [t for t in trades if t['pnl'] > 0]
+    losing = [t for t in trades if t['pnl'] <= 0]
+
+    summary = {
+        'total_trades': len(trades),
+        'winning_trades': len(winning),
+        'losing_trades': len(losing),
+        'win_rate': round(len(winning) / len(trades) * 100, 1) if trades else 0,
+        'total_pnl': round(cumulative_pnl, 2),
+        'avg_pnl': round(cumulative_pnl / len(trades), 2) if trades else 0,
+        'max_win': round(max((t['pnl'] for t in trades), default=0), 2),
+        'max_loss': round(min((t['pnl'] for t in trades), default=0), 2),
+    }
+
+    return jsonify({
+        'status': 'success',
+        'index': index,
+        'strategy': strategy,
+        'from_date': from_date_str,
+        'to_date': to_date_str,
+        'candles': candles_out,
+        'trades': trades,
+        'equity_curve': equity_out,
+        'summary': summary,
+    })
 
 
 @app.route('/api/option_ltp', methods=['GET'])
@@ -9340,6 +9758,399 @@ def api_live_trade_square_off():
         'status': 'success',
         'deployment': _serialize_live_deployment(updated),
         'results': exit_results
+    })
+
+
+@app.route("/api/zerodha/margins", methods=['GET'])
+def api_zerodha_margins():
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+    try:
+        def _fetch_margins(client: KiteConnect):
+            return execute_with_retries("fetching Zerodha margins", lambda: client.margins())
+
+        margins = _with_valid_kite_client(
+            session['user_id'],
+            "Zerodha margins for Mountain Signal live",
+            _fetch_margins,
+            preferred_tokens=[session.get('access_token')] if session.get('access_token') else None,
+        )
+    except kite_exceptions.TokenException:
+        return jsonify({'status': 'error', 'message': 'Zerodha session expired. Please re-login from Settings / Zerodha Login.', 'authExpired': True}), 401
+    except RuntimeError as exc:
+        return jsonify({'status': 'error', 'message': str(exc)}), 400
+    except Exception as exc:
+        logging.exception("Failed to fetch Zerodha margins")
+        return jsonify({'status': 'error', 'message': str(exc)}), 500
+    equity = margins.get('equity', {}) if isinstance(margins, dict) else {}
+    available = equity.get('available', {}) or {}
+    live_balance = available.get('live_balance')
+    if live_balance is not None:
+        live_balance = float(live_balance)
+    logging.info("[Zerodha] margins: balance=%.2f", live_balance or 0.0)
+    return jsonify({
+        'status': 'success',
+        'balance': live_balance,
+        'equity': equity,
+        'margins': margins if isinstance(margins, dict) else None,
+    })
+
+
+@app.route("/api/mountain_signal/live/place_order", methods=['POST'])
+def api_mountain_signal_live_place_order():
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+    if not session.get('access_token'):
+        return jsonify({'status': 'error', 'message': 'Zerodha access token missing. Please login with Zerodha first.'}), 401
+    data = request.get_json() or {}
+    instrument = (data.get('instrument') or '').strip().upper()
+    option_type = (data.get('optionType') or data.get('option_type') or '').strip().upper()
+    transaction_type = (data.get('transactionType') or data.get('transaction_type') or 'BUY').strip().upper()
+    index_ltp = data.get('indexLtp')
+    tradingsymbol_param = (data.get('tradingsymbol') or '').strip()
+    lots = data.get('lots', 1)
+    quantity_param = data.get('quantity')
+    logging.info(
+        "[Mountain Signal live] place_order request: instrument=%s optionType=%s transactionType=%s indexLtp=%s lots=%s tradingsymbol=%s quantity=%s",
+        instrument, option_type, transaction_type, index_ltp, lots,
+        tradingsymbol_param or "(resolve from LTP)", quantity_param,
+    )
+
+    if instrument not in ('NIFTY', 'BANKNIFTY'):
+        return jsonify({'status': 'error', 'message': 'instrument must be NIFTY or BANKNIFTY'}), 400
+    if option_type not in ('PE', 'CE'):
+        return jsonify({'status': 'error', 'message': 'optionType must be PE or CE'}), 400
+    if transaction_type not in ('BUY', 'SELL'):
+        return jsonify({'status': 'error', 'message': 'transactionType must be BUY or SELL'}), 400
+    try:
+        lots = int(lots) if lots is not None else 1
+    except (TypeError, ValueError):
+        lots = 1
+    if lots < 1:
+        lots = 1
+
+    is_open, market_msg = is_nse_fo_market_open(datetime.datetime.now(datetime.timezone.utc))
+    if not is_open:
+        logging.info("[Mountain Signal live] Rejected: outside market hours - %s", market_msg)
+        return jsonify({'status': 'error', 'message': market_msg, 'reason': 'market_closed'}), 400
+
+    def _place(kite_client: KiteConnect):
+        # region agent log
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        now_ist = now_utc.astimezone(IST)
+        _debug_log(
+            hypothesis_id="H1",
+            message="About to place Mountain Signal live order",
+            data={
+                "instrument": instrument,
+                "option_type": option_type,
+                "transaction_type": transaction_type,
+                "index_ltp": index_ltp,
+                "lots": lots,
+                "now_utc": now_utc.isoformat(),
+                "now_ist": now_ist.isoformat(),
+            },
+            location="app.py:api_mountain_signal_live_place_order._place",
+        )
+        # endregion agent log
+        if tradingsymbol_param and quantity_param is not None:
+            tradingsymbol = tradingsymbol_param
+            quantity = int(quantity_param)
+        else:
+            if index_ltp is None:
+                raise ValueError("indexLtp or (tradingsymbol and quantity) required")
+            index_ltp_f = float(index_ltp)
+            tradingsymbol, lot_size = _resolve_nfo_atm_for_mountain_signal(
+                kite_client, instrument, option_type, index_ltp_f
+            )
+            if not tradingsymbol or not lot_size:
+                raise ValueError(f"Could not resolve NFO symbol for {instrument} {option_type} at LTP {index_ltp_f}")
+            quantity = _round_to_multiple(lots * lot_size, lot_size)
+            if quantity < lot_size:
+                quantity = lot_size
+            logging.info(
+                "[Mountain Signal live] Resolved NFO: indexLtp=%.2f -> tradingsymbol=%s lot_size=%d quantity=%d",
+                index_ltp_f, tradingsymbol, lot_size, quantity,
+            )
+
+        txn = kite_client.TRANSACTION_TYPE_BUY if transaction_type == 'BUY' else kite_client.TRANSACTION_TYPE_SELL
+        params = {
+            'variety': kite_client.VARIETY_REGULAR,
+            'exchange': kite_client.EXCHANGE_NFO,
+            'tradingsymbol': tradingsymbol,
+            'transaction_type': txn,
+            'quantity': quantity,
+            'product': kite_client.PRODUCT_MIS,
+            'order_type': kite_client.ORDER_TYPE_MARKET,
+            'validity': kite_client.VALIDITY_DAY,
+        }
+        params['tag'] = 'mountain_signal'
+        logging.info(
+            "[Mountain Signal live] Placing order: tradingsymbol=%s quantity=%s transaction_type=%s product=MIS validity=DAY",
+            tradingsymbol, quantity, transaction_type,
+        )
+        order_id = kite_client.place_order(**params)
+        logging.info("[Mountain Signal live] Order placed: order_id=%s", order_id)
+        return order_id, tradingsymbol, quantity
+
+    try:
+        order_id, tradingsymbol, quantity = _with_valid_kite_client(
+            session['user_id'],
+            "Mountain Signal live place order",
+            _place,
+            preferred_tokens=[session.get('access_token')],
+        )
+    except kite_exceptions.TokenException:
+        return jsonify({'status': 'error', 'message': 'Zerodha session expired. Please re-login.', 'authExpired': True}), 401
+    except ValueError as exc:
+        return jsonify({'status': 'error', 'message': str(exc)}), 400
+    except (kite_exceptions.InputException, kite_exceptions.DataException, kite_exceptions.OrderException, kite_exceptions.NetworkException) as exc:
+        logging.exception("Mountain Signal live place order failed (Zerodha API)")
+        logging.info("[Mountain Signal live] Place order error: %s: %s", type(exc).__name__, exc)
+        return jsonify({'status': 'error', 'message': str(exc), 'source': 'zerodha'}), 400
+    except Exception as exc:
+        logging.exception("Mountain Signal live place order failed")
+        logging.info("[Mountain Signal live] Place order error: %s: %s", type(exc).__name__, exc)
+        # region agent log
+        _debug_log(
+            hypothesis_id="H2",
+            message="Mountain Signal live place order exception",
+            data={
+                "instrument": instrument,
+                "option_type": option_type,
+                "transaction_type": transaction_type,
+                "index_ltp": index_ltp,
+                "lots": lots,
+                "error_type": type(exc).__name__,
+                "error_message": str(exc),
+            },
+            location="app.py:api_mountain_signal_live_place_order",
+        )
+        # endregion agent log
+        return jsonify({'status': 'error', 'message': str(exc)}), 500
+
+    return jsonify({
+        'status': 'success',
+        'order_id': str(order_id),
+        'tradingsymbol': tradingsymbol,
+        'quantity': quantity,
+        'message': f'Order {order_id} placed: {transaction_type} {tradingsymbol} qty={quantity}',
+    })
+
+
+@app.route("/api/zerodha/orders", methods=['GET'])
+def api_zerodha_orders():
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+    try:
+        def _fetch_orders(client: KiteConnect):
+            return execute_with_retries("fetching Zerodha orders", lambda: client.orders())
+
+        raw = _with_valid_kite_client(
+            session['user_id'],
+            "Zerodha orders for Mountain Signal",
+            _fetch_orders,
+            preferred_tokens=[session.get('access_token')] if session.get('access_token') else None,
+        )
+    except kite_exceptions.TokenException:
+        return jsonify({'status': 'error', 'message': 'Zerodha session expired. Please re-login.', 'authExpired': True}), 401
+    except RuntimeError as exc:
+        return jsonify({'status': 'error', 'message': str(exc)}), 400
+    except Exception as exc:
+        logging.exception("Failed to fetch Zerodha orders")
+        return jsonify({'status': 'error', 'message': str(exc)}), 500
+
+    orders_list = raw if isinstance(raw, list) else []
+    tag_filter = request.args.get('tag')
+    if tag_filter:
+        orders_list = [o for o in orders_list if (o.get('tag') or '') == tag_filter]
+    sanitized = _sanitize_orders(orders_list)
+    logging.info("[Zerodha] orders: count=%d tag=%s", len(sanitized), tag_filter or "(all)")
+    return jsonify({'status': 'success', 'orders': sanitized})
+
+
+@app.route("/api/zerodha/positions", methods=['GET'])
+def api_zerodha_positions():
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+    try:
+        def _fetch_positions(client: KiteConnect):
+            return execute_with_retries("fetching Zerodha positions", lambda: client.positions())
+
+        raw = _with_valid_kite_client(
+            session['user_id'],
+            "Zerodha positions for Mountain Signal",
+            _fetch_positions,
+            preferred_tokens=[session.get('access_token')] if session.get('access_token') else None,
+        )
+    except kite_exceptions.TokenException:
+        return jsonify({'status': 'error', 'message': 'Zerodha session expired. Please re-login.', 'authExpired': True}), 401
+    except RuntimeError as exc:
+        return jsonify({'status': 'error', 'message': str(exc)}), 400
+    except Exception as exc:
+        logging.exception("Failed to fetch Zerodha positions")
+        return jsonify({'status': 'error', 'message': str(exc)}), 500
+
+    positions = _sanitize_positions(raw if isinstance(raw, dict) else {})
+    return jsonify({'status': 'success', 'positions': positions})
+
+
+@app.route("/api/mountain_signal/live/order_preview", methods=['POST'])
+def api_mountain_signal_live_order_preview():
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+    if not session.get('access_token'):
+        return jsonify({'status': 'error', 'message': 'Zerodha access token missing. Please login with Zerodha first.'}), 401
+    data = request.get_json() or {}
+    instrument = (data.get('instrument') or '').strip().upper()
+    option_type = (data.get('optionType') or data.get('option_type') or '').strip().upper()
+    index_ltp = data.get('indexLtp')
+    lots = data.get('lots', 1)
+    if instrument not in ('NIFTY', 'BANKNIFTY'):
+        return jsonify({'status': 'error', 'message': 'instrument must be NIFTY or BANKNIFTY'}), 400
+    if option_type not in ('PE', 'CE'):
+        return jsonify({'status': 'error', 'message': 'optionType must be PE or CE'}), 400
+    if index_ltp is None:
+        return jsonify({'status': 'error', 'message': 'indexLtp required'}), 400
+    try:
+        lots = int(lots) if lots is not None else 1
+    except (TypeError, ValueError):
+        lots = 1
+    if lots < 1:
+        lots = 1
+
+    is_open, market_msg = is_nse_fo_market_open(datetime.datetime.now(datetime.timezone.utc))
+    if not is_open:
+        return jsonify({'status': 'error', 'message': market_msg, 'reason': 'market_closed'}), 400
+
+    def _preview(kite_client: KiteConnect):
+        index_ltp_f = float(index_ltp)
+        tradingsymbol, lot_size = _resolve_nfo_atm_for_mountain_signal(
+            kite_client, instrument, option_type, index_ltp_f
+        )
+        if not tradingsymbol or not lot_size:
+            raise ValueError(f"Could not resolve NFO symbol for {instrument} {option_type} at LTP {index_ltp_f}")
+        quantity = _round_to_multiple(lots * lot_size, lot_size)
+        if quantity < lot_size:
+            quantity = lot_size
+        return tradingsymbol, quantity, lot_size
+
+    try:
+        tradingsymbol, quantity, lot_size = _with_valid_kite_client(
+            session['user_id'],
+            "Mountain Signal live order preview",
+            _preview,
+            preferred_tokens=[session.get('access_token')],
+        )
+    except kite_exceptions.TokenException:
+        return jsonify({'status': 'error', 'message': 'Zerodha session expired. Please re-login.', 'authExpired': True}), 401
+    except ValueError as exc:
+        return jsonify({'status': 'error', 'message': str(exc)}), 400
+    except Exception as exc:
+        logging.exception("Mountain Signal live order preview failed")
+        return jsonify({'status': 'error', 'message': str(exc)}), 500
+
+    return jsonify({
+        'status': 'success',
+        'tradingsymbol': tradingsymbol,
+        'quantity': quantity,
+        'instrument': instrument,
+        'optionType': option_type,
+        'lots': lots,
+        'lot_size': lot_size,
+    })
+
+
+@app.route("/api/mountain_signal/live/square_off_all", methods=['POST'])
+def api_mountain_signal_live_square_off_all():
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+    user_row = _get_user_record(session['user_id'])
+    if not user_row:
+        return jsonify({'status': 'error', 'message': 'User record not found.'}), 400
+    user = dict(user_row)
+    api_key = user.get('app_key')
+    if not api_key:
+        return jsonify({'status': 'error', 'message': 'Zerodha API credentials not configured.'}), 400
+
+    def _prepare_client(client: KiteConnect) -> KiteConnect:
+        execute_with_retries("validating Zerodha session before square-off", lambda: client.profile())
+        return client
+
+    try:
+        kite_client = _with_valid_kite_client(
+            session['user_id'],
+            "Mountain Signal square-off all",
+            _prepare_client,
+            preferred_tokens=[session.get('access_token')],
+        )
+    except kite_exceptions.TokenException:
+        return jsonify({'status': 'error', 'message': 'Zerodha session expired. Please login again.', 'authExpired': True}), 401
+    except RuntimeError as exc:
+        return jsonify({'status': 'error', 'message': str(exc)}), 400
+    except Exception as exc:
+        logging.exception("Unexpected error preparing Kite client for square-off")
+        return jsonify({'status': 'error', 'message': f'Unable to prepare Zerodha client: {exc}'}), 500
+
+    try:
+        positions = execute_with_retries(
+            "fetching Kite positions during square off",
+            lambda: kite_client.positions()
+        )
+    except kite_exceptions.TokenException:
+        return jsonify({'status': 'error', 'message': 'Zerodha session expired. Please login again.', 'authExpired': True}), 401
+    except Exception as exc:
+        logging.exception("Failed to fetch positions during square off")
+        return jsonify({'status': 'error', 'message': f'Failed to fetch positions: {exc}'}), 500
+
+    net_positions = positions.get('net', []) if isinstance(positions, dict) else []
+    exit_results = []
+    for pos in net_positions:
+        qty = pos.get('quantity')
+        if not qty:
+            continue
+        tradingsymbol = pos.get('tradingsymbol')
+        exchange = pos.get('exchange') or 'NFO'
+        product = pos.get('product') or kite_client.PRODUCT_MIS
+        exit_qty = abs(int(qty))
+        transaction_type = (
+            kite_client.TRANSACTION_TYPE_SELL if qty > 0 else kite_client.TRANSACTION_TYPE_BUY
+        )
+        try:
+            order_id = kite_client.place_order(
+                variety=kite_client.VARIETY_REGULAR,
+                exchange=exchange,
+                tradingsymbol=tradingsymbol,
+                transaction_type=transaction_type,
+                quantity=exit_qty,
+                product=product,
+                order_type=kite_client.ORDER_TYPE_MARKET,
+                validity=kite_client.VALIDITY_DAY,
+            )
+            final_status = _wait_for_order_completion(kite_client, order_id, timeout=30)
+            exit_results.append({
+                'tradingsymbol': tradingsymbol,
+                'quantity': exit_qty,
+                'status': final_status.lower() if isinstance(final_status, str) else 'placed',
+                'order_id': order_id,
+            })
+        except Exception as exc:
+            logging.exception("Square-off order failed for %s", tradingsymbol)
+            exit_results.append({
+                'tradingsymbol': tradingsymbol,
+                'quantity': exit_qty,
+                'status': 'error',
+                'message': str(exc),
+            })
+
+    logging.info(
+        "[Mountain Signal live] square_off_all: %d position(s) squared off, results=%s",
+        len(exit_results), [r.get('status') for r in exit_results],
+    )
+    return jsonify({
+        'status': 'success',
+        'message': 'Square-off initiated. Review order statuses for confirmation.',
+        'results': exit_results,
     })
 
 
