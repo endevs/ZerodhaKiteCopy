@@ -3,6 +3,10 @@ import PlotlyCandlestickChart, { PlotlyCandlePoint, TradeMarker } from './Plotly
 import { Plot } from '../lib/plotly-finance';
 import { apiUrl } from '../config/api';
 import { useSocket } from '../hooks/useSocket';
+import { runMountainBacktest } from './advancedCharts/mountainStrategyEngine';
+import { MountainEvent, MountainEventType } from './advancedCharts/MountainStrategyTypes';
+
+type BtStrategy = 'mountain' | 'ema_crossover';
 
 type TabKey = 'live' | 'backtest';
 
@@ -44,6 +48,35 @@ const daysAgo = (n: number): string => {
   return d.toISOString().split('T')[0];
 };
 
+const EVENT_BADGE_MAP: Record<string, string> = {
+  [MountainEventType.SIGNAL_IDENTIFIED]: 'bg-info',
+  [MountainEventType.SIGNAL_RESET]: 'bg-warning text-dark',
+  [MountainEventType.SIGNAL_CLEARED]: 'bg-secondary',
+  [MountainEventType.ENTRY_TRIGGERED]: 'bg-primary',
+  [MountainEventType.ENTRY_SKIPPED_REENTRY]: 'bg-dark',
+  [MountainEventType.EXIT_INDEX_STOP]: 'bg-danger',
+  [MountainEventType.EXIT_INDEX_TARGET]: 'bg-success',
+  [MountainEventType.EXIT_MARKET_CLOSE]: 'bg-secondary',
+  [MountainEventType.NEW_DAY_RESET]: 'bg-light text-dark border',
+  [MountainEventType.MARKET_CLOSE_SIGNAL_CLEAR]: 'bg-light text-dark border',
+};
+
+const EVENT_LABEL_MAP: Record<string, string> = {
+  [MountainEventType.SIGNAL_IDENTIFIED]: 'SIGNAL',
+  [MountainEventType.SIGNAL_RESET]: 'SIG RESET',
+  [MountainEventType.SIGNAL_CLEARED]: 'SIG CLEAR',
+  [MountainEventType.ENTRY_TRIGGERED]: 'ENTRY',
+  [MountainEventType.ENTRY_SKIPPED_REENTRY]: 'SKIP RE-ENTRY',
+  [MountainEventType.EXIT_INDEX_STOP]: 'EXIT STOP',
+  [MountainEventType.EXIT_INDEX_TARGET]: 'EXIT TARGET',
+  [MountainEventType.EXIT_MARKET_CLOSE]: 'EXIT MKT CLOSE',
+  [MountainEventType.NEW_DAY_RESET]: 'NEW DAY',
+  [MountainEventType.MARKET_CLOSE_SIGNAL_CLEAR]: 'MKT CLR SIGNAL',
+};
+
+const eventBadgeClass = (type: MountainEventType): string => EVENT_BADGE_MAP[type] || 'bg-secondary';
+const eventLabel = (type: MountainEventType): string => EVENT_LABEL_MAP[type] || type;
+
 interface BacktestSummary {
   total_trades: number;
   winning_trades: number;
@@ -67,6 +100,7 @@ interface BacktestTrade {
   exit_price: number;
   direction: 'long' | 'short';
   pnl: number;
+  exit_reason?: string;
 }
 
 const AdvancedChartsContent: React.FC = () => {
@@ -84,6 +118,7 @@ const AdvancedChartsContent: React.FC = () => {
   const [isLiveStreaming, setIsLiveStreaming] = useState<boolean>(false);
 
   // Backtest state
+  const [btStrategy, setBtStrategy] = useState<BtStrategy>('mountain');
   const [btFromDate, setBtFromDate] = useState<string>(daysAgo(7));
   const [btToDate, setBtToDate] = useState<string>(todayStr());
   const [btEmaFast, setBtEmaFast] = useState<number>(5);
@@ -95,6 +130,11 @@ const AdvancedChartsContent: React.FC = () => {
   const [btEquity, setBtEquity] = useState<EquityPoint[]>([]);
   const [btSummary, setBtSummary] = useState<BacktestSummary | null>(null);
   const [btTrades, setBtTrades] = useState<BacktestTrade[]>([]);
+  const [btEvents, setBtEvents] = useState<MountainEvent[]>([]);
+  const [eventFilter, setEventFilter] = useState<string>('ALL');
+  const [btRsiOverbought, setBtRsiOverbought] = useState<number>(70);
+  const [btRsiOversold, setBtRsiOversold] = useState<number>(30);
+  const [btRsi, setBtRsi] = useState<(number | null)[]>([]);
 
   const socket = useSocket();
 
@@ -209,15 +249,22 @@ const AdvancedChartsContent: React.FC = () => {
     setBtEquity([]);
     setBtSummary(null);
     setBtTrades([]);
+    setBtEvents([]);
+    setBtRsi([]);
 
     try {
+      // Fetch extra warmup days so RSI(14) is available from the first candle
+      const warmupFromDate = btStrategy === 'mountain'
+        ? (() => { const d = new Date(btFromDate); d.setDate(d.getDate() - 3); return d.toISOString().split('T')[0]; })()
+        : btFromDate;
+
       const resp = await fetch(apiUrl('/api/backtest/run'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
         body: JSON.stringify({
           index: selectedIndex,
-          from_date: btFromDate,
+          from_date: warmupFromDate,
           to_date: btToDate,
           interval: kiteInterval,
           strategy: 'ema_crossover',
@@ -232,32 +279,117 @@ const AdvancedChartsContent: React.FC = () => {
         return;
       }
 
-      const candles: PlotlyCandlePoint[] = (data.candles || []).map((c: any) => ({
+      const allCandles: PlotlyCandlePoint[] = (data.candles || []).map((c: any) => ({
         time: c.timestamp, open: c.open, high: c.high, low: c.low, close: c.close,
         volume: c.volume ?? 0, indexClose: c.close, ema5: null,
       }));
-      setBtCandles(computeEma5(candles));
 
-      const markers: TradeMarker[] = [];
-      for (const t of data.trades || []) {
-        markers.push({ time: t.entry_time, price: t.entry_price, direction: t.direction, action: 'entry' });
-        markers.push({
-          time: t.exit_time, price: t.exit_price, direction: t.direction, action: 'exit',
-          label: `P&L: ${t.pnl > 0 ? '+' : ''}${t.pnl.toFixed(2)}`,
+      if (btStrategy === 'mountain') {
+        const result = runMountainBacktest(allCandles, {
+          rsiOverbought: btRsiOverbought,
+          rsiOversold: btRsiOversold,
         });
+
+        // Find first candle index on or after the actual from_date to trim warmup data
+        const fromDateMs = new Date(btFromDate + 'T00:00:00').getTime();
+        const trimIdx = allCandles.findIndex((c) => {
+          const t = typeof c.time === 'string' ? new Date(c.time).getTime() : (c.time as Date).getTime();
+          return t >= fromDateMs;
+        });
+        const startIdx = trimIdx >= 0 ? trimIdx : 0;
+
+        const candles = allCandles.slice(startIdx);
+        const trimmedEma5 = result.indicators.ema5.slice(startIdx);
+        const trimmedRsi14 = result.indicators.rsi14.slice(startIdx);
+
+        const withEma = candles.map((c, idx) => ({
+          ...c,
+          ema5: trimmedEma5[idx] ?? null,
+        }));
+        setBtCandles(withEma);
+        setBtRsi(trimmedRsi14);
+
+        // Filter trades/events to only those within the display range
+        const displayFrom = candles.length > 0 ? (typeof candles[0].time === 'string' ? candles[0].time : (candles[0].time as Date).toISOString()) : '';
+        const filteredTrades = result.trades.filter((t) => t.entryTime >= displayFrom);
+        const filteredEvents = result.events.filter((e) => e.timestamp >= displayFrom);
+
+        const markers: TradeMarker[] = [];
+        for (const t of filteredTrades) {
+          markers.push({ time: t.entryTime, price: t.entryPrice, direction: 'short', action: 'entry' });
+          markers.push({
+            time: t.exitTime, price: t.exitPrice, direction: 'short', action: 'exit',
+            label: `${t.exitReason} | P&L: ${t.pnl > 0 ? '+' : ''}${t.pnl.toFixed(2)}`,
+          });
+        }
+
+        // Highlight signal candles (SIGNAL_IDENTIFIED and SIGNAL_RESET)
+        for (const ev of filteredEvents) {
+          if (ev.type === MountainEventType.SIGNAL_IDENTIFIED || ev.type === MountainEventType.SIGNAL_RESET) {
+            markers.push({
+              time: ev.timestamp,
+              price: (ev.details.high as number) ?? 0,
+              direction: 'short',
+              action: 'signal',
+              label: `RSI: ${ev.details.rsi14 != null ? (ev.details.rsi14 as number).toFixed(1) : '–'}`,
+            });
+          }
+        }
+        setBtMarkers(markers);
+
+        // Rebuild equity curve from filtered trades only
+        const trimmedEquity = result.equityCurve.filter((e) => e.timestamp >= displayFrom);
+        setBtEquity(trimmedEquity);
+        setBtSummary(result.summary);
+        setBtTrades(filteredTrades.map((t) => ({
+          entry_time: t.entryTime,
+          entry_price: t.entryPrice,
+          exit_time: t.exitTime,
+          exit_price: t.exitPrice,
+          direction: 'short' as const,
+          pnl: t.pnl,
+          exit_reason: t.exitReason,
+        })));
+        setBtEvents(filteredEvents);
+      } else {
+        const candles = allCandles;
+        // EMA crossover – use backend results as before
+        setBtCandles(computeEma5(candles));
+
+        const markers: TradeMarker[] = [];
+        for (const t of data.trades || []) {
+          markers.push({ time: t.entry_time, price: t.entry_price, direction: t.direction, action: 'entry' });
+          markers.push({
+            time: t.exit_time, price: t.exit_price, direction: t.direction, action: 'exit',
+            label: `P&L: ${t.pnl > 0 ? '+' : ''}${t.pnl.toFixed(2)}`,
+          });
+        }
+        setBtMarkers(markers);
+        setBtEquity(data.equity_curve || []);
+        setBtSummary(data.summary || null);
+        setBtTrades(data.trades || []);
+        setBtEvents([]);
       }
-      setBtMarkers(markers);
-      setBtEquity(data.equity_curve || []);
-      setBtSummary(data.summary || null);
-      setBtTrades(data.trades || []);
     } catch (e: any) {
       setBtError(e instanceof Error ? e.message : 'Network error');
     } finally {
       setBtLoading(false);
     }
-  }, [selectedIndex, btFromDate, btToDate, kiteInterval, btEmaFast, btEmaSlow]);
+  }, [selectedIndex, btFromDate, btToDate, kiteInterval, btStrategy, btEmaFast, btEmaSlow, btRsiOverbought, btRsiOversold]);
 
   const chartData = useMemo(() => rawCandles, [rawCandles]);
+
+  const filteredEvents = useMemo(() => {
+    if (eventFilter === 'ALL') return btEvents;
+    if (eventFilter === 'EXITS') {
+      return btEvents.filter((e) =>
+        e.type === MountainEventType.EXIT_INDEX_STOP ||
+        e.type === MountainEventType.EXIT_INDEX_TARGET ||
+        e.type === MountainEventType.EXIT_MARKET_CLOSE
+      );
+    }
+    return btEvents.filter((e) => e.type === eventFilter);
+  }, [btEvents, eventFilter]);
 
   const statusBanner = useMemo(() => {
     if (isToday && isLiveStreaming)
@@ -373,6 +505,14 @@ const AdvancedChartsContent: React.FC = () => {
               {/* Controls row */}
               <div className="row g-3 mb-3 align-items-end">
                 <div className="col-md-2">
+                  <label className="form-label fw-bold">Strategy</label>
+                  <select className="form-select" value={btStrategy}
+                    onChange={(e) => setBtStrategy(e.target.value as BtStrategy)}>
+                    <option value="mountain">Mountain Strategy</option>
+                    <option value="ema_crossover">EMA Crossover</option>
+                  </select>
+                </div>
+                <div className="col-md-2">
                   <label className="form-label fw-bold">Index</label>
                   <select className="form-select" value={selectedIndex}
                     onChange={(e) => setSelectedIndex(e.target.value === 'NIFTY' ? 'NIFTY' : 'BANKNIFTY')}>
@@ -390,17 +530,35 @@ const AdvancedChartsContent: React.FC = () => {
                   <input type="date" className="form-control" value={btToDate}
                     onChange={(e) => setBtToDate(e.target.value)} max={todayStr()} />
                 </div>
+                {btStrategy === 'ema_crossover' && (
+                  <>
+                    <div className="col-md-1">
+                      <label className="form-label fw-bold">Fast EMA</label>
+                      <input type="number" className="form-control" value={btEmaFast} min={2} max={50}
+                        onChange={(e) => setBtEmaFast(Number(e.target.value) || 5)} />
+                    </div>
+                    <div className="col-md-1">
+                      <label className="form-label fw-bold">Slow EMA</label>
+                      <input type="number" className="form-control" value={btEmaSlow} min={5} max={200}
+                        onChange={(e) => setBtEmaSlow(Number(e.target.value) || 20)} />
+                    </div>
+                  </>
+                )}
+                {btStrategy === 'mountain' && (
+                  <>
+                    <div className="col-md-1">
+                      <label className="form-label fw-bold">RSI OB</label>
+                      <input type="number" className="form-control" value={btRsiOverbought} min={50} max={90}
+                        onChange={(e) => setBtRsiOverbought(Number(e.target.value) || 70)} />
+                    </div>
+                    <div className="col-md-1">
+                      <label className="form-label fw-bold">RSI OS</label>
+                      <input type="number" className="form-control" value={btRsiOversold} min={10} max={50}
+                        onChange={(e) => setBtRsiOversold(Number(e.target.value) || 30)} />
+                    </div>
+                  </>
+                )}
                 <div className="col-md-1">
-                  <label className="form-label fw-bold">Fast EMA</label>
-                  <input type="number" className="form-control" value={btEmaFast} min={2} max={50}
-                    onChange={(e) => setBtEmaFast(Number(e.target.value) || 5)} />
-                </div>
-                <div className="col-md-1">
-                  <label className="form-label fw-bold">Slow EMA</label>
-                  <input type="number" className="form-control" value={btEmaSlow} min={5} max={200}
-                    onChange={(e) => setBtEmaSlow(Number(e.target.value) || 20)} />
-                </div>
-                <div className="col-md-2">
                   <label className="form-label fw-bold">Timeframe</label>
                   <select className="form-select" value={timeframeMinutes}
                     onChange={(e) => setTimeframeMinutes(Number(e.target.value) || 5)}>
@@ -487,45 +645,18 @@ const AdvancedChartsContent: React.FC = () => {
                 <>
                   <PlotlyCandlestickChart
                     data={btCandles}
-                    title={`${selectedIndex} – EMA(${btEmaFast}/${btEmaSlow}) Backtest`}
+                    title={`${selectedIndex} – ${btStrategy === 'mountain' ? 'Mountain Strategy' : `EMA(${btEmaFast}/${btEmaSlow})`} Backtest`}
                     height={520}
                     showIndexLine={false}
                     showEma={showEma}
                     showVolume={showVolume}
+                    showRsi={btStrategy === 'mountain' && btRsi.length > 0}
+                    rsiData={btRsi}
+                    rsiOverbought={btRsiOverbought}
+                    rsiOversold={btRsiOversold}
                     indexLabel={`${selectedIndex} Close`}
                     markers={btMarkers}
                   />
-
-                  {/* Equity curve */}
-                  {btEquity.length > 0 && (
-                    <div className="mt-3">
-                      <Plot
-                        data={[
-                          {
-                            x: btEquity.map((e) => e.timestamp),
-                            y: btEquity.map((e) => e.value),
-                            type: 'scatter' as const,
-                            mode: 'lines' as const,
-                            name: 'Equity Curve',
-                            line: { color: '#0d6efd', width: 2 },
-                            fill: 'tozeroy',
-                            fillcolor: 'rgba(13,110,253,0.08)',
-                          },
-                        ]}
-                        layout={{
-                          title: { text: 'Equity Curve (Cumulative P&L)' },
-                          height: 250,
-                          margin: { l: 50, r: 30, t: 35, b: 40 },
-                          xaxis: { type: 'date' as const, showgrid: true, gridcolor: '#e9ecef' },
-                          yaxis: { title: { text: 'P&L' }, showgrid: true, gridcolor: '#e9ecef', zeroline: true, zerolinecolor: '#999' },
-                          hovermode: 'x unified' as const,
-                          showlegend: false,
-                        }}
-                        style={{ width: '100%', height: 250 }}
-                        config={{ responsive: true, displaylogo: false }}
-                      />
-                    </div>
-                  )}
 
                   {/* Trade log table */}
                   {btTrades.length > 0 && (
@@ -541,6 +672,7 @@ const AdvancedChartsContent: React.FC = () => {
                               <th>Entry Price</th>
                               <th>Exit Time</th>
                               <th>Exit Price</th>
+                              {btStrategy === 'mountain' && <th>Exit Reason</th>}
                               <th>P&L</th>
                             </tr>
                           </thead>
@@ -557,9 +689,97 @@ const AdvancedChartsContent: React.FC = () => {
                                 <td>{t.entry_price.toFixed(2)}</td>
                                 <td className="small">{new Date(t.exit_time).toLocaleString()}</td>
                                 <td>{t.exit_price.toFixed(2)}</td>
+                                {btStrategy === 'mountain' && (
+                                  <td>
+                                    <span className={`badge ${
+                                      t.exit_reason === 'INDEX_STOP' ? 'bg-danger' :
+                                      t.exit_reason === 'INDEX_TARGET' ? 'bg-success' :
+                                      'bg-secondary'
+                                    }`}>
+                                      {t.exit_reason}
+                                    </span>
+                                  </td>
+                                )}
                                 <td className={`fw-bold ${t.pnl >= 0 ? 'text-success' : 'text-danger'}`}>
                                   {t.pnl >= 0 ? '+' : ''}{t.pnl.toFixed(2)}
                                 </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Equity curve – placed after trade log to avoid overlapping RSI panel */}
+                  {btEquity.length > 0 && (
+                    <div className="mt-3">
+                      <h6 className="fw-bold">Equity Curve (Cumulative P&L)</h6>
+                      <Plot
+                        data={[
+                          {
+                            x: btEquity.map((e) => e.timestamp),
+                            y: btEquity.map((e) => e.value),
+                            type: 'scatter' as const,
+                            mode: 'lines' as const,
+                            name: 'Equity Curve',
+                            line: { color: '#0d6efd', width: 2 },
+                            fill: 'tozeroy',
+                            fillcolor: 'rgba(13,110,253,0.08)',
+                          },
+                        ]}
+                        layout={{
+                          height: 160,
+                          margin: { l: 50, r: 30, t: 10, b: 30 },
+                          xaxis: { type: 'date' as const, showgrid: true, gridcolor: '#e9ecef' },
+                          yaxis: { title: { text: 'P&L' }, showgrid: true, gridcolor: '#e9ecef', zeroline: true, zerolinecolor: '#999' },
+                          hovermode: 'x unified' as const,
+                          showlegend: false,
+                        }}
+                        style={{ width: '100%', height: 160 }}
+                        config={{ responsive: true, displaylogo: false }}
+                      />
+                    </div>
+                  )}
+
+                  {/* Mountain Strategy Event Log */}
+                  {btStrategy === 'mountain' && btEvents.length > 0 && (
+                    <div className="mt-3">
+                      <div className="d-flex justify-content-between align-items-center mb-2">
+                        <h6 className="fw-bold mb-0">Strategy Event Log ({filteredEvents.length} events)</h6>
+                        <select className="form-select form-select-sm" style={{ width: 200 }}
+                          value={eventFilter} onChange={(e) => setEventFilter(e.target.value)}>
+                          <option value="ALL">All Events</option>
+                          <option value={MountainEventType.SIGNAL_IDENTIFIED}>Signals Identified</option>
+                          <option value={MountainEventType.SIGNAL_RESET}>Signal Resets</option>
+                          <option value={MountainEventType.SIGNAL_CLEARED}>Signals Cleared</option>
+                          <option value={MountainEventType.ENTRY_TRIGGERED}>Entries</option>
+                          <option value={MountainEventType.ENTRY_SKIPPED_REENTRY}>Entries Skipped</option>
+                          <option value="EXITS">All Exits</option>
+                          <option value={MountainEventType.NEW_DAY_RESET}>New Day Resets</option>
+                        </select>
+                      </div>
+                      <div className="table-responsive" style={{ maxHeight: 350, overflowY: 'auto' }}>
+                        <table className="table table-sm table-hover mb-0" style={{ fontSize: '0.8rem' }}>
+                          <thead className="table-dark sticky-top">
+                            <tr>
+                              <th style={{ width: 40 }}>#</th>
+                              <th style={{ width: 150 }}>Event</th>
+                              <th style={{ width: 160 }}>Time</th>
+                              <th>Message</th>
+                              <th style={{ width: 80 }}>EMA5</th>
+                              <th style={{ width: 80 }}>RSI14</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {filteredEvents.map((ev, idx) => (
+                              <tr key={idx}>
+                                <td className="text-muted">{ev.candleIndex}</td>
+                                <td><span className={`badge ${eventBadgeClass(ev.type)}`}>{eventLabel(ev.type)}</span></td>
+                                <td className="text-nowrap">{new Date(ev.timestamp).toLocaleString()}</td>
+                                <td>{ev.message}</td>
+                                <td>{ev.details.ema5 != null ? (ev.details.ema5 as number).toFixed(2) : '–'}</td>
+                                <td>{ev.details.rsi14 != null ? (ev.details.rsi14 as number).toFixed(1) : '–'}</td>
                               </tr>
                             ))}
                           </tbody>

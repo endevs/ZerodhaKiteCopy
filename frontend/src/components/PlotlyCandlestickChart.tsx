@@ -16,7 +16,7 @@ export interface TradeMarker {
   time: string;
   price: number;
   direction: 'long' | 'short';
-  action: 'entry' | 'exit';
+  action: 'entry' | 'exit' | 'signal';
   label?: string;
 }
 
@@ -27,6 +27,10 @@ interface PlotlyCandlestickChartProps {
   showIndexLine?: boolean;
   showEma?: boolean;
   showVolume?: boolean;
+  showRsi?: boolean;
+  rsiData?: (number | null)[];
+  rsiOverbought?: number;
+  rsiOversold?: number;
   indexLabel?: string;
   markers?: TradeMarker[];
 }
@@ -89,6 +93,10 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
   showIndexLine = true,
   showEma = true,
   showVolume = true,
+  showRsi = false,
+  rsiData,
+  rsiOverbought = 70,
+  rsiOversold = 30,
   indexLabel = 'Index Close',
   markers,
 }) => {
@@ -181,9 +189,44 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
     });
   }
 
+  const hasRsi = showRsi && rsiData && rsiData.some((v) => v != null);
+  if (hasRsi && rsiData) {
+    traces.push({
+      x: times,
+      y: rsiData,
+      type: 'scatter',
+      mode: 'lines',
+      name: 'RSI 14',
+      line: { color: '#0d9488', width: 1.5 },
+      yaxis: 'y3',
+      connectgaps: false,
+    });
+    traces.push({
+      x: [times[0], times[times.length - 1]],
+      y: [rsiOverbought, rsiOverbought],
+      type: 'scatter',
+      mode: 'lines',
+      name: `Overbought (${rsiOverbought})`,
+      line: { color: '#dc3545', width: 1, dash: 'dash' },
+      yaxis: 'y3',
+      showlegend: true,
+    });
+    traces.push({
+      x: [times[0], times[times.length - 1]],
+      y: [rsiOversold, rsiOversold],
+      type: 'scatter',
+      mode: 'lines',
+      name: `Oversold (${rsiOversold})`,
+      line: { color: '#198754', width: 1, dash: 'dash' },
+      yaxis: 'y3',
+      showlegend: true,
+    });
+  }
+
   if (markers && markers.length > 0) {
     const buyMarkers = markers.filter((m) => m.action === 'entry');
     const sellMarkers = markers.filter((m) => m.action === 'exit');
+    const signalMarkers = markers.filter((m) => m.action === 'signal');
 
     if (buyMarkers.length > 0) {
       traces.push({
@@ -227,13 +270,46 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
         yaxis: 'y',
       });
     }
+
+    if (signalMarkers.length > 0) {
+      traces.push({
+        x: signalMarkers.map((m) => m.time),
+        y: signalMarkers.map((m) => m.price),
+        type: 'scatter',
+        mode: 'markers',
+        name: 'Signal',
+        marker: {
+          symbol: 'star',
+          size: 14,
+          color: '#e91e63',
+          line: { width: 1, color: '#880e4f' },
+        },
+        text: signalMarkers.map(
+          (m) => `PE Signal @ ${m.price.toFixed(2)}${m.label ? ' | ' + m.label : ''}`,
+        ),
+        hoverinfo: 'text+x',
+        yaxis: 'y',
+      });
+    }
   }
 
   const hasVolume = showVolume && volumes.some((v) => v > 0);
 
+  // Compute domain splits based on which sub-panels are active
+  let priceDomainBottom = 0;
+  if (hasVolume && hasRsi) {
+    priceDomainBottom = 0.45;
+  } else if (hasRsi) {
+    priceDomainBottom = 0.25;
+  } else if (hasVolume) {
+    priceDomainBottom = 0.25;
+  }
+
+  const chartHeight = hasRsi ? Math.max(height, 620) : height;
+
   const layout: any = {
     title: { text: title || '' },
-    height,
+    height: chartHeight,
     margin: { l: 50, r: 50, t: title ? 40 : 10, b: 40 },
     xaxis: {
       rangeslider: { visible: false },
@@ -243,12 +319,26 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
     },
     yaxis: {
       title: { text: 'Price' },
-      domain: hasVolume ? [0.25, 1] : [0, 1],
+      domain: [priceDomainBottom, 1],
       showgrid: true,
       gridcolor: '#e9ecef',
     },
     ...(hasVolume && {
-      yaxis2: { title: { text: 'Volume' }, domain: [0, 0.2], showgrid: false },
+      yaxis2: {
+        title: { text: 'Volume' },
+        domain: hasRsi ? [0, 0.12] : [0, 0.2],
+        showgrid: false,
+      },
+    }),
+    ...(hasRsi && {
+      yaxis3: {
+        title: { text: 'RSI' },
+        domain: hasVolume ? [0.15, 0.4] : [0, 0.2],
+        range: [0, 100],
+        showgrid: true,
+        gridcolor: '#e9ecef',
+        dtick: 10,
+      },
     }),
     legend: {
       orientation: 'h',
@@ -261,11 +351,11 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
   };
 
   return (
-    <ChartErrorBoundary height={height}>
+    <ChartErrorBoundary height={chartHeight}>
       <Plot
         data={traces}
         layout={layout}
-        style={{ width: '100%', height }}
+        style={{ width: '100%', height: chartHeight }}
         config={{
           responsive: true,
           displaylogo: false,
