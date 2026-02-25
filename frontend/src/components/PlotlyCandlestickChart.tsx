@@ -1,0 +1,279 @@
+import React from 'react';
+import { Plot } from '../lib/plotly-finance';
+
+export interface PlotlyCandlePoint {
+  time: Date | string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume?: number;
+  indexClose?: number | null;
+  ema5?: number | null;
+}
+
+export interface TradeMarker {
+  time: string;
+  price: number;
+  direction: 'long' | 'short';
+  action: 'entry' | 'exit';
+  label?: string;
+}
+
+interface PlotlyCandlestickChartProps {
+  data: PlotlyCandlePoint[];
+  title?: string;
+  height?: number;
+  showIndexLine?: boolean;
+  showEma?: boolean;
+  showVolume?: boolean;
+  indexLabel?: string;
+  markers?: TradeMarker[];
+}
+
+interface ChartErrorBoundaryState {
+  hasError: boolean;
+  errorMessage: string;
+}
+
+class ChartErrorBoundary extends React.Component<
+  { children: React.ReactNode; height: number },
+  ChartErrorBoundaryState
+> {
+  state: ChartErrorBoundaryState = { hasError: false, errorMessage: '' };
+
+  static getDerivedStateFromError(error: Error): ChartErrorBoundaryState {
+    return { hasError: true, errorMessage: error.message };
+  }
+
+  componentDidCatch(error: Error, info: React.ErrorInfo) {
+    console.error('[PlotlyChart] Render error:', error, info.componentStack);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div
+          style={{
+            height: this.props.height,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            background: '#fff3cd',
+            border: '1px solid #ffc107',
+            borderRadius: 8,
+          }}
+        >
+          <div className="text-center p-3">
+            <i className="bi bi-exclamation-triangle text-warning fs-3 d-block mb-2" />
+            <strong>Chart failed to render</strong>
+            <div className="text-muted small mt-1">{this.state.errorMessage}</div>
+            <button
+              className="btn btn-sm btn-outline-warning mt-2"
+              onClick={() => this.setState({ hasError: false, errorMessage: '' })}
+            >
+              Retry
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
+  data,
+  title,
+  height = 500,
+  showIndexLine = true,
+  showEma = true,
+  showVolume = true,
+  indexLabel = 'Index Close',
+  markers,
+}) => {
+  if (!data || data.length === 0) {
+    console.warn('[PlotlyCandlestickChart] No data passed – rendering empty state');
+    return (
+      <div
+        style={{
+          height,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          background: '#f8f9fa',
+        }}
+      >
+        <span className="text-muted">No candle data to display</span>
+      </div>
+    );
+  }
+
+  console.log('[PlotlyCandlestickChart] Rendering', data.length, 'candles, sample:', {
+    time: data[0].time,
+    open: data[0].open,
+    high: data[0].high,
+    low: data[0].low,
+    close: data[0].close,
+  });
+
+  const times = data.map((d) =>
+    d.time instanceof Date ? d.time.toISOString() : d.time
+  );
+  const opens = data.map((d) => d.open);
+  const highs = data.map((d) => d.high);
+  const lows = data.map((d) => d.low);
+  const closes = data.map((d) => d.close);
+  const volumes = data.map((d) => d.volume ?? 0);
+  const ema5 = data.map((d) => (d.ema5 != null ? d.ema5 : null));
+  const indexCloses = data.map((d) =>
+    d.indexClose != null && !Number.isNaN(d.indexClose) ? d.indexClose : null
+  );
+
+  const traces: any[] = [
+    {
+      x: times,
+      open: opens,
+      high: highs,
+      low: lows,
+      close: closes,
+      type: 'candlestick',
+      name: 'Price',
+      yaxis: 'y',
+    },
+  ];
+
+  if (showEma && ema5.some((v) => v != null)) {
+    traces.push({
+      x: times,
+      y: ema5,
+      type: 'scatter',
+      mode: 'lines',
+      name: 'EMA 5',
+      line: { color: '#ffc107', width: 2 },
+      yaxis: 'y',
+      connectgaps: false,
+    });
+  }
+
+  if (showIndexLine && indexCloses.some((v) => v != null)) {
+    traces.push({
+      x: times,
+      y: indexCloses,
+      type: 'scatter',
+      mode: 'lines',
+      name: indexLabel,
+      line: { color: '#9333ea', width: 2, dash: 'dot' },
+      yaxis: 'y',
+      connectgaps: true,
+    });
+  }
+
+  if (showVolume && volumes.some((v) => v > 0)) {
+    traces.push({
+      x: times,
+      y: volumes,
+      type: 'bar',
+      name: 'Volume',
+      marker: { color: '#8884d8' },
+      yaxis: 'y2',
+      opacity: 0.4,
+    });
+  }
+
+  if (markers && markers.length > 0) {
+    const buyMarkers = markers.filter((m) => m.action === 'entry');
+    const sellMarkers = markers.filter((m) => m.action === 'exit');
+
+    if (buyMarkers.length > 0) {
+      traces.push({
+        x: buyMarkers.map((m) => m.time),
+        y: buyMarkers.map((m) => m.price),
+        type: 'scatter',
+        mode: 'markers',
+        name: 'Entry',
+        marker: {
+          symbol: 'triangle-up',
+          size: 12,
+          color: '#198754',
+          line: { width: 1, color: '#fff' },
+        },
+        text: buyMarkers.map(
+          (m) => `${m.direction.toUpperCase()} entry @ ${m.price.toFixed(2)}`,
+        ),
+        hoverinfo: 'text+x',
+        yaxis: 'y',
+      });
+    }
+
+    if (sellMarkers.length > 0) {
+      traces.push({
+        x: sellMarkers.map((m) => m.time),
+        y: sellMarkers.map((m) => m.price),
+        type: 'scatter',
+        mode: 'markers',
+        name: 'Exit',
+        marker: {
+          symbol: 'triangle-down',
+          size: 12,
+          color: '#dc3545',
+          line: { width: 1, color: '#fff' },
+        },
+        text: sellMarkers.map(
+          (m) =>
+            `${m.direction.toUpperCase()} exit @ ${m.price.toFixed(2)}${m.label ? ' | ' + m.label : ''}`,
+        ),
+        hoverinfo: 'text+x',
+        yaxis: 'y',
+      });
+    }
+  }
+
+  const hasVolume = showVolume && volumes.some((v) => v > 0);
+
+  const layout: any = {
+    title: { text: title || '' },
+    height,
+    margin: { l: 50, r: 50, t: title ? 40 : 10, b: 40 },
+    xaxis: {
+      rangeslider: { visible: false },
+      type: 'date',
+      showgrid: true,
+      gridcolor: '#e9ecef',
+    },
+    yaxis: {
+      title: { text: 'Price' },
+      domain: hasVolume ? [0.25, 1] : [0, 1],
+      showgrid: true,
+      gridcolor: '#e9ecef',
+    },
+    ...(hasVolume && {
+      yaxis2: { title: { text: 'Volume' }, domain: [0, 0.2], showgrid: false },
+    }),
+    legend: {
+      orientation: 'h',
+      x: 0,
+      y: 1.02,
+    },
+    hovermode: 'x unified',
+    dragmode: 'zoom',
+    showlegend: true,
+  };
+
+  return (
+    <ChartErrorBoundary height={height}>
+      <Plot
+        data={traces}
+        layout={layout}
+        style={{ width: '100%', height }}
+        config={{
+          responsive: true,
+          displaylogo: false,
+          modeBarButtonsToRemove: ['autoScale2d', 'lasso2d', 'select2d'],
+        }}
+      />
+    </ChartErrorBoundary>
+  );
+};
+
+export default PlotlyCandlestickChart;

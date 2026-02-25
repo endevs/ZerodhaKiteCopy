@@ -1,0 +1,587 @@
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import PlotlyCandlestickChart, { PlotlyCandlePoint, TradeMarker } from './PlotlyCandlestickChart';
+import { Plot } from '../lib/plotly-finance';
+import { apiUrl } from '../config/api';
+import { useSocket } from '../hooks/useSocket';
+
+type TabKey = 'live' | 'backtest';
+
+const NIFTY_TOKEN = 256265;
+const BANKNIFTY_TOKEN = 260105;
+
+const todayStr = (): string => new Date().toISOString().split('T')[0];
+
+const INTERVAL_MAP: Record<number, string> = {
+  1: 'minute',
+  5: '5minute',
+  15: '15minute',
+  30: '30minute',
+};
+
+const computeEma5 = (candles: PlotlyCandlePoint[]): PlotlyCandlePoint[] => {
+  const ema: number[] = [];
+  const multiplier = 2 / (5 + 1);
+  for (let i = 0; i < candles.length; i++) {
+    if (i === 0) {
+      ema.push(candles[i].close);
+    } else {
+      ema.push((candles[i].close - ema[i - 1]) * multiplier + ema[i - 1]);
+    }
+  }
+  return candles.map((c, idx) => ({ ...c, ema5: ema[idx] ?? null }));
+};
+
+const floorToInterval = (date: Date, intervalMin: number): Date => {
+  const d = new Date(date);
+  d.setSeconds(0, 0);
+  d.setMinutes(Math.floor(d.getMinutes() / intervalMin) * intervalMin);
+  return d;
+};
+
+const daysAgo = (n: number): string => {
+  const d = new Date();
+  d.setDate(d.getDate() - n);
+  return d.toISOString().split('T')[0];
+};
+
+interface BacktestSummary {
+  total_trades: number;
+  winning_trades: number;
+  losing_trades: number;
+  win_rate: number;
+  total_pnl: number;
+  avg_pnl: number;
+  max_win: number;
+  max_loss: number;
+}
+
+interface EquityPoint {
+  timestamp: string;
+  value: number;
+}
+
+interface BacktestTrade {
+  entry_time: string;
+  entry_price: number;
+  exit_time: string;
+  exit_price: number;
+  direction: 'long' | 'short';
+  pnl: number;
+}
+
+const AdvancedChartsContent: React.FC = () => {
+  const [activeTab, setActiveTab] = useState<TabKey>('live');
+  const [selectedIndex, setSelectedIndex] = useState<'BANKNIFTY' | 'NIFTY'>('BANKNIFTY');
+  const [timeframeMinutes, setTimeframeMinutes] = useState<number>(5);
+  const [selectedDate, setSelectedDate] = useState<string>(todayStr);
+  const [showEma, setShowEma] = useState<boolean>(true);
+  const [showVolume, setShowVolume] = useState<boolean>(true);
+
+  const [rawCandles, setRawCandles] = useState<PlotlyCandlePoint[]>([]);
+  const [loading, setLoading] = useState<boolean>(false);
+  const [error, setError] = useState<string | null>(null);
+  const [warning, setWarning] = useState<string | null>(null);
+  const [isLiveStreaming, setIsLiveStreaming] = useState<boolean>(false);
+
+  // Backtest state
+  const [btFromDate, setBtFromDate] = useState<string>(daysAgo(7));
+  const [btToDate, setBtToDate] = useState<string>(todayStr());
+  const [btEmaFast, setBtEmaFast] = useState<number>(5);
+  const [btEmaSlow, setBtEmaSlow] = useState<number>(20);
+  const [btLoading, setBtLoading] = useState<boolean>(false);
+  const [btError, setBtError] = useState<string | null>(null);
+  const [btCandles, setBtCandles] = useState<PlotlyCandlePoint[]>([]);
+  const [btMarkers, setBtMarkers] = useState<TradeMarker[]>([]);
+  const [btEquity, setBtEquity] = useState<EquityPoint[]>([]);
+  const [btSummary, setBtSummary] = useState<BacktestSummary | null>(null);
+  const [btTrades, setBtTrades] = useState<BacktestTrade[]>([]);
+
+  const socket = useSocket();
+
+  const isToday = selectedDate === todayStr();
+  const instrumentToken = selectedIndex === 'NIFTY' ? NIFTY_TOKEN : BANKNIFTY_TOKEN;
+  const kiteInterval = INTERVAL_MAP[timeframeMinutes] || '5minute';
+
+  // ---------- Live candle fetching ----------
+  const fetchCandles = useCallback(async () => {
+    if (!selectedDate) return;
+    try {
+      setLoading(true);
+      setError(null);
+      setWarning(null);
+
+      const url = apiUrl(
+        `/api/plotly/index-candles?index=${selectedIndex}&date=${selectedDate}&interval=${kiteInterval}`,
+      );
+      const resp = await fetch(url, { credentials: 'include' });
+      const data = await resp.json();
+
+      if (!resp.ok) {
+        if (resp.status === 401) {
+          setError(data.error || 'Session expired or not logged in. Please log in again.');
+        } else {
+          setError(data.error || 'Failed to load index candles from Zerodha.');
+        }
+        setRawCandles([]);
+        return;
+      }
+
+      if (data.warning) setWarning(data.warning);
+
+      const candles = (data.candles || []) as Array<{
+        timestamp: string; open: number; high: number; low: number; close: number; volume?: number;
+      }>;
+
+      if (!candles.length) { setRawCandles([]); return; }
+
+      const mapped: PlotlyCandlePoint[] = candles.map((c) => ({
+        time: c.timestamp, open: c.open, high: c.high, low: c.low, close: c.close,
+        volume: c.volume ?? 0, indexClose: c.close, ema5: null,
+      }));
+
+      setRawCandles(computeEma5(mapped));
+    } catch (e: any) {
+      setError(e instanceof Error ? e.message : 'Unexpected error while loading candles.');
+      setRawCandles([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [selectedIndex, selectedDate, kiteInterval]);
+
+  useEffect(() => { fetchCandles(); }, [fetchCandles]);
+
+  // ---------- Live socket ticks ----------
+  useEffect(() => {
+    if (!isToday) { setIsLiveStreaming(false); return; }
+
+    const onConnect = () => setIsLiveStreaming(true);
+    const onDisconnect = () => setIsLiveStreaming(false);
+    const onMarketData = (msg: any) => {
+      const msgToken = msg.instrument_token;
+      const lastPrice = msg.last_price;
+      if (msgToken !== instrumentToken || lastPrice == null) return;
+
+      const tickTime = msg.timestamp ? new Date(msg.timestamp) : new Date();
+      const slotStart = floorToInterval(tickTime, timeframeMinutes);
+      const slotKey = slotStart.toISOString();
+
+      setRawCandles((prev) => {
+        const updated = [...prev];
+        const existingIdx = updated.findIndex((c) => {
+          const candleSlot = floorToInterval(new Date(c.time), timeframeMinutes);
+          return candleSlot.toISOString() === slotKey;
+        });
+        if (existingIdx >= 0) {
+          const existing = { ...updated[existingIdx] };
+          existing.high = Math.max(existing.high, lastPrice);
+          existing.low = Math.min(existing.low, lastPrice);
+          existing.close = lastPrice;
+          existing.indexClose = lastPrice;
+          updated[existingIdx] = existing;
+        } else {
+          updated.push({
+            time: slotStart.toISOString(), open: lastPrice, high: lastPrice, low: lastPrice,
+            close: lastPrice, volume: 0, indexClose: lastPrice, ema5: null,
+          });
+        }
+        return computeEma5(updated);
+      });
+    };
+
+    if (socket.connected) setIsLiveStreaming(true);
+    socket.on('connect', onConnect);
+    socket.on('disconnect', onDisconnect);
+    socket.on('market_data', onMarketData);
+    return () => {
+      socket.off('connect', onConnect);
+      socket.off('disconnect', onDisconnect);
+      socket.off('market_data', onMarketData);
+      setIsLiveStreaming(false);
+    };
+  }, [isToday, instrumentToken, timeframeMinutes, socket]);
+
+  // ---------- Backtest runner ----------
+  const runBacktest = useCallback(async () => {
+    setBtLoading(true);
+    setBtError(null);
+    setBtCandles([]);
+    setBtMarkers([]);
+    setBtEquity([]);
+    setBtSummary(null);
+    setBtTrades([]);
+
+    try {
+      const resp = await fetch(apiUrl('/api/backtest/run'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          index: selectedIndex,
+          from_date: btFromDate,
+          to_date: btToDate,
+          interval: kiteInterval,
+          strategy: 'ema_crossover',
+          ema_fast: btEmaFast,
+          ema_slow: btEmaSlow,
+        }),
+      });
+
+      const data = await resp.json();
+      if (!resp.ok) {
+        setBtError(data.message || 'Backtest failed');
+        return;
+      }
+
+      const candles: PlotlyCandlePoint[] = (data.candles || []).map((c: any) => ({
+        time: c.timestamp, open: c.open, high: c.high, low: c.low, close: c.close,
+        volume: c.volume ?? 0, indexClose: c.close, ema5: null,
+      }));
+      setBtCandles(computeEma5(candles));
+
+      const markers: TradeMarker[] = [];
+      for (const t of data.trades || []) {
+        markers.push({ time: t.entry_time, price: t.entry_price, direction: t.direction, action: 'entry' });
+        markers.push({
+          time: t.exit_time, price: t.exit_price, direction: t.direction, action: 'exit',
+          label: `P&L: ${t.pnl > 0 ? '+' : ''}${t.pnl.toFixed(2)}`,
+        });
+      }
+      setBtMarkers(markers);
+      setBtEquity(data.equity_curve || []);
+      setBtSummary(data.summary || null);
+      setBtTrades(data.trades || []);
+    } catch (e: any) {
+      setBtError(e instanceof Error ? e.message : 'Network error');
+    } finally {
+      setBtLoading(false);
+    }
+  }, [selectedIndex, btFromDate, btToDate, kiteInterval, btEmaFast, btEmaSlow]);
+
+  const chartData = useMemo(() => rawCandles, [rawCandles]);
+
+  const statusBanner = useMemo(() => {
+    if (isToday && isLiveStreaming)
+      return { text: 'Live - streaming real-time ticks from Zerodha', cls: 'alert-success' };
+    if (isToday && !isLiveStreaming)
+      return { text: "Today's candles loaded from Zerodha. Connecting for live ticks...", cls: 'alert-info' };
+    return { text: `Historical data from Zerodha for ${selectedDate}`, cls: 'alert-secondary' };
+  }, [isToday, isLiveStreaming, selectedDate]);
+
+  return (
+    <div className="container-fluid py-4">
+      <div className="card shadow-sm border-0 mb-4">
+        <div className="card-header bg-dark text-white">
+          <h4 className="card-title mb-0">
+            <i className="bi bi-bar-chart-line-fill me-2"></i>
+            Advanced Charts (Plotly + Kite)
+          </h4>
+          <small className="text-white-50">
+            Index-only candlestick charts fetched directly from Zerodha Kite API.
+          </small>
+        </div>
+        <div className="card-body">
+          {/* Tabs */}
+          <ul className="nav nav-tabs mb-3" role="tablist">
+            <li className="nav-item" role="presentation">
+              <button type="button" className={`nav-link ${activeTab === 'live' ? 'active' : ''}`}
+                onClick={() => setActiveTab('live')}>
+                <i className="bi bi-broadcast-pin me-2" />Live Trading View
+              </button>
+            </li>
+            <li className="nav-item" role="presentation">
+              <button type="button" className={`nav-link ${activeTab === 'backtest' ? 'active' : ''}`}
+                onClick={() => setActiveTab('backtest')}>
+                <i className="bi bi-clipboard-data me-2" />Backtesting View
+              </button>
+            </li>
+          </ul>
+
+          {/* ============ LIVE TAB ============ */}
+          {activeTab === 'live' && (
+            <div>
+              <div className={`alert ${statusBanner.cls} py-2 small mb-3`}>
+                <i className={`bi ${isToday && isLiveStreaming ? 'bi-broadcast' : 'bi-clock-history'} me-2`}></i>
+                {statusBanner.text}
+                {chartData.length > 0 && <span className="ms-2 fw-bold">| {chartData.length} candles loaded</span>}
+              </div>
+
+              <div className="row g-3 mb-3 align-items-end">
+                <div className="col-md-3">
+                  <label className="form-label fw-bold">Index</label>
+                  <select className="form-select" value={selectedIndex}
+                    onChange={(e) => setSelectedIndex(e.target.value === 'NIFTY' ? 'NIFTY' : 'BANKNIFTY')}>
+                    <option value="BANKNIFTY">BANKNIFTY</option>
+                    <option value="NIFTY">NIFTY 50</option>
+                  </select>
+                </div>
+                <div className="col-md-3">
+                  <label className="form-label fw-bold">Timeframe</label>
+                  <select className="form-select" value={timeframeMinutes}
+                    onChange={(e) => setTimeframeMinutes(Number(e.target.value) || 5)}>
+                    <option value={1}>1 min</option>
+                    <option value={5}>5 min (default)</option>
+                    <option value={15}>15 min</option>
+                    <option value={30}>30 min</option>
+                  </select>
+                </div>
+                <div className="col-md-3">
+                  <label className="form-label fw-bold">Trading Date</label>
+                  <input type="date" className="form-control" value={selectedDate}
+                    onChange={(e) => setSelectedDate(e.target.value)} max={todayStr()} />
+                </div>
+                <div className="col-md-3">
+                  <label className="form-label fw-bold">Indicators</label>
+                  <div className="d-flex flex-wrap gap-2">
+                    <div className="form-check form-check-inline">
+                      <input id="adv-ema" className="form-check-input" type="checkbox" checked={showEma}
+                        onChange={(e) => setShowEma(e.target.checked)} />
+                      <label className="form-check-label" htmlFor="adv-ema">EMA 5</label>
+                    </div>
+                    <div className="form-check form-check-inline">
+                      <input id="adv-volume" className="form-check-input" type="checkbox" checked={showVolume}
+                        onChange={(e) => setShowVolume(e.target.checked)} />
+                      <label className="form-check-label" htmlFor="adv-volume">Volume</label>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {error && <div className="alert alert-danger py-2 small mb-2">{error}</div>}
+              {warning && !error && <div className="alert alert-warning py-2 small mb-2">{warning}</div>}
+              {loading && (
+                <div className="text-center text-muted small mb-2">
+                  <span className="spinner-border spinner-border-sm me-2" role="status"></span>
+                  Fetching candles from Zerodha...
+                </div>
+              )}
+
+              <PlotlyCandlestickChart
+                data={chartData}
+                title={`${selectedIndex} – ${kiteInterval} candles${isToday ? ' (Live)' : ''}`}
+                height={520}
+                showIndexLine={false}
+                showEma={showEma}
+                showVolume={showVolume}
+                indexLabel={`${selectedIndex} Close`}
+              />
+            </div>
+          )}
+
+          {/* ============ BACKTEST TAB ============ */}
+          {activeTab === 'backtest' && (
+            <div>
+              {/* Controls row */}
+              <div className="row g-3 mb-3 align-items-end">
+                <div className="col-md-2">
+                  <label className="form-label fw-bold">Index</label>
+                  <select className="form-select" value={selectedIndex}
+                    onChange={(e) => setSelectedIndex(e.target.value === 'NIFTY' ? 'NIFTY' : 'BANKNIFTY')}>
+                    <option value="BANKNIFTY">BANKNIFTY</option>
+                    <option value="NIFTY">NIFTY 50</option>
+                  </select>
+                </div>
+                <div className="col-md-2">
+                  <label className="form-label fw-bold">From Date</label>
+                  <input type="date" className="form-control" value={btFromDate}
+                    onChange={(e) => setBtFromDate(e.target.value)} max={todayStr()} />
+                </div>
+                <div className="col-md-2">
+                  <label className="form-label fw-bold">To Date</label>
+                  <input type="date" className="form-control" value={btToDate}
+                    onChange={(e) => setBtToDate(e.target.value)} max={todayStr()} />
+                </div>
+                <div className="col-md-1">
+                  <label className="form-label fw-bold">Fast EMA</label>
+                  <input type="number" className="form-control" value={btEmaFast} min={2} max={50}
+                    onChange={(e) => setBtEmaFast(Number(e.target.value) || 5)} />
+                </div>
+                <div className="col-md-1">
+                  <label className="form-label fw-bold">Slow EMA</label>
+                  <input type="number" className="form-control" value={btEmaSlow} min={5} max={200}
+                    onChange={(e) => setBtEmaSlow(Number(e.target.value) || 20)} />
+                </div>
+                <div className="col-md-2">
+                  <label className="form-label fw-bold">Timeframe</label>
+                  <select className="form-select" value={timeframeMinutes}
+                    onChange={(e) => setTimeframeMinutes(Number(e.target.value) || 5)}>
+                    <option value={1}>1 min</option>
+                    <option value={5}>5 min</option>
+                    <option value={15}>15 min</option>
+                    <option value={30}>30 min</option>
+                  </select>
+                </div>
+                <div className="col-md-2 d-grid">
+                  <label className="form-label">&nbsp;</label>
+                  <button className="btn btn-primary" onClick={runBacktest} disabled={btLoading}>
+                    {btLoading ? (
+                      <><span className="spinner-border spinner-border-sm me-2" role="status"></span>Running...</>
+                    ) : (
+                      <><i className="bi bi-play-fill me-1"></i>Run Backtest</>
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              {btError && <div className="alert alert-danger py-2 small mb-2">{btError}</div>}
+
+              {/* Summary cards */}
+              {btSummary && (
+                <div className="row g-2 mb-3">
+                  <div className="col">
+                    <div className="card text-center border-0 bg-light">
+                      <div className="card-body py-2">
+                        <div className="text-muted small">Trades</div>
+                        <div className="fw-bold">{btSummary.total_trades}</div>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="col">
+                    <div className="card text-center border-0 bg-light">
+                      <div className="card-body py-2">
+                        <div className="text-muted small">Win Rate</div>
+                        <div className="fw-bold">{btSummary.win_rate}%</div>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="col">
+                    <div className="card text-center border-0 bg-light">
+                      <div className="card-body py-2">
+                        <div className="text-muted small">Total P&L</div>
+                        <div className={`fw-bold ${btSummary.total_pnl >= 0 ? 'text-success' : 'text-danger'}`}>
+                          {btSummary.total_pnl >= 0 ? '+' : ''}{btSummary.total_pnl.toFixed(2)}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="col">
+                    <div className="card text-center border-0 bg-light">
+                      <div className="card-body py-2">
+                        <div className="text-muted small">Avg P&L</div>
+                        <div className={`fw-bold ${btSummary.avg_pnl >= 0 ? 'text-success' : 'text-danger'}`}>
+                          {btSummary.avg_pnl >= 0 ? '+' : ''}{btSummary.avg_pnl.toFixed(2)}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="col">
+                    <div className="card text-center border-0 bg-light">
+                      <div className="card-body py-2">
+                        <div className="text-muted small">Max Win</div>
+                        <div className="fw-bold text-success">+{btSummary.max_win.toFixed(2)}</div>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="col">
+                    <div className="card text-center border-0 bg-light">
+                      <div className="card-body py-2">
+                        <div className="text-muted small">Max Loss</div>
+                        <div className="fw-bold text-danger">{btSummary.max_loss.toFixed(2)}</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Chart with markers */}
+              {btCandles.length > 0 && (
+                <>
+                  <PlotlyCandlestickChart
+                    data={btCandles}
+                    title={`${selectedIndex} – EMA(${btEmaFast}/${btEmaSlow}) Backtest`}
+                    height={520}
+                    showIndexLine={false}
+                    showEma={showEma}
+                    showVolume={showVolume}
+                    indexLabel={`${selectedIndex} Close`}
+                    markers={btMarkers}
+                  />
+
+                  {/* Equity curve */}
+                  {btEquity.length > 0 && (
+                    <div className="mt-3">
+                      <Plot
+                        data={[
+                          {
+                            x: btEquity.map((e) => e.timestamp),
+                            y: btEquity.map((e) => e.value),
+                            type: 'scatter' as const,
+                            mode: 'lines' as const,
+                            name: 'Equity Curve',
+                            line: { color: '#0d6efd', width: 2 },
+                            fill: 'tozeroy',
+                            fillcolor: 'rgba(13,110,253,0.08)',
+                          },
+                        ]}
+                        layout={{
+                          title: { text: 'Equity Curve (Cumulative P&L)' },
+                          height: 250,
+                          margin: { l: 50, r: 30, t: 35, b: 40 },
+                          xaxis: { type: 'date' as const, showgrid: true, gridcolor: '#e9ecef' },
+                          yaxis: { title: { text: 'P&L' }, showgrid: true, gridcolor: '#e9ecef', zeroline: true, zerolinecolor: '#999' },
+                          hovermode: 'x unified' as const,
+                          showlegend: false,
+                        }}
+                        style={{ width: '100%', height: 250 }}
+                        config={{ responsive: true, displaylogo: false }}
+                      />
+                    </div>
+                  )}
+
+                  {/* Trade log table */}
+                  {btTrades.length > 0 && (
+                    <div className="mt-3">
+                      <h6 className="fw-bold">Trade Log</h6>
+                      <div className="table-responsive" style={{ maxHeight: 300 }}>
+                        <table className="table table-sm table-striped table-hover mb-0">
+                          <thead className="table-dark">
+                            <tr>
+                              <th>#</th>
+                              <th>Direction</th>
+                              <th>Entry Time</th>
+                              <th>Entry Price</th>
+                              <th>Exit Time</th>
+                              <th>Exit Price</th>
+                              <th>P&L</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {btTrades.map((t, idx) => (
+                              <tr key={idx}>
+                                <td>{idx + 1}</td>
+                                <td>
+                                  <span className={`badge ${t.direction === 'long' ? 'bg-success' : 'bg-danger'}`}>
+                                    {t.direction.toUpperCase()}
+                                  </span>
+                                </td>
+                                <td className="small">{new Date(t.entry_time).toLocaleString()}</td>
+                                <td>{t.entry_price.toFixed(2)}</td>
+                                <td className="small">{new Date(t.exit_time).toLocaleString()}</td>
+                                <td>{t.exit_price.toFixed(2)}</td>
+                                <td className={`fw-bold ${t.pnl >= 0 ? 'text-success' : 'text-danger'}`}>
+                                  {t.pnl >= 0 ? '+' : ''}{t.pnl.toFixed(2)}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+
+              {!btLoading && btCandles.length === 0 && !btError && (
+                <div className="text-center text-muted py-5">
+                  <i className="bi bi-clipboard-data fs-1 d-block mb-2"></i>
+                  Select parameters and click <strong>Run Backtest</strong> to see results.
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default AdvancedChartsContent;
