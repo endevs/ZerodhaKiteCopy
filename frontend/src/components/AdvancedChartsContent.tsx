@@ -135,6 +135,8 @@ const AdvancedChartsContent: React.FC = () => {
   const [btRsiOverbought, setBtRsiOverbought] = useState<number>(70);
   const [btRsiOversold, setBtRsiOversold] = useState<number>(30);
   const [btRsi, setBtRsi] = useState<(number | null)[]>([]);
+  const [btAdx, setBtAdx] = useState<(number | null)[]>([]);
+  const [showPnlDetailModal, setShowPnlDetailModal] = useState<boolean>(false);
 
   // Live tab state
   const [liveRsiOverbought, setLiveRsiOverbought] = useState<number>(70);
@@ -142,6 +144,7 @@ const AdvancedChartsContent: React.FC = () => {
   const [liveEvents, setLiveEvents] = useState<MountainEvent[]>([]);
   const [liveTrades, setLiveTrades] = useState<BacktestTrade[]>([]);
   const [liveRsi, setLiveRsi] = useState<(number | null)[]>([]);
+  const [liveAdx, setLiveAdx] = useState<(number | null)[]>([]);
   const [liveMarkers, setLiveMarkers] = useState<TradeMarker[]>([]);
   const [lastStrategyRunTime, setLastStrategyRunTime] = useState<string | null>(null);
   const [liveLots, setLiveLots] = useState<number>(1);
@@ -278,6 +281,7 @@ const AdvancedChartsContent: React.FC = () => {
       });
       setLiveEvents(result.events);
       setLiveRsi(result.indicators.rsi14);
+      setLiveAdx(result.indicators.adx14);
       setLiveTrades(result.trades.map((t) => ({
         entry_time: t.entryTime,
         entry_price: t.entryPrice,
@@ -449,6 +453,7 @@ const AdvancedChartsContent: React.FC = () => {
     setBtTrades([]);
     setBtEvents([]);
     setBtRsi([]);
+    setBtAdx([]);
 
     try {
       // Fetch extra warmup days so RSI(14) is available from the first candle
@@ -499,6 +504,7 @@ const AdvancedChartsContent: React.FC = () => {
         const candles = allCandles.slice(startIdx);
         const trimmedEma5 = result.indicators.ema5.slice(startIdx);
         const trimmedRsi14 = result.indicators.rsi14.slice(startIdx);
+        const trimmedAdx14 = result.indicators.adx14.slice(startIdx);
 
         const withEma = candles.map((c, idx) => ({
           ...c,
@@ -506,6 +512,7 @@ const AdvancedChartsContent: React.FC = () => {
         }));
         setBtCandles(withEma);
         setBtRsi(trimmedRsi14);
+        setBtAdx(trimmedAdx14);
 
         // Filter trades/events to only those within the display range
         const displayFrom = candles.length > 0 ? (typeof candles[0].time === 'string' ? candles[0].time : (candles[0].time as Date).toISOString()) : '';
@@ -595,6 +602,17 @@ const AdvancedChartsContent: React.FC = () => {
     });
     return indices.map((i) => liveRsi[i] ?? null);
   }, [activeTab, selectedDate, rawCandles, liveRsi, todayPrefix]);
+
+  const liveAdxDisplay = useMemo(() => {
+    if (activeTab !== 'live' || selectedDate !== todayPrefix || rawCandles.length === 0 || liveAdx.length === 0)
+      return liveAdx;
+    const indices: number[] = [];
+    rawCandles.forEach((c, i) => {
+      const t = typeof c.time === 'string' ? c.time : (c.time as Date).toISOString();
+      if (t.startsWith(todayPrefix)) indices.push(i);
+    });
+    return indices.map((i) => liveAdx[i] ?? null);
+  }, [activeTab, selectedDate, rawCandles, liveAdx, todayPrefix]);
 
   const liveMarkersDisplay = useMemo(() => {
     if (activeTab !== 'live' || selectedDate !== todayPrefix) return liveMarkers;
@@ -761,6 +779,7 @@ const AdvancedChartsContent: React.FC = () => {
                 rsiData={liveRsiDisplay}
                 rsiOverbought={liveRsiOverbought}
                 rsiOversold={liveRsiOversold}
+                adxData={liveAdxDisplay}
                 indexLabel={`${selectedIndex} Close`}
                 markers={isToday ? liveMarkersDisplay : undefined}
               />
@@ -1357,12 +1376,20 @@ const AdvancedChartsContent: React.FC = () => {
                     </div>
                   </div>
                   <div className="col">
-                    <div className="card text-center border-0 bg-light">
+                    <div
+                      className={`card text-center border-0 bg-light ${btTrades.length > 0 ? 'cursor-pointer' : ''}`}
+                      style={btTrades.length > 0 ? { cursor: 'pointer' } : undefined}
+                      onClick={btTrades.length > 0 ? () => setShowPnlDetailModal(true) : undefined}
+                      role={btTrades.length > 0 ? 'button' : undefined}
+                      tabIndex={btTrades.length > 0 ? 0 : undefined}
+                      onKeyDown={btTrades.length > 0 ? (e) => e.key === 'Enter' && setShowPnlDetailModal(true) : undefined}
+                    >
                       <div className="card-body py-2">
                         <div className="text-muted small">Total P&L</div>
                         <div className={`fw-bold ${btSummary.total_pnl >= 0 ? 'text-success' : 'text-danger'}`}>
                           {btSummary.total_pnl >= 0 ? '+' : ''}{btSummary.total_pnl.toFixed(2)}
                         </div>
+                        {btTrades.length > 0 && <div className="text-muted small mt-1">Click for details</div>}
                       </div>
                     </div>
                   </div>
@@ -1395,6 +1422,103 @@ const AdvancedChartsContent: React.FC = () => {
                 </div>
               )}
 
+              {/* P&L Trade Details Modal */}
+              {showPnlDetailModal && btTrades.length > 0 && btSummary && (
+                <div className="modal fade show d-block" style={{ backgroundColor: 'rgba(0,0,0,0.5)' }} tabIndex={-1} onClick={() => setShowPnlDetailModal(false)}>
+                  <div className="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable" onClick={(e) => e.stopPropagation()}>
+                    <div className="modal-content">
+                      <div className="modal-header">
+                        <h5 className="modal-title">Trade Details</h5>
+                        <div className="me-3">
+                          <span className={`fw-bold ${btSummary.total_pnl >= 0 ? 'text-success' : 'text-danger'}`}>
+                            Total P&L: {btSummary.total_pnl >= 0 ? '+' : ''}{btSummary.total_pnl.toFixed(2)}
+                          </span>
+                        </div>
+                        <button type="button" className="btn-close" aria-label="Close" onClick={() => setShowPnlDetailModal(false)}></button>
+                      </div>
+                      <div className="modal-body">
+                        {(() => {
+                          const byDate = btTrades.reduce<Record<string, BacktestTrade[]>>((acc, t) => {
+                            const d = new Date(t.entry_time).toLocaleDateString();
+                            if (!acc[d]) acc[d] = [];
+                            acc[d].push(t);
+                            return acc;
+                          }, {});
+                          const dates = Object.keys(byDate).sort((a, b) => new Date(a).getTime() - new Date(b).getTime());
+                          return (
+                            <>
+                              {dates.map((dateStr) => {
+                                const trades = byDate[dateStr];
+                                const dayPnl = trades.reduce((s, t) => s + t.pnl, 0);
+                                return (
+                                  <div key={dateStr} className="mb-4">
+                                    <h6 className="fw-bold d-flex justify-content-between align-items-center">
+                                      <span>{dateStr}</span>
+                                      <span className={`${dayPnl >= 0 ? 'text-success' : 'text-danger'}`}>
+                                        Day P&L: {dayPnl >= 0 ? '+' : ''}{dayPnl.toFixed(2)}
+                                      </span>
+                                    </h6>
+                                    <div className="table-responsive">
+                                      <table className="table table-sm table-striped table-hover mb-0">
+                                        <thead className="table-dark">
+                                          <tr>
+                                            <th>#</th>
+                                            <th>Direction</th>
+                                            <th>Entry Time</th>
+                                            <th>Entry Price</th>
+                                            <th>Exit Time</th>
+                                            <th>Exit Price</th>
+                                            {btStrategy === 'mountain' && <th>Exit Reason</th>}
+                                            <th>P&L</th>
+                                          </tr>
+                                        </thead>
+                                        <tbody>
+                                          {trades.map((t, idx) => (
+                                            <tr key={idx}>
+                                              <td>{idx + 1}</td>
+                                              <td>
+                                                <span className={`badge ${t.direction === 'long' ? 'bg-success' : 'bg-danger'}`}>
+                                                  {t.direction.toUpperCase()}
+                                                </span>
+                                              </td>
+                                              <td className="small">{new Date(t.entry_time).toLocaleString()}</td>
+                                              <td>{t.entry_price.toFixed(2)}</td>
+                                              <td className="small">{new Date(t.exit_time).toLocaleString()}</td>
+                                              <td>{t.exit_price.toFixed(2)}</td>
+                                              {btStrategy === 'mountain' && (
+                                                <td>
+                                                  <span className={`badge ${
+                                                    t.exit_reason === 'INDEX_STOP' ? 'bg-danger' :
+                                                    t.exit_reason === 'INDEX_TARGET' ? 'bg-success' :
+                                                    'bg-secondary'
+                                                  }`}>
+                                                    {t.exit_reason}
+                                                  </span>
+                                                </td>
+                                              )}
+                                              <td className={`fw-bold ${t.pnl >= 0 ? 'text-success' : 'text-danger'}`}>
+                                                {t.pnl >= 0 ? '+' : ''}{t.pnl.toFixed(2)}
+                                              </td>
+                                            </tr>
+                                          ))}
+                                        </tbody>
+                                      </table>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </>
+                          );
+                        })()}
+                      </div>
+                      <div className="modal-footer">
+                        <button type="button" className="btn btn-secondary" onClick={() => setShowPnlDetailModal(false)}>Close</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {/* Chart with markers */}
               {btCandles.length > 0 && (
                 <>
@@ -1409,6 +1533,7 @@ const AdvancedChartsContent: React.FC = () => {
                     rsiData={btRsi}
                     rsiOverbought={btRsiOverbought}
                     rsiOversold={btRsiOversold}
+                    adxData={btAdx}
                     indexLabel={`${selectedIndex} Close`}
                     markers={btMarkers}
                   />

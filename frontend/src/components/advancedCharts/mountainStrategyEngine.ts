@@ -16,7 +16,7 @@
  */
 
 import { PlotlyCandlePoint } from '../PlotlyCandlestickChart';
-import { computeEMA, computeRSI } from './mountainIndicators';
+import { computeEMA, computeRSI, computeADX } from './mountainIndicators';
 import {
   MountainSignal,
   MountainEvent,
@@ -76,8 +76,11 @@ export function runMountainBacktest(
   const rsiOverboughtThreshold = config?.rsiOverbought ?? 70;
 
   const closes = candles.map((c) => c.close);
+  const highs = candles.map((c) => c.high);
+  const lows = candles.map((c) => c.low);
   const ema5 = computeEMA(closes, EMA_PERIOD);
   const rsi14 = computeRSI(closes, RSI_PERIOD);
+  const adx14 = computeADX(highs, lows, closes, 14);
 
   const events: MountainEvent[] = [];
   const trades: MountainTrade[] = [];
@@ -268,7 +271,7 @@ export function runMountainBacktest(
     }
   }
 
-  return { trades, events, summary: buildSummary(trades), equityCurve, indicators: { ema5, rsi14 } };
+  return { trades, events, summary: buildSummary(trades), equityCurve, indicators: { ema5, rsi14, adx14 } };
 }
 
 // ─── Pure helper functions ─────────────────────────────────────────────────────
@@ -412,6 +415,6 @@ function emptyResult(): MountainBacktestResult {
     summary: { total_trades: 0, winning_trades: 0, losing_trades: 0, win_rate: 0,
       total_pnl: 0, avg_pnl: 0, max_win: 0, max_loss: 0, profit_factor: 0 },
     equityCurve: [],
-    indicators: { ema5: [], rsi14: [] },
+    indicators: { ema5: [], rsi14: [], adx14: [] },
   };
 }

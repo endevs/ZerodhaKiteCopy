@@ -31,6 +31,7 @@ interface PlotlyCandlestickChartProps {
   rsiData?: (number | null)[];
   rsiOverbought?: number;
   rsiOversold?: number;
+  adxData?: (number | null)[];
   indexLabel?: string;
   markers?: TradeMarker[];
 }
@@ -97,10 +98,12 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
   rsiData,
   rsiOverbought = 70,
   rsiOversold = 30,
+  adxData,
   indexLabel = 'Index Close',
   markers,
 }) => {
   const hasRsi = showRsi && rsiData && rsiData.some((v) => v != null);
+  const hasAdx = showRsi && adxData && adxData.some((v) => v != null);
   const hasVolume = showVolume && (data?.some((d) => (d.volume ?? 0) > 0) ?? false);
 
   const traces = useMemo(() => {
@@ -204,6 +207,20 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
     });
   }
 
+  if (hasAdx && adxData) {
+    const alignedAdx = times.map((_, i) => adxData[i] ?? null);
+    out.push({
+      x: times,
+      y: alignedAdx,
+      type: 'scatter',
+      mode: 'lines',
+      name: 'ADX 14',
+      line: { color: '#9333ea', width: 1.5 },
+      yaxis: 'y3',
+      connectgaps: false,
+    });
+  }
+
   if (markers && markers.length > 0) {
     const buyMarkers = markers.filter((m) => m.action === 'entry');
     const sellMarkers = markers.filter((m) => m.action === 'exit');
@@ -275,7 +292,7 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
   }
 
   return out;
-  }, [data, showEma, showVolume, showRsi, showIndexLine, rsiData, rsiOverbought, rsiOversold, indexLabel, markers, hasRsi]);
+  }, [data, showEma, showVolume, showRsi, showIndexLine, rsiData, rsiOverbought, rsiOversold, adxData, indexLabel, markers, hasRsi, hasAdx]);
 
   const chartHeight = hasRsi ? Math.max(height, 620) : height;
 
@@ -316,7 +333,7 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
     }),
     ...(hasRsi && {
       yaxis3: {
-        title: { text: 'RSI' },
+        title: { text: hasAdx ? 'RSI / ADX' : 'RSI' },
         domain: hasVolume ? [0.15, 0.4] : [0, 0.2],
         range: [0, 100],
         autorange: false,
@@ -334,7 +351,7 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
     dragmode: 'zoom',
     showlegend: true,
   };
-  }, [data.length, hasRsi, hasVolume, height, title]);
+  }, [data.length, hasRsi, hasAdx, hasVolume, height, title]);
 
   if (!data || data.length === 0) {
     return (

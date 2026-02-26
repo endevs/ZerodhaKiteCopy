@@ -87,5 +87,6 @@ export interface MountainBacktestResult {
   indicators: {
     ema5: (number | null)[];
     rsi14: (number | null)[];
+    adx14: (number | null)[];
   };
 }
