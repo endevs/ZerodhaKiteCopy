@@ -153,6 +153,10 @@ const AdvancedChartsContent: React.FC = () => {
   const [positionsForConfirm, setPositionsForConfirm] = useState<{ tradingsymbol: string; quantity: number; product?: string; exchange?: string }[]>([]);
   const [entryExitLoading, setEntryExitLoading] = useState<{ entry: boolean; exit: boolean }>({ entry: false, exit: false });
   const [liveTradeMessage, setLiveTradeMessage] = useState<{ text: string; type: 'success' | 'error' | 'info' } | null>(null);
+  const [autoPlaceOrders, setAutoPlaceOrders] = useState<boolean>(false);
+  const [autoTradeActiveOnServer, setAutoTradeActiveOnServer] = useState<boolean>(false);
+  const [autoTradeLoading, setAutoTradeLoading] = useState<boolean>(false);
+  const [autoTradeLockedRsi, setAutoTradeLockedRsi] = useState<{ ob: number; os: number } | null>(null);
   const liveStrategyDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const liveStrategyDataRef = useRef<{
     rawCandles: PlotlyCandlePoint[];
@@ -352,6 +356,35 @@ const AdvancedChartsContent: React.FC = () => {
       fetchOrders();
       fetchPositions();
     }, 15000);
+    return () => clearInterval(interval);
+  }, [activeTab, selectedDate]);
+
+  // ---------- Auto-trade status (when Live tab active) ----------
+  useEffect(() => {
+    if (activeTab !== 'live' || selectedDate !== todayStr()) return;
+    const fetchStatus = async () => {
+      try {
+        const res = await fetch(apiUrl('/api/mountain_signal/live/auto_trade_status'), { credentials: 'include' });
+        const data = await res.json();
+        if (data.status === 'success' && data.active) {
+          setAutoTradeActiveOnServer(true);
+          setAutoPlaceOrders(true);
+          setAutoTradeLockedRsi(
+            data.rsiOverbought != null && data.rsiOversold != null
+              ? { ob: data.rsiOverbought, os: data.rsiOversold }
+              : null
+          );
+        } else {
+          setAutoTradeActiveOnServer(false);
+          setAutoPlaceOrders(false);
+          setAutoTradeLockedRsi(null);
+        }
+      } catch {
+        setAutoTradeActiveOnServer(false);
+      }
+    };
+    fetchStatus();
+    const interval = setInterval(fetchStatus, 10000);
     return () => clearInterval(interval);
   }, [activeTab, selectedDate]);
 
@@ -698,6 +731,13 @@ const AdvancedChartsContent: React.FC = () => {
                       {lastStrategyRunTime ? `Last signal run: ${lastStrategyRunTime}` : 'Strategy will run on candle update'}
                     </span>
                   </div>
+                  {autoTradeActiveOnServer && (
+                    <div className="col-12">
+                      <span className="text-muted small">
+                        RSI changes only affect chart display. Stop and restart auto-trade to apply new parameters.
+                      </span>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -814,6 +854,65 @@ const AdvancedChartsContent: React.FC = () => {
                       <input type="number" className="form-control form-control-sm" style={{ width: 70 }}
                         value={liveLots} min={1} max={10}
                         onChange={(e) => setLiveLots(Math.max(1, Number(e.target.value) || 1))} />
+                    </div>
+                    <div className="col-auto d-flex align-items-end">
+                      <div className="form-check form-switch mb-2">
+                        <input
+                          className="form-check-input"
+                          type="checkbox"
+                          id="autoTradeToggle"
+                          checked={autoPlaceOrders}
+                          disabled={autoTradeLoading}
+                          onChange={async (e) => {
+                            const enabled = e.target.checked;
+                            setAutoTradeLoading(true);
+                            setLiveTradeMessage(null);
+                            try {
+                              const url = apiUrl(enabled ? '/api/mountain_signal/live/start_auto_trade' : '/api/mountain_signal/live/stop_auto_trade');
+                              const res = await fetch(url, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                credentials: 'include',
+                                body: JSON.stringify(enabled ? {
+                                  instrument: selectedIndex,
+                                  lots: liveLots,
+                                  rsiOverbought: liveRsiOverbought,
+                                  rsiOversold: liveRsiOversold,
+                                } : {}),
+                              });
+                              const data = await res.json();
+                              if (res.status === 401 || data.authExpired) {
+                                setLiveTradeMessage({ text: 'Session expired. Please log in again.', type: 'error' });
+                              } else if (data.status === 'success') {
+                                setAutoPlaceOrders(enabled);
+                                setAutoTradeActiveOnServer(enabled);
+                                if (enabled && data.rsiOverbought != null && data.rsiOversold != null) {
+                                  setAutoTradeLockedRsi({ ob: data.rsiOverbought, os: data.rsiOversold });
+                                } else if (!enabled) {
+                                  setAutoTradeLockedRsi(null);
+                                }
+                                setLiveTradeMessage({ text: data.message || (enabled ? 'Auto-trade started.' : 'Auto-trade stopped.'), type: 'success' });
+                              } else {
+                                setLiveTradeMessage({ text: data.message || 'Request failed.', type: 'error' });
+                                if (enabled) setAutoPlaceOrders(false);
+                              }
+                            } catch (err) {
+                              setLiveTradeMessage({ text: (err as Error).message || 'Request failed.', type: 'error' });
+                              if (enabled) setAutoPlaceOrders(false);
+                            } finally {
+                              setAutoTradeLoading(false);
+                            }
+                          }}
+                        />
+                        <label className="form-check-label small" htmlFor="autoTradeToggle">
+                          Auto-trade (runs on server – continues when you switch away)
+                        </label>
+                      </div>
+                      {autoTradeActiveOnServer && (
+                        <span className="badge bg-success ms-2 mb-2">
+                          Active{autoTradeLockedRsi ? ` (RSI OB: ${autoTradeLockedRsi.ob}, OS: ${autoTradeLockedRsi.os})` : ''}
+                        </span>
+                      )}
                     </div>
                     <div className="col-auto">
                       <button

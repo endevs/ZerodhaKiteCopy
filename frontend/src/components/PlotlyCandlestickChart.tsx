@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import { Plot } from '../lib/plotly-finance';
 
 export interface PlotlyCandlePoint {
@@ -100,59 +100,39 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
   indexLabel = 'Index Close',
   markers,
 }) => {
-  if (!data || data.length === 0) {
-    console.warn('[PlotlyCandlestickChart] No data passed – rendering empty state');
-    return (
-      <div
-        style={{
-          height,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          background: '#f8f9fa',
-        }}
-      >
-        <span className="text-muted">No candle data to display</span>
-      </div>
+  const hasRsi = showRsi && rsiData && rsiData.some((v) => v != null);
+  const hasVolume = showVolume && (data?.some((d) => (d.volume ?? 0) > 0) ?? false);
+
+  const traces = useMemo(() => {
+    if (!data || data.length === 0) return [];
+    const times = data.map((d) =>
+      d.time instanceof Date ? d.time.toISOString() : d.time
     );
-  }
+    const opens = data.map((d) => d.open);
+    const highs = data.map((d) => d.high);
+    const lows = data.map((d) => d.low);
+    const closes = data.map((d) => d.close);
+    const volumes = data.map((d) => d.volume ?? 0);
+    const ema5 = data.map((d) => (d.ema5 != null ? d.ema5 : null));
+    const indexCloses = data.map((d) =>
+      d.indexClose != null && !Number.isNaN(d.indexClose) ? d.indexClose : null
+    );
 
-  console.log('[PlotlyCandlestickChart] Rendering', data.length, 'candles, sample:', {
-    time: data[0].time,
-    open: data[0].open,
-    high: data[0].high,
-    low: data[0].low,
-    close: data[0].close,
-  });
+    const out: any[] = [
+      {
+        x: times,
+        open: opens,
+        high: highs,
+        low: lows,
+        close: closes,
+        type: 'candlestick',
+        name: 'Price',
+        yaxis: 'y',
+      },
+    ];
 
-  const times = data.map((d) =>
-    d.time instanceof Date ? d.time.toISOString() : d.time
-  );
-  const opens = data.map((d) => d.open);
-  const highs = data.map((d) => d.high);
-  const lows = data.map((d) => d.low);
-  const closes = data.map((d) => d.close);
-  const volumes = data.map((d) => d.volume ?? 0);
-  const ema5 = data.map((d) => (d.ema5 != null ? d.ema5 : null));
-  const indexCloses = data.map((d) =>
-    d.indexClose != null && !Number.isNaN(d.indexClose) ? d.indexClose : null
-  );
-
-  const traces: any[] = [
-    {
-      x: times,
-      open: opens,
-      high: highs,
-      low: lows,
-      close: closes,
-      type: 'candlestick',
-      name: 'Price',
-      yaxis: 'y',
-    },
-  ];
-
-  if (showEma && ema5.some((v) => v != null)) {
-    traces.push({
+    if (showEma && ema5.some((v) => v != null)) {
+      out.push({
       x: times,
       y: ema5,
       type: 'scatter',
@@ -165,7 +145,7 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
   }
 
   if (showIndexLine && indexCloses.some((v) => v != null)) {
-    traces.push({
+    out.push({
       x: times,
       y: indexCloses,
       type: 'scatter',
@@ -178,7 +158,7 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
   }
 
   if (showVolume && volumes.some((v) => v > 0)) {
-    traces.push({
+    out.push({
       x: times,
       y: volumes,
       type: 'bar',
@@ -189,11 +169,10 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
     });
   }
 
-  const hasRsi = showRsi && rsiData && rsiData.some((v) => v != null);
   if (hasRsi && rsiData) {
     // Ensure RSI length matches times (chartData) to prevent misaligned traces
     const alignedRsi = times.map((_, i) => rsiData[i] ?? null);
-    traces.push({
+    out.push({
       x: times,
       y: alignedRsi,
       type: 'scatter',
@@ -203,7 +182,7 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
       yaxis: 'y3',
       connectgaps: false,
     });
-    traces.push({
+    out.push({
       x: [times[0], times[times.length - 1]],
       y: [rsiOverbought, rsiOverbought],
       type: 'scatter',
@@ -213,7 +192,7 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
       yaxis: 'y3',
       showlegend: true,
     });
-    traces.push({
+    out.push({
       x: [times[0], times[times.length - 1]],
       y: [rsiOversold, rsiOversold],
       type: 'scatter',
@@ -231,7 +210,7 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
     const signalMarkers = markers.filter((m) => m.action === 'signal');
 
     if (buyMarkers.length > 0) {
-      traces.push({
+      out.push({
         x: buyMarkers.map((m) => m.time),
         y: buyMarkers.map((m) => m.price),
         type: 'scatter',
@@ -252,7 +231,7 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
     }
 
     if (sellMarkers.length > 0) {
-      traces.push({
+      out.push({
         x: sellMarkers.map((m) => m.time),
         y: sellMarkers.map((m) => m.price),
         type: 'scatter',
@@ -274,7 +253,7 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
     }
 
     if (signalMarkers.length > 0) {
-      traces.push({
+      out.push({
         x: signalMarkers.map((m) => m.time),
         y: signalMarkers.map((m) => m.price),
         type: 'scatter',
@@ -295,22 +274,24 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
     }
   }
 
-  const hasVolume = showVolume && volumes.some((v) => v > 0);
-
-  // Compute domain splits based on which sub-panels are active
-  let priceDomainBottom = 0;
-  if (hasVolume && hasRsi) {
-    priceDomainBottom = 0.45;
-  } else if (hasRsi) {
-    priceDomainBottom = 0.25;
-  } else if (hasVolume) {
-    priceDomainBottom = 0.25;
-  }
+  return out;
+  }, [data, showEma, showVolume, showRsi, showIndexLine, rsiData, rsiOverbought, rsiOversold, indexLabel, markers, hasRsi]);
 
   const chartHeight = hasRsi ? Math.max(height, 620) : height;
 
-  const layout: any = {
-    title: { text: title || '' },
+  const layout = useMemo(() => {
+    let priceDomainBottom = 0;
+    if (hasVolume && hasRsi) {
+      priceDomainBottom = 0.45;
+    } else if (hasRsi) {
+      priceDomainBottom = 0.25;
+    } else if (hasVolume) {
+      priceDomainBottom = 0.25;
+    }
+
+    return {
+      uirevision: `${data.length}-${hasRsi}-${hasVolume}`,
+      title: { text: title || '' },
     height: chartHeight,
     margin: { l: 50, r: 50, t: title ? 40 : 10, b: 40 },
     xaxis: {
@@ -353,6 +334,23 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
     dragmode: 'zoom',
     showlegend: true,
   };
+  }, [data.length, hasRsi, hasVolume, height, title]);
+
+  if (!data || data.length === 0) {
+    return (
+      <div
+        style={{
+          height,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          background: '#f8f9fa',
+        }}
+      >
+        <span className="text-muted">No candle data to display</span>
+      </div>
+    );
+  }
 
   return (
     <ChartErrorBoundary height={chartHeight}>

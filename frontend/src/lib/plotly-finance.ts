@@ -11,6 +11,8 @@ interface PlotProps {
   onUpdate?: (figure: any, graphDiv: HTMLElement) => void;
 }
 
+const DEBOUNCE_MS = 100;
+
 const PlotComponent: React.FC<PlotProps> = ({
   data,
   layout,
@@ -21,6 +23,7 @@ const PlotComponent: React.FC<PlotProps> = ({
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const initializedRef = useRef(false);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -35,10 +38,21 @@ const PlotComponent: React.FC<PlotProps> = ({
         if (onInitialized) onInitialized({ data, layout: mergedLayout }, el);
       });
     } else {
-      Plotly.react(el, data, mergedLayout, mergedConfig).then(() => {
-        if (onUpdate) onUpdate({ data, layout: mergedLayout }, el);
-      });
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+      debounceRef.current = setTimeout(() => {
+        debounceRef.current = null;
+        Plotly.react(el, data, mergedLayout, mergedConfig).then(() => {
+          if (onUpdate) onUpdate({ data, layout: mergedLayout }, el);
+        });
+      }, DEBOUNCE_MS);
     }
+
+    return () => {
+      if (debounceRef.current) {
+        clearTimeout(debounceRef.current);
+        debounceRef.current = null;
+      }
+    };
   }, [data, layout, config]);
 
   useEffect(() => {

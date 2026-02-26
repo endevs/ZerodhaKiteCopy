@@ -30,6 +30,7 @@ from threading import Thread, Lock
 from typing import Dict, List, Tuple, Any, Optional, Callable, Set
 from strategies.orb import ORB
 from strategies.capture_mountain_signal import CaptureMountainSignal
+from mountain_signal_live_auto_trader import MountainSignalLiveAutoTrader
 from rules import load_mountain_signal_pe_rules
 from ticker import Ticker
 import uuid
@@ -2786,6 +2787,9 @@ kite = KiteConnect(api_key="default_api_key") # The API key will be set dynamica
 # In-memory storage for running strategies
 running_strategies = {}
 paper_trade_strategies = {}  # Store paper trade strategy instances
+
+# Mountain Signal Live auto-trade sessions (key: user_id, runs on backend when user enables)
+mountain_signal_auto_trade_sessions = {}
 
 # Ticker instance
 ticker = None
@@ -9794,6 +9798,218 @@ def api_zerodha_margins():
         'equity': equity,
         'margins': margins if isinstance(margins, dict) else None,
     })
+
+
+def _do_mountain_signal_place_order(user_id: int, instrument: str, lots: int, index_ltp: float) -> Optional[str]:
+    """Place Mountain Signal PE order (used by auto-trade, no request context)."""
+    instrument = (instrument or '').strip().upper()
+    if instrument not in ('NIFTY', 'BANKNIFTY'):
+        return None
+    lots = max(1, int(lots))
+    index_ltp_f = float(index_ltp)
+
+    def _place(kite_client: KiteConnect):
+        tradingsymbol, lot_size = _resolve_nfo_atm_for_mountain_signal(kite_client, instrument, 'PE', index_ltp_f)
+        if not tradingsymbol or not lot_size:
+            raise ValueError(f"Could not resolve NFO symbol for {instrument} PE at LTP {index_ltp_f}")
+        quantity = _round_to_multiple(lots * lot_size, lot_size)
+        if quantity < lot_size:
+            quantity = lot_size
+        params = {
+            'variety': kite_client.VARIETY_REGULAR,
+            'exchange': kite_client.EXCHANGE_NFO,
+            'tradingsymbol': tradingsymbol,
+            'transaction_type': kite_client.TRANSACTION_TYPE_BUY,
+            'quantity': quantity,
+            'product': kite_client.PRODUCT_MIS,
+            'order_type': kite_client.ORDER_TYPE_MARKET,
+            'validity': kite_client.VALIDITY_DAY,
+            'tag': 'mountain_signal',
+        }
+        order_id = kite_client.place_order(**params)
+        return str(order_id)
+
+    try:
+        return _with_valid_kite_client(user_id, "Mountain Signal auto-trade place order", _place)
+    except Exception as e:
+        logging.warning("[Mountain Signal auto-trade] place_order failed for user %s: %s", user_id, e)
+        return None
+
+
+def _do_mountain_signal_square_off(user_id: int) -> bool:
+    """Square off all positions (used by auto-trade, no request context)."""
+    def _square(kite_client: KiteConnect):
+        positions = execute_with_retries("fetching positions for auto-trade square-off", lambda: kite_client.positions())
+        net_positions = positions.get('net', []) if isinstance(positions, dict) else []
+        for pos in net_positions:
+            qty = pos.get('quantity')
+            if not qty:
+                continue
+            tradingsymbol = pos.get('tradingsymbol')
+            exchange = pos.get('exchange') or 'NFO'
+            product = pos.get('product') or kite_client.PRODUCT_MIS
+            exit_qty = abs(int(qty))
+            txn = kite_client.TRANSACTION_TYPE_SELL if qty > 0 else kite_client.TRANSACTION_TYPE_BUY
+            try:
+                kite_client.place_order(
+                    variety=kite_client.VARIETY_REGULAR,
+                    exchange=exchange,
+                    tradingsymbol=tradingsymbol,
+                    transaction_type=txn,
+                    quantity=exit_qty,
+                    product=product,
+                    order_type=kite_client.ORDER_TYPE_MARKET,
+                    validity=kite_client.VALIDITY_DAY,
+                )
+            except Exception as exc:
+                logging.warning("[Mountain Signal auto-trade] square-off failed for %s: %s", tradingsymbol, exc)
+        return True
+
+    try:
+        _with_valid_kite_client(user_id, "Mountain Signal auto-trade square-off", _square)
+        return True
+    except Exception as e:
+        logging.warning("[Mountain Signal auto-trade] square_off failed for user %s: %s", user_id, e)
+        return False
+
+
+@app.route("/api/mountain_signal/live/start_auto_trade", methods=['POST'])
+def api_mountain_signal_live_start_auto_trade():
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+    if not session.get('access_token'):
+        return jsonify({'status': 'error', 'message': 'Zerodha access token missing. Please login with Zerodha first.'}), 401
+    data = request.get_json() or {}
+    instrument = (data.get('instrument') or 'BANKNIFTY').strip().upper()
+    if instrument not in ('NIFTY', 'BANKNIFTY'):
+        return jsonify({'status': 'error', 'message': 'instrument must be NIFTY or BANKNIFTY'}), 400
+    lots = max(1, int(data.get('lots', 1)))
+    rsi_ob = float(data.get('rsiOverbought', 70))
+    rsi_os = float(data.get('rsiOversold', 30))
+
+    is_open, market_msg = is_nse_fo_market_open(datetime.datetime.now(datetime.timezone.utc))
+    if not is_open:
+        return jsonify({'status': 'error', 'message': market_msg, 'reason': 'market_closed'}), 400
+
+    user_id = session['user_id']
+
+    def place_fn(uid: int, inst: str, lts: int, ltp: float):
+        return _do_mountain_signal_place_order(uid, inst, lts, ltp)
+
+    def square_fn(uid: int):
+        return _do_mountain_signal_square_off(uid)
+
+    auto_trader = MountainSignalLiveAutoTrader(
+        user_id=user_id,
+        instrument=instrument,
+        lots=lots,
+        rsi_overbought=rsi_ob,
+        rsi_oversold=rsi_os,
+        place_order_fn=place_fn,
+        square_off_fn=square_fn,
+    )
+
+    # Load warmup candles (3 days) so strategy can evaluate immediately
+    try:
+        token = 256265 if instrument == 'NIFTY' else 260105
+        warmup_from = (datetime.date.today() - datetime.timedelta(days=3)).strftime('%Y-%m-%d')
+        to_date = datetime.date.today()
+
+        def _fetch_warmup(kite_client):
+            all_candles = []
+            cur = datetime.datetime.strptime(warmup_from, '%Y-%m-%d').date()
+            while cur <= to_date:
+                if cur.weekday() < 5:
+                    sd = datetime.datetime.combine(cur, datetime.time(9, 15))
+                    ed = datetime.datetime.combine(cur, datetime.time(15, 30))
+                    hist = execute_with_retries(
+                        f"auto-trade warmup {instrument} {cur}",
+                        lambda: kite_client.historical_data(token, sd, ed, '5minute'),
+                    )
+                    if hist:
+                        all_candles.extend(hist)
+                cur += datetime.timedelta(days=1)
+            return all_candles
+
+        warmup = _with_valid_kite_client(user_id, "Mountain Signal auto-trade warmup", _fetch_warmup)
+        if warmup:
+            candles = []
+            for r in warmup:
+                ts = r.get('date')
+                if ts:
+                    candles.append({
+                        'timestamp': ts.isoformat() if hasattr(ts, 'isoformat') else ts,
+                        'open': float(r.get('open') or 0),
+                        'high': float(r.get('high') or 0),
+                        'low': float(r.get('low') or 0),
+                        'close': float(r.get('close') or 0),
+                    })
+            if candles:
+                auto_trader.load_initial_candles(candles)
+    except Exception as e:
+        logging.warning("[Mountain Signal] Auto-trade warmup failed (will build from ticks): %s", e)
+
+    mountain_signal_auto_trade_sessions[user_id] = {
+        'trader': auto_trader,
+        'instrument': instrument,
+        'lots': lots,
+        'rsi_overbought': rsi_ob,
+        'rsi_oversold': rsi_os,
+        'started_at': datetime.datetime.now().isoformat(),
+    }
+    # Also add to running_strategies so ticker feeds it ticks
+    run_id = f"mountain_signal_live_{user_id}"
+    running_strategies[run_id] = {
+        'strategy': auto_trader,
+        'db_id': None,
+        'user_id': user_id,
+        'name': f'Mountain Signal Auto ({instrument})',
+    }
+    logging.info("[Mountain Signal] Auto-trade started for user %s: %s %d lots RSI OB=%s OS=%s", user_id, instrument, lots, rsi_ob, rsi_os)
+    return jsonify({
+        'status': 'success',
+        'message': f'Auto-trade started for {instrument} ({lots} lots). RSI OB: {rsi_ob}, RSI OS: {rsi_os}. Runs on server – continues when you switch away.',
+        'instrument': instrument,
+        'lots': lots,
+        'rsiOverbought': rsi_ob,
+        'rsiOversold': rsi_os,
+    })
+
+
+@app.route("/api/mountain_signal/live/stop_auto_trade", methods=['POST'])
+def api_mountain_signal_live_stop_auto_trade():
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+    user_id = session['user_id']
+    run_id = f"mountain_signal_live_{user_id}"
+    if user_id in mountain_signal_auto_trade_sessions:
+        del mountain_signal_auto_trade_sessions[user_id]
+    if run_id in running_strategies:
+        del running_strategies[run_id]
+    logging.info("[Mountain Signal] Auto-trade stopped for user %s", user_id)
+    return jsonify({
+        'status': 'success',
+        'message': 'Auto-trade stopped.',
+    })
+
+
+@app.route("/api/mountain_signal/live/auto_trade_status", methods=['GET'])
+def api_mountain_signal_live_auto_trade_status():
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+    user_id = session['user_id']
+    if user_id in mountain_signal_auto_trade_sessions:
+        info = mountain_signal_auto_trade_sessions[user_id]
+        return jsonify({
+            'status': 'success',
+            'active': True,
+            'instrument': info.get('instrument'),
+            'lots': info.get('lots'),
+            'rsiOverbought': info.get('rsi_overbought'),
+            'rsiOversold': info.get('rsi_oversold'),
+            'started_at': info.get('started_at'),
+        })
+    return jsonify({'status': 'success', 'active': False})
 
 
 @app.route("/api/mountain_signal/live/place_order", methods=['POST'])
