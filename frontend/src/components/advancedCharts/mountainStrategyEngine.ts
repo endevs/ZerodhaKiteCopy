@@ -223,10 +223,14 @@ export function runMountainBacktest(
             { signalHigh: c.high, signalLow: c.low, signalTime: timeStr(c.time), ema5: e5, rsi14: r14,
               oldSignalHigh: oldHigh, oldSignalLow: oldLow });
         } else if (!lowAboveEma && !rsiOverbought) {
-          pushEvent(events, i, c, MountainEventType.SIGNAL_CLEARED,
-            `PE signal cleared – low ${c.low.toFixed(2)} < EMA5 ${e5.toFixed(2)} & RSI ${r14.toFixed(1)} <= ${rsiOverboughtThreshold}`,
-            { signalHigh: S.signal.high, signalLow: S.signal.low, ema5: e5, rsi14: r14 });
-          S.signal = null;
+          // Entry evaluation BEFORE signal clearing – when both overlap, entry takes priority
+          tryEntry(S, c, i, e5, r14, events);
+          if (!S.trade) {
+            pushEvent(events, i, c, MountainEventType.SIGNAL_CLEARED,
+              `PE signal cleared – low ${c.low.toFixed(2)} < EMA5 ${e5.toFixed(2)} & RSI ${r14.toFixed(1)} <= ${rsiOverboughtThreshold}`,
+              { signalHigh: S.signal!.high, signalLow: S.signal!.low, ema5: e5, rsi14: r14 });
+            S.signal = null;
+          }
         }
       }
     }
@@ -235,32 +239,7 @@ export function runMountainBacktest(
     // 3. ENTRY EVALUATION (only when no active trade and signal exists)
     // ══════════════════════════════════════════════════════════════════════
     if (!S.trade && S.signal !== null) {
-      if (c.close < S.signal.low) {
-        const isFirstEntry = !S.enteredIndices.has(S.signal.candleIndex);
-
-        if (isFirstEntry) {
-          S.trade = createActiveTrade(c, i, S.signal, true);
-          S.enteredIndices.add(S.signal.candleIndex);
-          pushEvent(events, i, c, MountainEventType.ENTRY_TRIGGERED,
-            `FIRST ENTRY SHORT @ ${c.close.toFixed(2)} (signal L:${S.signal.low.toFixed(2)} H:${S.signal.high.toFixed(2)})`,
-            { entryPrice: c.close, signalHigh: S.signal.high, signalLow: S.signal.low,
-              signalTime: S.signal.time, ema5: e5, rsi14: r14 });
-        } else {
-          const highestHigh = S.candlesSinceExit.reduce((mx, cc) => Math.max(mx, cc.high), -Infinity);
-          if (highestHigh > S.signal.low) {
-            S.trade = createActiveTrade(c, i, S.signal, false);
-            S.enteredIndices.add(S.signal.candleIndex);
-            pushEvent(events, i, c, MountainEventType.ENTRY_TRIGGERED,
-              `RE-ENTRY SHORT @ ${c.close.toFixed(2)} (signal L:${S.signal.low.toFixed(2)} H:${S.signal.high.toFixed(2)})`,
-              { entryPrice: c.close, signalHigh: S.signal.high, signalLow: S.signal.low,
-                signalTime: S.signal.time, ema5: e5, rsi14: r14 });
-          } else {
-            pushEvent(events, i, c, MountainEventType.ENTRY_SKIPPED_REENTRY,
-              `Re-entry skipped – highest high since exit ${highestHigh.toFixed(2)} <= signal.low ${S.signal.low.toFixed(2)}`,
-              { highestHighSinceExit: highestHigh, signalLow: S.signal.low, ema5: e5, rsi14: r14 });
-          }
-        }
-      }
+      tryEntry(S, c, i, e5, r14, events);
     }
 
     // Track candles since last exit (for re-entry validation)
@@ -323,6 +302,42 @@ function createActiveTrade(
     highDroppedBelowEma: false,
     consecutiveCloseAboveEma: 0,
   };
+}
+
+function tryEntry(
+  S: StrategyState,
+  c: PlotlyCandlePoint,
+  idx: number,
+  e5: number,
+  r14: number,
+  events: MountainEvent[],
+): boolean {
+  if (S.trade !== null || S.signal === null || c.close >= S.signal.low) return false;
+
+  const isFirstEntry = !S.enteredIndices.has(S.signal.candleIndex);
+  if (isFirstEntry) {
+    S.trade = createActiveTrade(c, idx, S.signal, true);
+    S.enteredIndices.add(S.signal.candleIndex);
+    pushEvent(events, idx, c, MountainEventType.ENTRY_TRIGGERED,
+      `FIRST ENTRY SHORT @ ${c.close.toFixed(2)} (signal L:${S.signal.low.toFixed(2)} H:${S.signal.high.toFixed(2)})`,
+      { entryPrice: c.close, signalHigh: S.signal.high, signalLow: S.signal.low,
+        signalTime: S.signal.time, ema5: e5, rsi14: r14 });
+    return true;
+  }
+  const highestHigh = S.candlesSinceExit.reduce((mx, cc) => Math.max(mx, cc.high), -Infinity);
+  if (highestHigh > S.signal.low) {
+    S.trade = createActiveTrade(c, idx, S.signal, false);
+    S.enteredIndices.add(S.signal.candleIndex);
+    pushEvent(events, idx, c, MountainEventType.ENTRY_TRIGGERED,
+      `RE-ENTRY SHORT @ ${c.close.toFixed(2)} (signal L:${S.signal.low.toFixed(2)} H:${S.signal.high.toFixed(2)})`,
+      { entryPrice: c.close, signalHigh: S.signal.high, signalLow: S.signal.low,
+        signalTime: S.signal.time, ema5: e5, rsi14: r14 });
+    return true;
+  }
+  pushEvent(events, idx, c, MountainEventType.ENTRY_SKIPPED_REENTRY,
+    `Re-entry skipped – highest high since exit ${highestHigh.toFixed(2)} <= signal.low ${S.signal.low.toFixed(2)}`,
+    { highestHighSinceExit: highestHigh, signalLow: S.signal.low, ema5: e5, rsi14: r14 });
+  return false;
 }
 
 function pushEvent(

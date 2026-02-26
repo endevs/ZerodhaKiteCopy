@@ -236,8 +236,8 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
         mode: 'markers',
         name: 'Entry',
         marker: {
-          symbol: 'triangle-up',
-          size: 12,
+          symbol: 'star',
+          size: 14,
           color: '#198754',
           line: { width: 1, color: '#fff' },
         },
@@ -257,8 +257,8 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
         mode: 'markers',
         name: 'Exit',
         marker: {
-          symbol: 'triangle-down',
-          size: 12,
+          symbol: 'star',
+          size: 14,
           color: '#dc3545',
           line: { width: 1, color: '#fff' },
         },
