@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import PlotlyCandlestickChart, { PlotlyCandlePoint, TradeMarker } from './PlotlyCandlestickChart';
 import { Plot } from '../lib/plotly-finance';
 import { apiUrl } from '../config/api';
@@ -136,6 +136,30 @@ const AdvancedChartsContent: React.FC = () => {
   const [btRsiOversold, setBtRsiOversold] = useState<number>(30);
   const [btRsi, setBtRsi] = useState<(number | null)[]>([]);
 
+  // Live tab state
+  const [liveRsiOverbought, setLiveRsiOverbought] = useState<number>(70);
+  const [liveRsiOversold, setLiveRsiOversold] = useState<number>(30);
+  const [liveEvents, setLiveEvents] = useState<MountainEvent[]>([]);
+  const [liveTrades, setLiveTrades] = useState<BacktestTrade[]>([]);
+  const [liveRsi, setLiveRsi] = useState<(number | null)[]>([]);
+  const [liveMarkers, setLiveMarkers] = useState<TradeMarker[]>([]);
+  const [lastStrategyRunTime, setLastStrategyRunTime] = useState<string | null>(null);
+  const [liveLots, setLiveLots] = useState<number>(1);
+  const [zerodhaOrders, setZerodhaOrders] = useState<any[]>([]);
+  const [zerodhaPositions, setZerodhaPositions] = useState<any[]>([]);
+  const [showEntryConfirm, setShowEntryConfirm] = useState<boolean>(false);
+  const [showExitConfirm, setShowExitConfirm] = useState<boolean>(false);
+  const [entryPreview, setEntryPreview] = useState<{ tradingsymbol: string; quantity: number; instrument: string; optionType: string; lots: number; indexLtp: number } | null>(null);
+  const [positionsForConfirm, setPositionsForConfirm] = useState<{ tradingsymbol: string; quantity: number; product?: string; exchange?: string }[]>([]);
+  const [entryExitLoading, setEntryExitLoading] = useState<{ entry: boolean; exit: boolean }>({ entry: false, exit: false });
+  const [liveTradeMessage, setLiveTradeMessage] = useState<{ text: string; type: 'success' | 'error' | 'info' } | null>(null);
+  const liveStrategyDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const liveStrategyDataRef = useRef<{
+    rawCandles: PlotlyCandlePoint[];
+    rsiOb: number;
+    rsiOs: number;
+  }>({ rawCandles: [], rsiOb: 70, rsiOs: 30 });
+
   const socket = useSocket();
 
   const isToday = selectedDate === todayStr();
@@ -150,45 +174,186 @@ const AdvancedChartsContent: React.FC = () => {
       setError(null);
       setWarning(null);
 
-      const url = apiUrl(
-        `/api/plotly/index-candles?index=${selectedIndex}&date=${selectedDate}&interval=${kiteInterval}`,
-      );
-      const resp = await fetch(url, { credentials: 'include' });
-      const data = await resp.json();
+      const isLiveToday = activeTab === 'live' && selectedDate === todayStr();
 
-      if (!resp.ok) {
-        if (resp.status === 401) {
-          setError(data.error || 'Session expired or not logged in. Please log in again.');
-        } else {
-          setError(data.error || 'Failed to load index candles from Zerodha.');
+      if (isLiveToday) {
+        // Live tab + today: fetch warmup (3 days before) for valid RSI(14)
+        const warmupFrom = (() => {
+          const d = new Date(selectedDate);
+          d.setDate(d.getDate() - 3);
+          return d.toISOString().split('T')[0];
+        })();
+        const resp = await fetch(apiUrl('/api/backtest/run'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({
+            index: selectedIndex,
+            from_date: warmupFrom,
+            to_date: selectedDate,
+            interval: kiteInterval,
+            strategy: 'ema_crossover',
+            ema_fast: 5,
+            ema_slow: 20,
+          }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          setError(data.message || data.error || 'Failed to load warmup candles.');
+          setRawCandles([]);
+          return;
         }
-        setRawCandles([]);
-        return;
+        const candles = (data.candles || []) as Array<{
+          timestamp: string; open: number; high: number; low: number; close: number; volume?: number;
+        }>;
+        if (!candles.length) { setRawCandles([]); return; }
+        const mapped: PlotlyCandlePoint[] = candles.map((c) => ({
+          time: c.timestamp, open: c.open, high: c.high, low: c.low, close: c.close,
+          volume: c.volume ?? 0, indexClose: c.close, ema5: null,
+        }));
+        setRawCandles(computeEma5(mapped));
+      } else {
+        const url = apiUrl(
+          `/api/plotly/index-candles?index=${selectedIndex}&date=${selectedDate}&interval=${kiteInterval}`,
+        );
+        const resp = await fetch(url, { credentials: 'include' });
+        const data = await resp.json();
+
+        if (!resp.ok) {
+          if (resp.status === 401) {
+            setError(data.error || 'Session expired or not logged in. Please log in again.');
+          } else {
+            setError(data.error || 'Failed to load index candles from Zerodha.');
+          }
+          setRawCandles([]);
+          return;
+        }
+
+        if (data.warning) setWarning(data.warning);
+
+        const candles = (data.candles || []) as Array<{
+          timestamp: string; open: number; high: number; low: number; close: number; volume?: number;
+        }>;
+
+        if (!candles.length) { setRawCandles([]); return; }
+
+        const mapped: PlotlyCandlePoint[] = candles.map((c) => ({
+          time: c.timestamp, open: c.open, high: c.high, low: c.low, close: c.close,
+          volume: c.volume ?? 0, indexClose: c.close, ema5: null,
+        }));
+
+        setRawCandles(computeEma5(mapped));
       }
-
-      if (data.warning) setWarning(data.warning);
-
-      const candles = (data.candles || []) as Array<{
-        timestamp: string; open: number; high: number; low: number; close: number; volume?: number;
-      }>;
-
-      if (!candles.length) { setRawCandles([]); return; }
-
-      const mapped: PlotlyCandlePoint[] = candles.map((c) => ({
-        time: c.timestamp, open: c.open, high: c.high, low: c.low, close: c.close,
-        volume: c.volume ?? 0, indexClose: c.close, ema5: null,
-      }));
-
-      setRawCandles(computeEma5(mapped));
     } catch (e: any) {
       setError(e instanceof Error ? e.message : 'Unexpected error while loading candles.');
       setRawCandles([]);
     } finally {
       setLoading(false);
     }
-  }, [selectedIndex, selectedDate, kiteInterval]);
+  }, [selectedIndex, selectedDate, kiteInterval, activeTab]);
 
   useEffect(() => { fetchCandles(); }, [fetchCandles]);
+
+  // ---------- Live strategy run (debounced) ----------
+  // Keep ref updated so runStrategy always uses latest data when timer fires
+  liveStrategyDataRef.current = {
+    rawCandles,
+    rsiOb: liveRsiOverbought,
+    rsiOs: liveRsiOversold,
+  };
+
+  useEffect(() => {
+    if (activeTab !== 'live' || selectedDate !== todayStr() || rawCandles.length === 0) return;
+
+    const runStrategy = () => {
+      const { rawCandles: candles, rsiOb, rsiOs } = liveStrategyDataRef.current;
+      if (candles.length === 0) return;
+      const result = runMountainBacktest(candles, {
+        rsiOverbought: rsiOb,
+        rsiOversold: rsiOs,
+      });
+      setLiveEvents(result.events);
+      setLiveRsi(result.indicators.rsi14);
+      setLiveTrades(result.trades.map((t) => ({
+        entry_time: t.entryTime,
+        entry_price: t.entryPrice,
+        exit_time: t.exitTime,
+        exit_price: t.exitPrice,
+        direction: 'short' as const,
+        pnl: t.pnl,
+        exit_reason: t.exitReason,
+      })));
+
+      const markers: TradeMarker[] = [];
+      for (const t of result.trades) {
+        markers.push({ time: t.entryTime, price: t.entryPrice, direction: 'short', action: 'entry' });
+        markers.push({
+          time: t.exitTime, price: t.exitPrice, direction: 'short', action: 'exit',
+          label: `${t.exitReason} | P&L: ${t.pnl > 0 ? '+' : ''}${t.pnl.toFixed(2)}`,
+        });
+      }
+      for (const ev of result.events) {
+        if (ev.type === MountainEventType.SIGNAL_IDENTIFIED || ev.type === MountainEventType.SIGNAL_RESET) {
+          markers.push({
+            time: ev.timestamp,
+            price: (ev.details.high as number) ?? 0,
+            direction: 'short',
+            action: 'signal',
+            label: `RSI: ${ev.details.rsi14 != null ? (ev.details.rsi14 as number).toFixed(1) : '–'}`,
+          });
+        }
+      }
+      setLiveMarkers(markers);
+      setLastStrategyRunTime(new Date().toLocaleTimeString('en-IN', { hour12: false }));
+    };
+
+    // Only run when candle count or RSI params change - not on every tick (rawCandles.length in deps)
+    const debounceMs = 2000;
+    if (liveStrategyDebounceRef.current) clearTimeout(liveStrategyDebounceRef.current);
+    liveStrategyDebounceRef.current = setTimeout(() => {
+      runStrategy();
+      liveStrategyDebounceRef.current = null;
+    }, debounceMs);
+
+    return () => {
+      if (liveStrategyDebounceRef.current) clearTimeout(liveStrategyDebounceRef.current);
+    };
+  }, [activeTab, selectedDate, rawCandles.length, liveRsiOverbought, liveRsiOversold]);
+
+  // ---------- Live orders/positions polling ----------
+  useEffect(() => {
+    if (activeTab !== 'live' || selectedDate !== todayStr()) return;
+
+    const fetchOrders = async () => {
+      try {
+        const res = await fetch(apiUrl('/api/zerodha/orders?tag=mountain_signal'), { credentials: 'include' });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data.status === 'success' && Array.isArray(data.orders)) setZerodhaOrders(data.orders);
+      } catch (e) {
+        console.error('Failed to fetch Zerodha orders:', e);
+      }
+    };
+
+    const fetchPositions = async () => {
+      try {
+        const res = await fetch(apiUrl('/api/zerodha/positions'), { credentials: 'include' });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data.status === 'success' && Array.isArray(data.positions)) setZerodhaPositions(data.positions);
+      } catch (e) {
+        console.error('Failed to fetch Zerodha positions:', e);
+      }
+    };
+
+    fetchOrders();
+    fetchPositions();
+    const interval = setInterval(() => {
+      fetchOrders();
+      fetchPositions();
+    }, 15000);
+    return () => clearInterval(interval);
+  }, [activeTab, selectedDate]);
 
   // ---------- Live socket ticks ----------
   useEffect(() => {
@@ -377,7 +542,45 @@ const AdvancedChartsContent: React.FC = () => {
     }
   }, [selectedIndex, btFromDate, btToDate, kiteInterval, btStrategy, btEmaFast, btEmaSlow, btRsiOverbought, btRsiOversold]);
 
-  const chartData = useMemo(() => rawCandles, [rawCandles]);
+  const chartData = useMemo(() => {
+    if (activeTab !== 'live' || selectedDate !== todayStr() || rawCandles.length === 0) return rawCandles;
+    const todayPrefix = todayStr();
+    return rawCandles.filter((c) => {
+      const t = typeof c.time === 'string' ? c.time : (c.time as Date).toISOString();
+      return t.startsWith(todayPrefix);
+    });
+  }, [activeTab, selectedDate, rawCandles]);
+
+  const todayPrefix = todayStr();
+  const liveRsiDisplay = useMemo(() => {
+    if (activeTab !== 'live' || selectedDate !== todayPrefix || rawCandles.length === 0 || liveRsi.length === 0)
+      return liveRsi;
+    const indices: number[] = [];
+    rawCandles.forEach((c, i) => {
+      const t = typeof c.time === 'string' ? c.time : (c.time as Date).toISOString();
+      if (t.startsWith(todayPrefix)) indices.push(i);
+    });
+    return indices.map((i) => liveRsi[i] ?? null);
+  }, [activeTab, selectedDate, rawCandles, liveRsi, todayPrefix]);
+
+  const liveMarkersDisplay = useMemo(() => {
+    if (activeTab !== 'live' || selectedDate !== todayPrefix) return liveMarkers;
+    return liveMarkers.filter((m) => {
+      const t = typeof m.time === 'string' ? m.time : (m.time as Date).toISOString();
+      return t.startsWith(todayPrefix);
+    });
+  }, [activeTab, selectedDate, liveMarkers, todayPrefix]);
+
+  const liveTradesDisplay = useMemo(() => {
+    if (activeTab !== 'live' || selectedDate !== todayPrefix) return liveTrades;
+    return liveTrades.filter((t) => t.entry_time.startsWith(todayPrefix));
+  }, [activeTab, selectedDate, liveTrades, todayPrefix]);
+
+  const liveEventsDisplayLast5 = useMemo(() => {
+    if (activeTab !== 'live' || selectedDate !== todayPrefix) return liveEvents;
+    const todayEvents = liveEvents.filter((e) => e.timestamp.startsWith(todayPrefix));
+    return todayEvents.slice(-5);
+  }, [activeTab, selectedDate, liveEvents, todayPrefix]);
 
   const filteredEvents = useMemo(() => {
     if (eventFilter === 'ALL') return btEvents;
@@ -478,6 +681,26 @@ const AdvancedChartsContent: React.FC = () => {
                 </div>
               </div>
 
+              {isToday && (
+                <div className="row g-3 mb-3 align-items-end">
+                  <div className="col-md-1">
+                    <label className="form-label fw-bold">RSI OB</label>
+                    <input type="number" className="form-control" value={liveRsiOverbought} min={50} max={90}
+                      onChange={(e) => setLiveRsiOverbought(Number(e.target.value) || 70)} />
+                  </div>
+                  <div className="col-md-1">
+                    <label className="form-label fw-bold">RSI OS</label>
+                    <input type="number" className="form-control" value={liveRsiOversold} min={10} max={50}
+                      onChange={(e) => setLiveRsiOversold(Number(e.target.value) || 30)} />
+                  </div>
+                  <div className="col-md-2 d-flex align-items-end">
+                    <span className="text-muted small">
+                      {lastStrategyRunTime ? `Last signal run: ${lastStrategyRunTime}` : 'Strategy will run on candle update'}
+                    </span>
+                  </div>
+                </div>
+              )}
+
               {error && <div className="alert alert-danger py-2 small mb-2">{error}</div>}
               {warning && !error && <div className="alert alert-warning py-2 small mb-2">{warning}</div>}
               {loading && (
@@ -494,8 +717,441 @@ const AdvancedChartsContent: React.FC = () => {
                 showIndexLine={false}
                 showEma={showEma}
                 showVolume={showVolume}
+                showRsi={isToday && liveRsiDisplay.length > 0}
+                rsiData={liveRsiDisplay}
+                rsiOverbought={liveRsiOverbought}
+                rsiOversold={liveRsiOversold}
                 indexLabel={`${selectedIndex} Close`}
+                markers={isToday ? liveMarkersDisplay : undefined}
               />
+
+              {isToday && (
+                <div className="row mt-3">
+                  <div className="col-lg-6">
+                    {liveTradesDisplay.length > 0 && (
+                      <div className="mb-3">
+                        <h6 className="fw-bold">Trade Log</h6>
+                        <div className="table-responsive" style={{ maxHeight: 200 }}>
+                          <table className="table table-sm table-striped table-hover mb-0">
+                            <thead className="table-dark">
+                              <tr>
+                                <th>#</th>
+                                <th>Entry Time</th>
+                                <th>Entry Price</th>
+                                <th>Exit Time</th>
+                                <th>Exit Price</th>
+                                <th>Exit Reason</th>
+                                <th>P&L</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {liveTradesDisplay.map((t, idx) => (
+                                <tr key={idx}>
+                                  <td>{idx + 1}</td>
+                                  <td className="small">{new Date(t.entry_time).toLocaleString()}</td>
+                                  <td>{t.entry_price.toFixed(2)}</td>
+                                  <td className="small">{new Date(t.exit_time).toLocaleString()}</td>
+                                  <td>{t.exit_price.toFixed(2)}</td>
+                                  <td>
+                                    <span className={`badge ${
+                                      t.exit_reason === 'INDEX_STOP' ? 'bg-danger' :
+                                      t.exit_reason === 'INDEX_TARGET' ? 'bg-success' :
+                                      'bg-secondary'
+                                    }`}>
+                                      {t.exit_reason}
+                                    </span>
+                                  </td>
+                                  <td className={`fw-bold ${t.pnl >= 0 ? 'text-success' : 'text-danger'}`}>
+                                    {t.pnl >= 0 ? '+' : ''}{t.pnl.toFixed(2)}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                  <div className="col-lg-6">
+                    {liveEventsDisplayLast5.length > 0 && (
+                      <div className="mb-3">
+                        <h6 className="fw-bold">Strategy Event Log (last 5)</h6>
+                        <div className="table-responsive" style={{ maxHeight: 200 }}>
+                          <table className="table table-sm table-hover mb-0" style={{ fontSize: '0.8rem' }}>
+                            <thead className="table-dark">
+                              <tr>
+                                <th>Event</th>
+                                <th>Time</th>
+                                <th>Message</th>
+                                <th>EMA5</th>
+                                <th>RSI14</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {[...liveEventsDisplayLast5].reverse().map((ev, idx) => (
+                                <tr key={idx}>
+                                  <td><span className={`badge ${eventBadgeClass(ev.type)}`}>{eventLabel(ev.type)}</span></td>
+                                  <td className="text-nowrap">{new Date(ev.timestamp).toLocaleString()}</td>
+                                  <td>{ev.message}</td>
+                                  <td>{ev.details.ema5 != null ? (ev.details.ema5 as number).toFixed(2) : '–'}</td>
+                                  <td>{ev.details.rsi14 != null ? (ev.details.rsi14 as number).toFixed(1) : '–'}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {isToday && (
+                <>
+                  <div className="row mt-3 align-items-center">
+                    <div className="col-auto">
+                      <label className="form-label fw-bold small mb-1">Lots</label>
+                      <input type="number" className="form-control form-control-sm" style={{ width: 70 }}
+                        value={liveLots} min={1} max={10}
+                        onChange={(e) => setLiveLots(Math.max(1, Number(e.target.value) || 1))} />
+                    </div>
+                    <div className="col-auto">
+                      <button
+                        type="button"
+                        className="btn btn-sm btn-success"
+                        disabled={entryExitLoading.entry || chartData.length === 0}
+                        onClick={async () => {
+                          const indexLtp = chartData.length > 0 ? (chartData[chartData.length - 1]?.close ?? 0) : 0;
+                          if (!indexLtp) {
+                            setLiveTradeMessage({ text: 'No chart data. Load today\'s chart first.', type: 'error' });
+                            return;
+                          }
+                          setEntryExitLoading((p) => ({ ...p, entry: true }));
+                          setLiveTradeMessage(null);
+                          try {
+                            const previewRes = await fetch(apiUrl('/api/mountain_signal/live/order_preview'), {
+                              method: 'POST',
+                              headers: { 'Content-Type': 'application/json' },
+                              credentials: 'include',
+                              body: JSON.stringify({
+                                instrument: selectedIndex,
+                                optionType: 'PE',
+                                indexLtp,
+                                lots: liveLots,
+                              }),
+                            });
+                            const previewData = await previewRes.json();
+                            if (previewRes.status === 401 || previewData.authExpired) {
+                              setLiveTradeMessage({ text: 'Session expired. Please log in again.', type: 'error' });
+                            } else if (previewData.status === 'success') {
+                              setEntryPreview({
+                                tradingsymbol: previewData.tradingsymbol,
+                                quantity: previewData.quantity,
+                                instrument: previewData.instrument,
+                                optionType: previewData.optionType,
+                                lots: previewData.lots,
+                                indexLtp,
+                              });
+                              setShowEntryConfirm(true);
+                            } else {
+                              setLiveTradeMessage({ text: previewData.message || 'Preview failed.', type: 'error' });
+                            }
+                          } catch (e) {
+                            setLiveTradeMessage({ text: (e as Error).message || 'Request failed.', type: 'error' });
+                          } finally {
+                            setEntryExitLoading((p) => ({ ...p, entry: false }));
+                          }
+                        }}
+                      >
+                        {entryExitLoading.entry ? 'Loading...' : 'Entry (ATM PE)'}
+                      </button>
+                    </div>
+                    <div className="col-auto">
+                      <button
+                        type="button"
+                        className="btn btn-sm btn-danger"
+                        disabled={entryExitLoading.exit}
+                        onClick={async () => {
+                          setEntryExitLoading((p) => ({ ...p, exit: true }));
+                          setLiveTradeMessage(null);
+                          try {
+                            const posRes = await fetch(apiUrl('/api/zerodha/positions'), { credentials: 'include' });
+                            const posData = await posRes.json();
+                            if (posRes.status === 401 || posData.authExpired) {
+                              setLiveTradeMessage({ text: 'Session expired. Please log in again.', type: 'error' });
+                            } else if (posData.status === 'success' && Array.isArray(posData.positions)) {
+                              const withQty = posData.positions.filter((p: { quantity?: number }) => p.quantity != null && Number(p.quantity) !== 0);
+                              setPositionsForConfirm(withQty.map((p: { tradingsymbol?: string; quantity?: number; product?: string; exchange?: string }) => ({
+                                tradingsymbol: p.tradingsymbol || '',
+                                quantity: Math.abs(Number(p.quantity)),
+                                product: p.product,
+                                exchange: p.exchange,
+                              })));
+                              setShowExitConfirm(true);
+                            } else {
+                              setLiveTradeMessage({ text: posData.message || 'Failed to fetch positions.', type: 'error' });
+                            }
+                          } catch (e) {
+                            setLiveTradeMessage({ text: (e as Error).message || 'Request failed.', type: 'error' });
+                          } finally {
+                            setEntryExitLoading((p) => ({ ...p, exit: false }));
+                          }
+                        }}
+                      >
+                        {entryExitLoading.exit ? 'Loading...' : 'Exit (Square Off All)'}
+                      </button>
+                    </div>
+                  </div>
+
+                  {liveTradeMessage && (
+                    <div className={`alert alert-${liveTradeMessage.type} py-2 mt-2 mb-2`} role="alert">
+                      <i className={`bi ${liveTradeMessage.type === 'success' ? 'bi-check-circle' : liveTradeMessage.type === 'error' ? 'bi-exclamation-triangle' : 'bi-info-circle'} me-2`}></i>
+                      {liveTradeMessage.text}
+                    </div>
+                  )}
+
+                  <div className="row mt-3">
+                    <div className="col-lg-6">
+                      <div className="card border-0 shadow-sm mb-3">
+                        <div className="card-header bg-dark text-white">
+                          <h6 className="mb-0"><i className="bi bi-list-ul me-2"></i>Zerodha Orders</h6>
+                        </div>
+                        <div className="card-body p-0">
+                          {zerodhaOrders.length === 0 ? (
+                            <div className="p-3 text-muted small">No orders (tag: mountain_signal). Place an order to see it here.</div>
+                          ) : (
+                            <div className="table-responsive">
+                              <table className="table table-sm table-hover mb-0">
+                                <thead className="table-light">
+                                  <tr>
+                                    <th>Order ID</th>
+                                    <th>Symbol</th>
+                                    <th>Type</th>
+                                    <th>Qty</th>
+                                    <th>Status</th>
+                                    <th>Avg Price</th>
+                                    <th>Time</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {zerodhaOrders.map((o, idx) => (
+                                    <tr key={(o.order_id as string) || idx}>
+                                      <td className="small">{o.order_id}</td>
+                                      <td><code>{o.tradingsymbol}</code></td>
+                                      <td>{o.transaction_type} {o.product}</td>
+                                      <td>{o.quantity} / {o.filled_quantity ?? 0}</td>
+                                      <td><span className={`badge ${o.status === 'COMPLETE' ? 'bg-success' : o.status === 'REJECTED' ? 'bg-danger' : 'bg-secondary'}`}>{o.status}</span></td>
+                                      <td>{o.average_price != null ? Number(o.average_price).toFixed(2) : '–'}</td>
+                                      <td className="small">{o.order_timestamp ? new Date(o.order_timestamp).toLocaleString() : '–'}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="col-lg-6">
+                      <div className="card border-0 shadow-sm mb-3">
+                        <div className="card-header bg-dark text-white">
+                          <h6 className="mb-0"><i className="bi bi-briefcase me-2"></i>Zerodha Positions</h6>
+                        </div>
+                        <div className="card-body p-0">
+                          {zerodhaPositions.length === 0 ? (
+                            <div className="p-3 text-muted small">No open positions.</div>
+                          ) : (
+                            <div className="table-responsive">
+                              <table className="table table-sm table-hover mb-0">
+                                <thead className="table-light">
+                                  <tr>
+                                    <th>Symbol</th>
+                                    <th>Qty</th>
+                                    <th>Buy Price</th>
+                                    <th>LTP</th>
+                                    <th>P&L</th>
+                                    <th>Product</th>
+                                    <th>Exchange</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {zerodhaPositions.filter((p: { quantity?: number }) => p.quantity != null && Number(p.quantity) !== 0).map((p, idx) => (
+                                    <tr key={(p.tradingsymbol as string) || idx}>
+                                      <td><code>{p.tradingsymbol}</code></td>
+                                      <td>{p.quantity}</td>
+                                      <td>{p.buy_price != null ? Number(p.buy_price).toFixed(2) : '–'}</td>
+                                      <td>{p.last_price != null ? Number(p.last_price).toFixed(2) : '–'}</td>
+                                      <td className={p.pnl != null ? (Number(p.pnl) >= 0 ? 'text-success' : 'text-danger') : ''}>
+                                        {p.pnl != null ? (Number(p.pnl) >= 0 ? '+' : '') + Number(p.pnl).toFixed(2) : '–'}
+                                      </td>
+                                      <td>{p.product ?? '–'}</td>
+                                      <td>{p.exchange ?? '–'}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {showEntryConfirm && entryPreview && (
+                    <div className="modal fade show d-block" style={{ backgroundColor: 'rgba(0,0,0,0.5)' }} tabIndex={-1}>
+                      <div className="modal-dialog modal-dialog-centered">
+                        <div className="modal-content">
+                          <div className="modal-header">
+                            <h5 className="modal-title">Confirm Entry Order</h5>
+                            <button type="button" className="btn-close" aria-label="Close" onClick={() => { setShowEntryConfirm(false); setEntryPreview(null); }}></button>
+                          </div>
+                          <div className="modal-body">
+                            <p className="mb-2">You are about to place the following order:</p>
+                            <ul className="list-unstyled mb-0">
+                              <li><strong>Contract:</strong> {entryPreview.tradingsymbol}</li>
+                              <li><strong>Type:</strong> BUY {entryPreview.optionType}</li>
+                              <li><strong>Quantity:</strong> {entryPreview.quantity} ({entryPreview.lots} lot(s))</li>
+                              <li><strong>Order type:</strong> Market</li>
+                              <li><strong>Instrument:</strong> {entryPreview.instrument}</li>
+                            </ul>
+                          </div>
+                          <div className="modal-footer">
+                            <button type="button" className="btn btn-secondary" onClick={() => { setShowEntryConfirm(false); setEntryPreview(null); }}>Cancel</button>
+                            <button
+                              type="button"
+                              className="btn btn-success"
+                              onClick={async () => {
+                                setEntryExitLoading((p) => ({ ...p, entry: true }));
+                                setLiveTradeMessage(null);
+                                try {
+                                  const res = await fetch(apiUrl('/api/mountain_signal/live/place_order'), {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    credentials: 'include',
+                                    body: JSON.stringify({
+                                      instrument: entryPreview.instrument,
+                                      optionType: entryPreview.optionType,
+                                      transactionType: 'BUY',
+                                      indexLtp: entryPreview.indexLtp,
+                                      lots: entryPreview.lots,
+                                    }),
+                                  });
+                                  const data = await res.json();
+                                  setShowEntryConfirm(false);
+                                  setEntryPreview(null);
+                                  if (res.status === 401 || data.authExpired) {
+                                    setLiveTradeMessage({ text: 'Session expired. Please log in again.', type: 'error' });
+                                  } else if (data.status === 'success') {
+                                    setLiveTradeMessage({ text: data.message || `Order ${data.order_id} placed.`, type: 'success' });
+                                    const ordRes = await fetch(apiUrl('/api/zerodha/orders?tag=mountain_signal'), { credentials: 'include' });
+                                    if (ordRes.ok) {
+                                      const ordData = await ordRes.json();
+                                      if (ordData.status === 'success' && Array.isArray(ordData.orders)) setZerodhaOrders(ordData.orders);
+                                    }
+                                  } else {
+                                    setLiveTradeMessage({ text: data.message || 'Order failed.', type: 'error' });
+                                  }
+                                } catch (e) {
+                                  setLiveTradeMessage({ text: (e as Error).message || 'Request failed.', type: 'error' });
+                                } finally {
+                                  setEntryExitLoading((p) => ({ ...p, entry: false }));
+                                }
+                              }}
+                            >
+                              Confirm
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {showExitConfirm && (
+                    <div className="modal fade show d-block" style={{ backgroundColor: 'rgba(0,0,0,0.5)' }} tabIndex={-1}>
+                      <div className="modal-dialog modal-dialog-centered">
+                        <div className="modal-content">
+                          <div className="modal-header">
+                            <h5 className="modal-title">Confirm Square Off</h5>
+                            <button type="button" className="btn-close" aria-label="Close" onClick={() => { setShowExitConfirm(false); setPositionsForConfirm([]); }}></button>
+                          </div>
+                          <div className="modal-body">
+                            {positionsForConfirm.length === 0 ? (
+                              <p className="mb-0">You have no open positions to square off.</p>
+                            ) : (
+                              <>
+                                <p className="mb-2">The following position(s) will be closed:</p>
+                                <div className="table-responsive">
+                                  <table className="table table-sm mb-0">
+                                    <thead><tr><th>Symbol</th><th>Qty</th><th>Product</th><th>Exchange</th></tr></thead>
+                                    <tbody>
+                                      {positionsForConfirm.map((p, i) => (
+                                        <tr key={i}>
+                                          <td><code>{p.tradingsymbol}</code></td>
+                                          <td>{p.quantity}</td>
+                                          <td>{p.product ?? '-'}</td>
+                                          <td>{p.exchange ?? '-'}</td>
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              </>
+                            )}
+                          </div>
+                          <div className="modal-footer">
+                            <button type="button" className="btn btn-secondary" onClick={() => { setShowExitConfirm(false); setPositionsForConfirm([]); }}>{positionsForConfirm.length === 0 ? 'Close' : 'Cancel'}</button>
+                            {positionsForConfirm.length > 0 && (
+                              <button
+                                type="button"
+                                className="btn btn-danger"
+                                onClick={async () => {
+                                  setEntryExitLoading((p) => ({ ...p, exit: true }));
+                                  setLiveTradeMessage(null);
+                                  try {
+                                    const res = await fetch(apiUrl('/api/mountain_signal/live/square_off_all'), {
+                                      method: 'POST',
+                                      headers: { 'Content-Type': 'application/json' },
+                                      credentials: 'include',
+                                      body: JSON.stringify({}),
+                                    });
+                                    const data = await res.json();
+                                    setShowExitConfirm(false);
+                                    setPositionsForConfirm([]);
+                                    if (res.status === 401 || data.authExpired) {
+                                      setLiveTradeMessage({ text: 'Session expired. Please log in again.', type: 'error' });
+                                    } else if (data.status === 'success') {
+                                      const msg = (data.results?.length ? `Squared off ${data.results.length} position(s).` : 'Square-off completed.');
+                                      setLiveTradeMessage({ text: msg, type: 'success' });
+                                      const ordRes = await fetch(apiUrl('/api/zerodha/orders?tag=mountain_signal'), { credentials: 'include' });
+                                      if (ordRes.ok) {
+                                        const ordData = await ordRes.json();
+                                        if (ordData.status === 'success' && Array.isArray(ordData.orders)) setZerodhaOrders(ordData.orders);
+                                      }
+                                      const posRes = await fetch(apiUrl('/api/zerodha/positions'), { credentials: 'include' });
+                                      if (posRes.ok) {
+                                        const posData = await posRes.json();
+                                        if (posData.status === 'success' && Array.isArray(posData.positions)) setZerodhaPositions(posData.positions);
+                                      }
+                                    } else {
+                                      setLiveTradeMessage({ text: data.message || 'Square-off failed.', type: 'error' });
+                                    }
+                                  } catch (e) {
+                                    setLiveTradeMessage({ text: (e as Error).message || 'Request failed.', type: 'error' });
+                                  } finally {
+                                    setEntryExitLoading((p) => ({ ...p, exit: false }));
+                                  }
+                                }}
+                              >
+                                Confirm
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
             </div>
           )}
 

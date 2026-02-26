@@ -191,9 +191,11 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
 
   const hasRsi = showRsi && rsiData && rsiData.some((v) => v != null);
   if (hasRsi && rsiData) {
+    // Ensure RSI length matches times (chartData) to prevent misaligned traces
+    const alignedRsi = times.map((_, i) => rsiData[i] ?? null);
     traces.push({
       x: times,
-      y: rsiData,
+      y: alignedRsi,
       type: 'scatter',
       mode: 'lines',
       name: 'RSI 14',
@@ -281,8 +283,8 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
         marker: {
           symbol: 'star',
           size: 14,
-          color: '#e91e63',
-          line: { width: 1, color: '#880e4f' },
+          color: '#ff69b4',
+          line: { width: 1, color: '#c71585' },
         },
         text: signalMarkers.map(
           (m) => `PE Signal @ ${m.price.toFixed(2)}${m.label ? ' | ' + m.label : ''}`,
@@ -320,6 +322,7 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
     yaxis: {
       title: { text: 'Price' },
       domain: [priceDomainBottom, 1],
+      autorange: true,
       showgrid: true,
       gridcolor: '#e9ecef',
     },
@@ -335,6 +338,7 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
         title: { text: 'RSI' },
         domain: hasVolume ? [0.15, 0.4] : [0, 0.2],
         range: [0, 100],
+        autorange: false,
         showgrid: true,
         gridcolor: '#e9ecef',
         dtick: 10,
@@ -353,6 +357,7 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
   return (
     <ChartErrorBoundary height={chartHeight}>
       <Plot
+        key={`chart-${hasRsi}-${hasVolume}`}
         data={traces}
         layout={layout}
         style={{ width: '100%', height: chartHeight }}

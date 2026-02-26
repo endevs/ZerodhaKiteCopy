@@ -26,8 +26,8 @@ const PlotComponent: React.FC<PlotProps> = ({
     const el = containerRef.current;
     if (!el || !data) return;
 
-    const mergedLayout = { ...layout };
-    const mergedConfig = { responsive: true, ...config };
+    const mergedLayout = { ...(layout || {}) };
+    const mergedConfig = { responsive: true, ...(config || {}) };
 
     if (!initializedRef.current) {
       Plotly.newPlot(el, data, mergedLayout, mergedConfig).then(() => {
@@ -39,7 +39,7 @@ const PlotComponent: React.FC<PlotProps> = ({
         if (onUpdate) onUpdate({ data, layout: mergedLayout }, el);
       });
     }
-  });
+  }, [data, layout, config]);
 
   useEffect(() => {
     const el = containerRef.current;
