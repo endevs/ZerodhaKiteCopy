@@ -13,5 +13,7 @@ groq
 razorpay
 cryptography
 reportlab
+matplotlib
 gymnasium>=0.29.0
 ollama>=0.1.0
+# TimesFM 2.5 (for timesfm_validate.py): install from source - see script docstring

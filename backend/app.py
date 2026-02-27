@@ -2876,8 +2876,41 @@ def init_paper_trade_tables():
     except Exception as e:
         logging.error(f"Error initializing paper trade tables: {e}", exc_info=True)
 
+
+def init_archive_logs_table():
+    """Create archive_logs table if it doesn't exist"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS archive_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                trading_date TEXT NOT NULL,
+                source TEXT NOT NULL,
+                instrument TEXT NOT NULL,
+                strategy TEXT,
+                params TEXT,
+                trades TEXT,
+                events TEXT,
+                zerodha_orders TEXT,
+                zerodha_positions TEXT,
+                summary TEXT,
+                FOREIGN KEY (user_id) REFERENCES users (id)
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_archive_logs_user_date ON archive_logs(user_id, trading_date)")
+        conn.commit()
+        conn.close()
+        logging.info("Archive logs table initialized successfully")
+    except Exception as e:
+        logging.error(f"Error initializing archive logs table: {e}", exc_info=True)
+
+
 # Initialize tables on startup
 init_paper_trade_tables()
+init_archive_logs_table()
 
 def send_email(to_email, otp):
     port = 465  # For SSL
@@ -3478,6 +3511,175 @@ def api_backtest_run():
         'equity_curve': equity_out,
         'summary': summary,
     })
+
+
+@app.route('/api/archive-logs/save', methods=['POST'])
+def api_archive_logs_save():
+    """Save a new archive log entry (trades, events, orders, positions, metadata)."""
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+    user_id = session['user_id']
+    try:
+        data = request.get_json() or {}
+        trading_date = data.get('trading_date') or datetime.datetime.now().strftime('%Y-%m-%d')
+        source = data.get('source') or 'backtest'
+        instrument = data.get('instrument') or 'BANKNIFTY'
+        strategy = data.get('strategy') or ''
+        params = json.dumps(data.get('params') or {})
+        trades = json.dumps(data.get('trades') or [])
+        events = json.dumps(data.get('events') or [])
+        zerodha_orders = json.dumps(data.get('zerodha_orders') or [])
+        zerodha_positions = json.dumps(data.get('zerodha_positions') or [])
+        summary = json.dumps(data.get('summary') or {})
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO archive_logs (user_id, trading_date, source, instrument, strategy, params, trades, events, zerodha_orders, zerodha_positions, summary)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (user_id, trading_date, source, instrument, strategy, params, trades, events, zerodha_orders, zerodha_positions, summary))
+        conn.commit()
+        row_id = cursor.lastrowid
+        conn.close()
+        return jsonify({'status': 'success', 'id': row_id, 'message': 'Archive log saved'})
+    except Exception as e:
+        logging.error(f"Error saving archive log: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/archive-logs/list', methods=['GET'])
+def api_archive_logs_list():
+    """List archive log entries, optionally filtered by trading_date, source, instrument."""
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+    user_id = session['user_id']
+    try:
+        from_date = request.args.get('from_date')
+        to_date = request.args.get('to_date')
+        source = request.args.get('source')
+        instrument = request.args.get('instrument')
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        query = "SELECT id, created_at, trading_date, source, instrument, strategy, params, trades, events, zerodha_orders, zerodha_positions, summary FROM archive_logs WHERE user_id = ?"
+        params = [user_id]
+        if from_date:
+            query += " AND trading_date >= ?"
+            params.append(from_date)
+        if to_date:
+            query += " AND trading_date <= ?"
+            params.append(to_date)
+        if source:
+            query += " AND source = ?"
+            params.append(source)
+        if instrument:
+            query += " AND instrument = ?"
+            params.append(instrument)
+        query += " ORDER BY trading_date DESC, created_at DESC"
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        conn.close()
+
+        def _safe_json_len(val):
+            if val is None or (isinstance(val, str) and not val.strip()):
+                return 0
+            try:
+                return len(json.loads(val))
+            except Exception:
+                return 0
+
+        entries = []
+        for row in rows:
+            summary_obj = {}
+            if row['summary']:
+                try:
+                    summary_obj = json.loads(row['summary'])
+                except Exception:
+                    pass
+            entries.append({
+                'id': row['id'],
+                'created_at': row['created_at'],
+                'trading_date': row['trading_date'],
+                'source': row['source'],
+                'instrument': row['instrument'],
+                'strategy': row['strategy'] or '',
+                'total_trades': summary_obj.get('total_trades', 0),
+                'total_pnl': summary_obj.get('total_pnl'),
+                'trades_count': _safe_json_len(row['trades']),
+                'events_count': _safe_json_len(row['events']),
+                'orders_count': _safe_json_len(row['zerodha_orders']),
+                'positions_count': _safe_json_len(row['zerodha_positions']),
+            })
+        return jsonify({'status': 'success', 'entries': entries})
+    except Exception as e:
+        logging.error(f"Error listing archive logs: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/archive-logs/<int:entry_id>', methods=['GET'])
+def api_archive_logs_get(entry_id):
+    """Fetch full details of one archive log entry."""
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+    user_id = session['user_id']
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM archive_logs WHERE id = ? AND user_id = ?", (entry_id, user_id))
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return jsonify({'status': 'error', 'message': 'Entry not found'}), 404
+
+        def parse_json(val):
+            if not val:
+                return None
+            try:
+                return json.loads(val)
+            except Exception:
+                return None
+
+        return jsonify({
+            'status': 'success',
+            'entry': {
+                'id': row['id'],
+                'created_at': row['created_at'],
+                'trading_date': row['trading_date'],
+                'source': row['source'],
+                'instrument': row['instrument'],
+                'strategy': row['strategy'] or '',
+                'params': parse_json(row['params']),
+                'trades': parse_json(row['trades']) or [],
+                'events': parse_json(row['events']) or [],
+                'zerodha_orders': parse_json(row['zerodha_orders']) or [],
+                'zerodha_positions': parse_json(row['zerodha_positions']) or [],
+                'summary': parse_json(row['summary']) or {},
+            }
+        })
+    except Exception as e:
+        logging.error(f"Error fetching archive log: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/archive-logs/<int:entry_id>', methods=['DELETE'])
+def api_archive_logs_delete(entry_id):
+    """Delete an archive log entry. User can only delete their own entries."""
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+    user_id = session['user_id']
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM archive_logs WHERE id = ? AND user_id = ?", (entry_id, user_id))
+        deleted = cursor.rowcount
+        conn.commit()
+        conn.close()
+        if deleted == 0:
+            return jsonify({'status': 'error', 'message': 'Entry not found'}), 404
+        return jsonify({'status': 'success', 'message': 'Deleted'})
+    except Exception as e:
+        logging.error(f"Error deleting archive log: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
 @app.route('/api/option_ltp', methods=['GET'])

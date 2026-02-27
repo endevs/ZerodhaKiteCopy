@@ -11,8 +11,9 @@
  *
  * Exit priority (index-only):
  *   1. INDEX_STOP   – candle.close > signal.high
- *   2. INDEX_TARGET  – candle.high < EMA(5), then 2 consecutive close > EMA(5)
- *   3. MARKET_CLOSE – candle time >= 15:15
+ *   2. RSI_TWO_CONSECUTIVE_INCREASE – from next candle after entry, 2 consecutive RSI increases
+ *   3. INDEX_TARGET  – candle.high < EMA(5), then 2 consecutive close > EMA(5)
+ *   4. MARKET_CLOSE – candle time >= 15:15
  */
 
 import { PlotlyCandlePoint } from '../PlotlyCandlestickChart';
@@ -36,6 +37,12 @@ const MARKET_CLOSE_MINUTE = 15;
 export interface MountainBacktestConfig {
   rsiOverbought?: number;
   rsiOversold?: number;
+  adxThreshold?: number;
+  /** Exit condition toggles (default all true) */
+  exitIndexStop?: boolean;
+  exitRsiTwoConsecutiveIncrease?: boolean;
+  exitIndexTarget?: boolean;
+  exitMarketClose?: boolean;
 }
 
 function timeStr(t: Date | string): string {
@@ -61,6 +68,7 @@ interface ActiveTrade {
   signalSnapshot: MountainSignal;
   highDroppedBelowEma: boolean;
   consecutiveCloseAboveEma: number;
+  consecutiveRsiIncreases: number;
 }
 
 // ─── Engine ────────────────────────────────────────────────────────────────────
@@ -74,6 +82,11 @@ export function runMountainBacktest(
   }
 
   const rsiOverboughtThreshold = config?.rsiOverbought ?? 70;
+  const adxThreshold = config?.adxThreshold ?? 25;
+  const exitIndexStop = config?.exitIndexStop ?? true;
+  const exitRsiTwoConsecutiveIncrease = config?.exitRsiTwoConsecutiveIncrease ?? true;
+  const exitIndexTarget = config?.exitIndexTarget ?? true;
+  const exitMarketClose = config?.exitMarketClose ?? true;
 
   const closes = candles.map((c) => c.close);
   const highs = candles.map((c) => c.high);
@@ -132,14 +145,14 @@ export function runMountainBacktest(
     }
 
     // ══════════════════════════════════════════════════════════════════════
-    // 1. EXIT EVALUATION (priority: INDEX_STOP > INDEX_TARGET > MARKET_CLOSE)
+    // 1. EXIT EVALUATION (priority: INDEX_STOP > RSI_TWO_CONSECUTIVE_INCREASE > INDEX_TARGET > MARKET_CLOSE)
     // ══════════════════════════════════════════════════════════════════════
     if (S.trade) {
       const at = S.trade;
       let exited = false;
 
       // EXIT: INDEX_STOP – candle.close rises above signal.high
-      if (c.close > at.signalSnapshot.high) {
+      if (exitIndexStop && c.close > at.signalSnapshot.high) {
         const exitPnl = at.entryPrice - c.close;
         const exitPnlPct = ((at.entryPrice - c.close) / at.entryPrice) * 100;
         trades.push(finalizeTrade(at, i, c, 'INDEX_STOP', exitPnl, exitPnlPct));
@@ -154,8 +167,34 @@ export function runMountainBacktest(
         exited = true;
       }
 
+      // EXIT: RSI_TWO_CONSECUTIVE_INCREASE – from next candle after entry, 2 consecutive RSI increases
+      if (!exited && exitRsiTwoConsecutiveIncrease && i > at.entryCandleIndex) {
+        const prevRsi = rsi14[i - 1];
+        if (r14 !== null && prevRsi !== null) {
+          if (r14 > prevRsi) {
+            at.consecutiveRsiIncreases += 1;
+            if (at.consecutiveRsiIncreases >= 2) {
+              const exitPnl = at.entryPrice - c.close;
+              const exitPnlPct = ((at.entryPrice - c.close) / at.entryPrice) * 100;
+              trades.push(finalizeTrade(at, i, c, 'RSI_TWO_CONSECUTIVE_INCREASE', exitPnl, exitPnlPct));
+              cumulativePnl += exitPnl;
+
+              pushEvent(events, i, c, MountainEventType.EXIT_RSI_TWO_CONSECUTIVE_INCREASE,
+                `RSI EXIT – 2 consecutive RSI increases (prev: ${prevRsi.toFixed(1)} → curr: ${r14.toFixed(1)}). P&L: ${exitPnl.toFixed(2)}`,
+                { entryPrice: at.entryPrice, exitPrice: c.close, exitReason: 'RSI_TWO_CONSECUTIVE_INCREASE', pnl: exitPnl,
+                  ema5: e5, rsi14: r14, prevRsi });
+
+              resetAfterExit(S, candleTime);
+              exited = true;
+            }
+          } else {
+            at.consecutiveRsiIncreases = 0;
+          }
+        }
+      }
+
       // EXIT: INDEX_TARGET – candle.high < EMA(5), then next 2 consecutive close > EMA(5)
-      if (!exited) {
+      if (!exited && exitIndexTarget) {
         if (c.high < e5) {
           at.highDroppedBelowEma = true;
           at.consecutiveCloseAboveEma = 0;
@@ -181,7 +220,7 @@ export function runMountainBacktest(
       }
 
       // EXIT: MARKET_CLOSE – time >= 15:15
-      if (!exited && isAtOrAfterMarketClose(candleTime)) {
+      if (!exited && exitMarketClose && isAtOrAfterMarketClose(candleTime)) {
         const exitPnl = at.entryPrice - c.close;
         const exitPnlPct = ((at.entryPrice - c.close) / at.entryPrice) * 100;
         trades.push(finalizeTrade(at, i, c, 'MARKET_CLOSE', exitPnl, exitPnlPct));
@@ -208,16 +247,17 @@ export function runMountainBacktest(
     if (!S.trade) {
       const lowAboveEma = c.low > e5;
       const rsiOverbought = r14 > rsiOverboughtThreshold;
+      const adxAboveThreshold = (adx14[i] ?? 0) > adxThreshold;
 
       if (S.signal === null) {
-        if (lowAboveEma && rsiOverbought) {
+        if (lowAboveEma && rsiOverbought && adxAboveThreshold) {
           S.signal = { type: 'PE', high: c.high, low: c.low, time: timeStr(c.time), candleIndex: i };
           pushEvent(events, i, c, MountainEventType.SIGNAL_IDENTIFIED,
             `PE signal identified – H:${c.high.toFixed(2)} L:${c.low.toFixed(2)} | EMA5:${e5.toFixed(2)} RSI:${r14.toFixed(1)}`,
             { signalHigh: c.high, signalLow: c.low, signalTime: timeStr(c.time), ema5: e5, rsi14: r14 });
         }
       } else {
-        if (lowAboveEma && rsiOverbought) {
+        if (lowAboveEma && rsiOverbought && adxAboveThreshold) {
           const oldHigh = S.signal.high;
           const oldLow = S.signal.low;
           S.signal = { type: 'PE', high: c.high, low: c.low, time: timeStr(c.time), candleIndex: i };
@@ -304,6 +344,7 @@ function createActiveTrade(
     signalSnapshot: { ...sig },
     highDroppedBelowEma: false,
     consecutiveCloseAboveEma: 0,
+    consecutiveRsiIncreases: 0,
   };
 }
 

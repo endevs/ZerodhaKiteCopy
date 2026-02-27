@@ -7,6 +7,26 @@ declare global {
   }
 }
 
+const RAZORPAY_SCRIPT_URL = 'https://checkout.razorpay.com/v1/checkout.js';
+
+let razorpayLoadPromise: Promise<void> | null = null;
+
+function loadRazorpayScript(): Promise<void> {
+  if (typeof window !== 'undefined' && window.Razorpay) {
+    return Promise.resolve();
+  }
+  if (razorpayLoadPromise) return razorpayLoadPromise;
+  razorpayLoadPromise = new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = RAZORPAY_SCRIPT_URL;
+    script.async = true;
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error('Payment gateway could not be loaded. Please check your connection and try again.'));
+    document.body.appendChild(script);
+  });
+  return razorpayLoadPromise;
+}
+
 interface PlanFeature {
   text: string;
   included: boolean;
@@ -148,16 +168,13 @@ const SubscribeContent: React.FC = () => {
       return;
     }
 
-    // For paid plans, create Razorpay order
-    if (!window.Razorpay) {
-      setError('Payment gateway not loaded. Please refresh the page.');
-      return;
-    }
-
+    // For paid plans, load Razorpay and create order
     try {
       setLoading(planId);
       setError(null);
       setSuccess(null);
+
+      await loadRazorpayScript();
 
       // Map frontend plan IDs to backend plan types
       const planTypeMap: { [key: string]: string } = {
@@ -273,15 +290,12 @@ const SubscribeContent: React.FC = () => {
 
   const handleCustomization = async () => {
     // Handle customization plan payment
-    if (!window.Razorpay) {
-      setError('Payment gateway not loaded. Please refresh the page.');
-      return;
-    }
-
     try {
       setLoading('customization');
       setError(null);
       setSuccess(null);
+
+      await loadRazorpayScript();
 
       // Create order for customization
       const response = await fetch(apiUrl('/api/payment/create-order'), {
