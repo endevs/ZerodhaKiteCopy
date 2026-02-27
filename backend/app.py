@@ -3316,6 +3316,83 @@ def api_plotly_index_candles():
     })
 
 
+@app.route('/api/prediction/forecast', methods=['GET'])
+def api_prediction_forecast():
+    """Run TimesFM + LSTM + Ensemble forecast. Returns actual, predictions, timestamps for chart."""
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'error': 'User not logged in'}), 401
+
+    index = request.args.get('index', 'NIFTY').upper()
+    date_str = request.args.get('date')
+
+    if index not in ('NIFTY', 'BANKNIFTY'):
+        return jsonify({'error': 'Invalid index. Use NIFTY or BANKNIFTY'}), 400
+
+    today = datetime.date.today()
+    if not date_str:
+        date_str = today.isoformat()
+    try:
+        selected_date = datetime.datetime.strptime(date_str, '%Y-%m-%d').date()
+    except ValueError:
+        return jsonify({'error': 'Invalid date format. Use YYYY-MM-DD'}), 400
+
+    if selected_date > today:
+        return jsonify({'error': 'Date cannot be in the future'}), 400
+
+    is_live = selected_date == today
+    full_day = request.args.get('full_day', 'false').lower() in ('true', '1', 'yes')
+
+    def _run_forecast(kite_client):
+        if full_day and not is_live:
+            from timesfm_service import run_forecast_full_day
+            return run_forecast_full_day(
+                kite_client,
+                symbol=index,
+                target_date=selected_date,
+                horizon=12,
+            )
+        from timesfm_service import run_forecast
+        return run_forecast(
+            kite_client,
+            symbol=index,
+            from_date=selected_date,
+            to_date=selected_date,
+            horizon=12,
+            segment='last',
+            predict_future=is_live,
+        )
+
+    try:
+        res = _with_valid_kite_client(
+            session['user_id'],
+            f"prediction forecast for {index}",
+            _run_forecast,
+            preferred_tokens=[session.get('access_token')],
+        )
+    except kite_exceptions.TokenException:
+        return jsonify({'error': 'Zerodha session expired. Please log in again.', 'authExpired': True}), 401
+    except Exception as err:
+        logging.error(f"/api/prediction/forecast error: {err}", exc_info=True)
+        return jsonify({'error': str(err)}), 500
+
+    if res.get('error'):
+        return jsonify({'error': res['error']}), 400
+
+    payload = {
+        'actual': res.get('actual', []),
+        'timesfm': res.get('timesfm', []),
+        'lstm': res.get('lstm'),
+        'ensemble': res.get('ensemble'),
+        'timestamps': res.get('timestamps', []),
+        'best_model': res.get('best_model', 'TimesFM'),
+        'mae': res.get('mae', 0),
+        'is_live': is_live,
+    }
+    if full_day and not is_live and res.get('candles'):
+        payload['candles'] = res['candles']
+    return jsonify(payload)
+
+
 @app.route('/api/backtest/run', methods=['POST'])
 def api_backtest_run():
     """Run a lightweight EMA-crossover or ORB backtest and return trade markers + equity curve."""

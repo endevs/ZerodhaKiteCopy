@@ -1,14 +1,15 @@
 import React, { useCallback, useEffect, useMemo, useState, useRef } from 'react';
-import PlotlyCandlestickChart, { PlotlyCandlePoint, TradeMarker } from './PlotlyCandlestickChart';
+import PlotlyCandlestickChart, { PlotlyCandlePoint, TradeMarker, PredictionOverlay } from './PlotlyCandlestickChart';
 import { Plot } from '../lib/plotly-finance';
 import { apiUrl } from '../config/api';
 import { useSocket } from '../hooks/useSocket';
 import { runMountainBacktest } from './advancedCharts/mountainStrategyEngine';
+import { computeRSI, computeADX } from './advancedCharts/mountainIndicators';
 import { MountainEvent, MountainEventType } from './advancedCharts/MountainStrategyTypes';
 
 type BtStrategy = 'mountain' | 'ema_crossover';
 
-type TabKey = 'live' | 'backtest' | 'archive';
+type TabKey = 'live' | 'backtest' | 'archive' | 'prediction';
 
 const NIFTY_TOKEN = 256265;
 const BANKNIFTY_TOKEN = 260105;
@@ -144,6 +145,26 @@ const AdvancedChartsContent: React.FC = () => {
   const [btRsi, setBtRsi] = useState<(number | null)[]>([]);
   const [btAdx, setBtAdx] = useState<(number | null)[]>([]);
   const [showPnlDetailModal, setShowPnlDetailModal] = useState<boolean>(false);
+
+  // Prediction tab state
+  const [predictionDate, setPredictionDate] = useState<string>(todayStr());
+  const [predictionIndex, setPredictionIndex] = useState<'NIFTY' | 'BANKNIFTY'>('NIFTY');
+  const [predictionLoading, setPredictionLoading] = useState<boolean>(false);
+  const [predictionData, setPredictionData] = useState<{
+    actual: number[];
+    timesfm: number[];
+    lstm: number[] | null;
+    ensemble: number[] | null;
+    timestamps: string[];
+    best_model: string;
+    mae: number;
+    is_live: boolean;
+    candles?: Array<{ timestamp: string; open: number; high: number; low: number; close: number; volume?: number }>;
+  } | null>(null);
+  const [predictionError, setPredictionError] = useState<string | null>(null);
+  const [predictionRsiOverbought, setPredictionRsiOverbought] = useState<number>(70);
+  const [predictionRsiOversold, setPredictionRsiOversold] = useState<number>(30);
+  const [predictionWarmupCandles, setPredictionWarmupCandles] = useState<PlotlyCandlePoint[]>([]);
 
   // Archive tab state
   interface ArchiveEntry {
@@ -711,6 +732,143 @@ const AdvancedChartsContent: React.FC = () => {
     if (activeTab === 'archive') fetchArchiveList();
   }, [activeTab, fetchArchiveList]);
 
+  // ---------- fetchPrediction (Prediction tab) ----------
+  const fetchPrediction = useCallback(async () => {
+    setPredictionLoading(true);
+    setPredictionError(null);
+    setPredictionData(null);
+    setPredictionWarmupCandles([]);
+    const isLive = predictionDate === todayStr();
+    try {
+      // Fetch warmup candles for RSI/ADX (3 days before for valid RSI(14))
+      const warmupFrom = (() => {
+        const d = new Date(predictionDate);
+        d.setDate(d.getDate() - 3);
+        return d.toISOString().split('T')[0];
+      })();
+      const btRes = await fetch(apiUrl('/api/backtest/run'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          index: predictionIndex,
+          from_date: warmupFrom,
+          to_date: predictionDate,
+          interval: '5minute',
+          strategy: 'ema_crossover',
+          ema_fast: 5,
+          ema_slow: 20,
+        }),
+      });
+      const btData = await btRes.json();
+      const allCandles = (btData.candles || []) as Array<{
+        timestamp: string; open: number; high: number; low: number; close: number; volume?: number;
+      }>;
+      const warmupMapped: PlotlyCandlePoint[] = allCandles.map((c) => ({
+        time: c.timestamp,
+        open: c.open,
+        high: c.high,
+        low: c.low,
+        close: c.close,
+        volume: c.volume ?? 0,
+        indexClose: c.close,
+        ema5: null,
+      }));
+      setPredictionWarmupCandles(computeEma5(warmupMapped));
+
+      // Call prediction API
+      const fullDay = !isLive;
+      let url = apiUrl(`/api/prediction/forecast?index=${predictionIndex}&date=${predictionDate}`);
+      if (fullDay) url += '&full_day=true';
+      let res = await fetch(url, { credentials: 'include' });
+      let data = await res.json();
+
+      // Fallback to last-12 if full_day fails
+      if (fullDay && !res.ok && data.error) {
+        url = apiUrl(`/api/prediction/forecast?index=${predictionIndex}&date=${predictionDate}`);
+        res = await fetch(url, { credentials: 'include' });
+        data = await res.json();
+      }
+
+      if (!res.ok) {
+        setPredictionError(data.error || 'Failed to run prediction');
+        return;
+      }
+      if (data.authExpired) {
+        setPredictionError('Zerodha session expired. Please log in again.');
+        return;
+      }
+      setPredictionData({
+        actual: data.actual || [],
+        timesfm: data.timesfm || [],
+        lstm: data.lstm ?? null,
+        ensemble: data.ensemble ?? null,
+        timestamps: data.timestamps || [],
+        best_model: data.best_model || 'TimesFM',
+        mae: data.mae ?? 0,
+        is_live: data.is_live ?? false,
+        candles: data.candles || undefined,
+      });
+    } catch (e) {
+      setPredictionError(e instanceof Error ? e.message : 'Failed to run prediction');
+    } finally {
+      setPredictionLoading(false);
+    }
+  }, [predictionIndex, predictionDate]);
+
+  // ---------- Prediction tab chart data (candlesticks, RSI, ADX, overlays) ----------
+  const predictionChartState = useMemo(() => {
+    if (!predictionData) return null;
+    const targetPrefix = predictionDate + 'T';
+    const warmupFiltered = predictionWarmupCandles.filter((c) => {
+      const t = typeof c.time === 'string' ? c.time : (c.time as Date).toISOString();
+      return t.startsWith(predictionDate) || t.startsWith(targetPrefix);
+    });
+    const chartCandles: PlotlyCandlePoint[] = predictionData.candles?.length
+      ? predictionData.candles.map((c) => ({
+          time: c.timestamp.includes('T') ? c.timestamp : `${c.timestamp.replace(' ', 'T')}:00`,
+          open: c.open,
+          high: c.high,
+          low: c.low,
+          close: c.close,
+          volume: c.volume ?? 0,
+          indexClose: c.close,
+          ema5: null,
+        }))
+      : warmupFiltered.map((c) => ({ ...c, indexClose: c.close }));
+    if (chartCandles.length === 0) return null;
+
+    const candlesForIndicators = predictionWarmupCandles.length > 0 ? predictionWarmupCandles : chartCandles;
+    const closes = candlesForIndicators.map((c) => c.close);
+    const highs = candlesForIndicators.map((c) => c.high);
+    const lows = candlesForIndicators.map((c) => c.low);
+    const rsiAll = computeRSI(closes, 14);
+    const adxAll = computeADX(highs, lows, closes, 14);
+    const n = chartCandles.length;
+    let rsiSlice = rsiAll.slice(-n);
+    let adxSlice = adxAll.slice(-n);
+    while (rsiSlice.length < n) rsiSlice = [null, ...rsiSlice];
+    while (adxSlice.length < n) adxSlice = [null, ...adxSlice];
+
+    const toIso = (ts: string) =>
+      ts.includes('T') ? ts : ts.replace(' ', 'T') + (ts.match(/\d{2}:\d{2}$/) ? ':00' : '');
+    const overlayX = predictionData.timestamps.map(toIso);
+    const overlays: PredictionOverlay[] = [
+      { name: 'TimesFM', x: overlayX, y: predictionData.timesfm, color: '#1f77b4' },
+    ];
+    if (predictionData.lstm?.length)
+      overlays.push({ name: 'LSTM', x: overlayX, y: predictionData.lstm, color: '#2ca02c' });
+    if (predictionData.ensemble?.length)
+      overlays.push({ name: 'Ensemble', x: overlayX, y: predictionData.ensemble, color: '#ff7f0e' });
+
+    return {
+      chartCandles: computeEma5(chartCandles),
+      rsiData: rsiSlice,
+      adxData: adxSlice,
+      overlays,
+    };
+  }, [predictionData, predictionWarmupCandles, predictionDate]);
+
   // ---------- handleSnapshot (manual save to Archive, Live tab only) ----------
   const handleSnapshot = useCallback(async () => {
     setSnapshotLoading(true);
@@ -866,6 +1024,12 @@ const AdvancedChartsContent: React.FC = () => {
               <button type="button" className={`nav-link ${activeTab === 'archive' ? 'active' : ''}`}
                 onClick={() => setActiveTab('archive')}>
                 <i className="bi bi-archive me-2" />Archive Logs
+              </button>
+            </li>
+            <li className="nav-item" role="presentation">
+              <button type="button" className={`nav-link ${activeTab === 'prediction' ? 'active' : ''}`}
+                onClick={() => setActiveTab('prediction')}>
+                <i className="bi bi-graph-up-arrow me-2" />Prediction
               </button>
             </li>
           </ul>
@@ -2112,6 +2276,146 @@ const AdvancedChartsContent: React.FC = () => {
                       )}
                     </tbody>
                   </table>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ============ PREDICTION TAB ============ */}
+          {activeTab === 'prediction' && (
+            <div>
+              <div className="row g-3 mb-3 align-items-end">
+                <div className="col-md-2">
+                  <label className="form-label fw-bold">Index</label>
+                  <select className="form-select" value={predictionIndex}
+                    onChange={(e) => setPredictionIndex(e.target.value === 'NIFTY' ? 'NIFTY' : 'BANKNIFTY')}>
+                    <option value="NIFTY">NIFTY 50</option>
+                    <option value="BANKNIFTY">BANKNIFTY</option>
+                  </select>
+                </div>
+                <div className="col-md-2">
+                  <label className="form-label fw-bold">Date</label>
+                  <input type="date" className="form-control" value={predictionDate}
+                    onChange={(e) => setPredictionDate(e.target.value)} max={todayStr()} />
+                </div>
+                <div className="col-md-1">
+                  <label className="form-label fw-bold">RSI OB</label>
+                  <input type="number" className="form-control" value={predictionRsiOverbought} min={50} max={90}
+                    onChange={(e) => setPredictionRsiOverbought(Number(e.target.value) || 70)} />
+                </div>
+                <div className="col-md-1">
+                  <label className="form-label fw-bold">RSI OS</label>
+                  <input type="number" className="form-control" value={predictionRsiOversold} min={10} max={50}
+                    onChange={(e) => setPredictionRsiOversold(Number(e.target.value) || 30)} />
+                </div>
+                <div className="col-md-2 d-flex align-items-end">
+                  <button type="button" className="btn btn-primary" onClick={fetchPrediction} disabled={predictionLoading}>
+                    {predictionLoading ? (
+                      <>
+                        <span className="spinner-border spinner-border-sm me-2" role="status"></span>
+                        Running prediction...
+                      </>
+                    ) : predictionDate === todayStr() ? (
+                      <>Predict Next 12 Candles</>
+                    ) : (
+                      <>Load & Predict (Full Day)</>
+                    )}
+                  </button>
+                </div>
+              </div>
+              {predictionDate === todayStr() && (
+                <div className="alert alert-info py-2 small mb-3">
+                  <i className="bi bi-info-circle me-2"></i>
+                  Live mode: predicting next 12 five-minute candles. No actual data to compare yet.
+                </div>
+              )}
+              {predictionError && (
+                <div className="alert alert-danger py-2 mb-3">{predictionError}</div>
+              )}
+              {predictionData && (
+                <div className="mb-3">
+                  <div className="d-flex flex-wrap gap-3 small mb-2">
+                    <span><strong>Best model:</strong> {predictionData.best_model}</span>
+                    {!predictionData.is_live && predictionData.actual.length > 0 && (
+                      <span><strong>MAE:</strong> {predictionData.mae.toFixed(2)}</span>
+                    )}
+                  </div>
+                  {predictionChartState ? (
+                    <PlotlyCandlestickChart
+                      data={predictionChartState.chartCandles}
+                      title={`${predictionIndex} 5-min Forecast${predictionData.is_live ? ' – Live (Next 12)' : ` – ${predictionDate} (Full Day)`}`}
+                      height={520}
+                      showIndexLine={true}
+                      indexLabel="Actual Close"
+                      showEma={true}
+                      showVolume={true}
+                      showRsi={true}
+                      rsiData={predictionChartState.rsiData}
+                      rsiOverbought={predictionRsiOverbought}
+                      rsiOversold={predictionRsiOversold}
+                      adxData={predictionChartState.adxData}
+                      predictionOverlays={predictionChartState.overlays}
+                    />
+                  ) : (
+                    <div style={{ height: 450 }}>
+                      <Plot
+                        data={[
+                          ...(predictionData.actual.length > 0
+                            ? [{
+                                x: predictionData.timestamps,
+                                y: predictionData.actual,
+                                type: 'scatter',
+                                mode: 'lines+markers',
+                                name: 'Actual',
+                                line: { color: 'black', width: 2 },
+                                marker: { size: 6 },
+                              }]
+                            : []),
+                          {
+                            x: predictionData.timestamps,
+                            y: predictionData.timesfm,
+                            type: 'scatter',
+                            mode: 'lines+markers',
+                            name: 'TimesFM',
+                            line: { color: '#1f77b4', width: 1.5 },
+                            marker: { size: 5 },
+                          },
+                          ...(predictionData.lstm
+                            ? [{
+                                x: predictionData.timestamps,
+                                y: predictionData.lstm,
+                                type: 'scatter',
+                                mode: 'lines+markers',
+                                name: 'LSTM',
+                                line: { color: '#2ca02c', width: 1.5 },
+                                marker: { size: 5 },
+                              }]
+                            : []),
+                          ...(predictionData.ensemble
+                            ? [{
+                                x: predictionData.timestamps,
+                                y: predictionData.ensemble,
+                                type: 'scatter',
+                                mode: 'lines+markers',
+                                name: 'Ensemble',
+                                line: { color: '#ff7f0e', width: 1.5 },
+                                marker: { size: 5 },
+                              }]
+                            : []),
+                        ]}
+                        layout={{
+                          title: `${predictionIndex} 5-min Forecast${predictionData.is_live ? ' [Live]' : ''}`,
+                          xaxis: { title: 'Time', tickangle: -45 },
+                          yaxis: { title: 'Close Price' },
+                          showlegend: true,
+                          legend: { orientation: 'h', y: 1.1 },
+                          margin: { t: 50, r: 30, b: 80, l: 60 },
+                          height: 450,
+                        }}
+                        config={{ responsive: true }}
+                      />
+                    </div>
+                  )}
                 </div>
               )}
             </div>

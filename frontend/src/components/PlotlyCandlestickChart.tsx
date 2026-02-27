@@ -20,6 +20,13 @@ export interface TradeMarker {
   label?: string;
 }
 
+export interface PredictionOverlay {
+  name: string;
+  x: (string | Date)[];
+  y: number[];
+  color: string;
+}
+
 interface PlotlyCandlestickChartProps {
   data: PlotlyCandlePoint[];
   title?: string;
@@ -34,6 +41,7 @@ interface PlotlyCandlestickChartProps {
   adxData?: (number | null)[];
   indexLabel?: string;
   markers?: TradeMarker[];
+  predictionOverlays?: PredictionOverlay[];
 }
 
 interface ChartErrorBoundaryState {
@@ -101,6 +109,7 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
   adxData,
   indexLabel = 'Index Close',
   markers,
+  predictionOverlays,
 }) => {
   const hasRsi = showRsi && rsiData && rsiData.some((v) => v != null);
   const hasAdx = showRsi && adxData && adxData.some((v) => v != null);
@@ -158,6 +167,25 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
       yaxis: 'y',
       connectgaps: true,
     });
+  }
+
+  if (predictionOverlays && predictionOverlays.length > 0) {
+    for (const overlay of predictionOverlays) {
+      const x = overlay.x.map((v) => (v instanceof Date ? v.toISOString() : v));
+      if (x.length > 0 && overlay.y.length === x.length) {
+        out.push({
+          x,
+          y: overlay.y,
+          type: 'scatter',
+          mode: 'lines+markers',
+          name: overlay.name,
+          line: { color: overlay.color, width: 1.5 },
+          marker: { size: 5 },
+          yaxis: 'y',
+          connectgaps: false,
+        });
+      }
+    }
   }
 
   if (showVolume && volumes.some((v) => v > 0)) {
@@ -292,7 +320,7 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
   }
 
   return out;
-  }, [data, showEma, showVolume, showRsi, showIndexLine, rsiData, rsiOverbought, rsiOversold, adxData, indexLabel, markers, hasRsi, hasAdx]);
+  }, [data, showEma, showVolume, showRsi, showIndexLine, rsiData, rsiOverbought, rsiOversold, adxData, indexLabel, markers, predictionOverlays, hasRsi, hasAdx]);
 
   const chartHeight = hasRsi ? Math.max(height, 620) : height;
 
