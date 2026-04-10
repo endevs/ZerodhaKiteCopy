@@ -68,6 +68,9 @@ Production URLs are in **`backend/.env.production.example`** (`https://drpinfote
 The backend image installs **CPU-only PyTorch** (`requirements-docker.txt` + PyTorch CPU index) so the first build stays ~minutes instead of multi‑GB CUDA wheels. For GPU training on the host, use a venv + full `requirements.txt` outside Docker.
 
 ```bash
+# Optional: interactive backend/.env (first time)
+# bash setup.sh local
+
 docker compose build
 docker compose up -d
 ```
@@ -76,14 +79,28 @@ The compose volume starts with an **empty** SQLite file unless you bind-mount an
 
 Open **http://localhost:5175**
 
+**Windows:** `.\setup.ps1 -Env local` creates **`backend\.env`** if missing (prompts), then starts Compose.
+
 ## Production (EC2)
 
-Ensure **`backend/.env.production`** exists on the server (from `.env.production.example`). `docker-compose.prod.yml` loads **only** that file, not `.env`, so local secrets never need to live on the server.
+`docker-compose.prod.yml` loads **`backend/.env.production`** only (not `.env`).
 
-From the app directory only (does not touch other projects’ containers):
+### Interactive setup (recommended, same idea as toolsDRP)
+
+On the server, in the repo root:
 
 ```bash
 git pull
+bash setup.sh prod
+```
+
+The first run **prompts** for Google OAuth, Razorpay, SMTP, public URL (default `https://drpinfotech.com`), writes **`backend/.env.production`**, then **`docker compose -f docker-compose.prod.yml up --build -d`**. If `.env.production` already exists, it is left unchanged.
+
+### Manual
+
+```bash
+cp backend/.env.production.example backend/.env.production
+# edit secrets, then:
 docker compose -f docker-compose.prod.yml build
 docker compose -f docker-compose.prod.yml up -d
 ```
