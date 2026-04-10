@@ -18,7 +18,7 @@ DATABASE_PATH = os.getenv('DATABASE_PATH', 'database.db')
 
 # Server Configuration
 SERVER_HOST = os.getenv('SERVER_HOST', '0.0.0.0')
-SERVER_PORT = int(os.getenv('SERVER_PORT', 8001))
+SERVER_PORT = int(os.getenv('SERVER_PORT', 8003))
 DEBUG = os.getenv('DEBUG', 'False').lower() == 'true'
 
 # CORS Configuration
@@ -35,3 +35,5 @@ RAZORPAY_WEBHOOK_SECRET = os.getenv('RAZORPAY_WEBHOOK_SECRET', '')
 # Google OAuth Configuration
 GOOGLE_CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID', '')
 GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET', '')
+# Full callback URL; must match Google Cloud Console. If empty, uses request host + /api/auth/google/callback
+GOOGLE_REDIRECT_URI = (os.getenv('GOOGLE_REDIRECT_URI') or '').strip()

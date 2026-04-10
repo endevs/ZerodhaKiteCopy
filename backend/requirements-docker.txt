@@ -1,0 +1,19 @@
+# Same as requirements.txt but torch is installed separately in Dockerfile (CPU wheel, ~200MB vs ~2GB+ CUDA).
+Flask
+gunicorn
+kiteconnect
+Flask-SocketIO
+eventlet
+APScheduler
+flask-cors
+pandas
+python-dotenv
+numpy
+scikit-learn
+groq
+razorpay
+cryptography
+reportlab
+matplotlib
+gymnasium>=0.29.0
+ollama>=0.1.0

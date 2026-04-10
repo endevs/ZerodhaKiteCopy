@@ -1,8 +1,159 @@
-
+import os
 import sqlite3
 import config
 import time
 import logging
+
+
+def ensure_core_schema():
+    """
+    Create core tables if missing (e.g. fresh Docker volume with empty SQLite file).
+    Idempotent: safe on every startup. Does not DROP existing data.
+    """
+    db_path = config.DATABASE_PATH
+    parent = os.path.dirname(os.path.abspath(db_path))
+    if parent and not os.path.exists(parent):
+        os.makedirs(parent, exist_ok=True)
+
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("PRAGMA journal_mode=WAL")
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mobile TEXT NOT NULL,
+                email TEXT NOT NULL UNIQUE,
+                email_verified BOOLEAN NOT NULL DEFAULT 0,
+                app_key TEXT,
+                app_secret TEXT,
+                otp TEXT,
+                otp_expiry DATETIME,
+                zerodha_access_token TEXT,
+                zerodha_token_created_at DATETIME,
+                user_name TEXT,
+                google_picture TEXT,
+                is_admin BOOLEAN NOT NULL DEFAULT 0,
+                current_subscription_id INTEGER,
+                subscription_trial_ends_at DATETIME
+            )
+        """)
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS user_contact_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                name TEXT NOT NULL,
+                email TEXT NOT NULL,
+                mobile TEXT NOT NULL,
+                message TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users (id)
+            )
+        """)
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS strategies (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                strategy_name TEXT NOT NULL,
+                strategy_type TEXT NOT NULL,
+                instrument TEXT NOT NULL,
+                candle_time TEXT NOT NULL,
+                start_time TEXT NOT NULL,
+                end_time TEXT NOT NULL,
+                stop_loss REAL NOT NULL,
+                target_profit REAL NOT NULL,
+                total_lot INTEGER NOT NULL,
+                trailing_stop_loss REAL NOT NULL,
+                segment TEXT NOT NULL,
+                trade_type TEXT NOT NULL,
+                strike_price TEXT NOT NULL,
+                expiry_type TEXT NOT NULL,
+                ema_period INTEGER,
+                status TEXT NOT NULL DEFAULT 'saved',
+                visibility TEXT NOT NULL DEFAULT 'private',
+                indicators TEXT,
+                entry_rules TEXT,
+                exit_rules TEXT,
+                blueprint TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                approval_status TEXT NOT NULL DEFAULT 'approved',
+                submitted_for_approval_at DATETIME,
+                approved_at DATETIME,
+                approved_by INTEGER,
+                rejected_at DATETIME,
+                rejected_by INTEGER,
+                rejection_reason TEXT,
+                FOREIGN KEY (user_id) REFERENCES users (id)
+            )
+        """)
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS market_data (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                instrument_token INTEGER NOT NULL,
+                trading_symbol TEXT NOT NULL,
+                timestamp DATETIME NOT NULL,
+                last_price REAL,
+                volume INTEGER,
+                instrument_type TEXT
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS tick_data (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                instrument_token INTEGER NOT NULL,
+                timestamp DATETIME NOT NULL,
+                last_price REAL NOT NULL,
+                volume INTEGER
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS tick_data_status (
+                instrument_token INTEGER PRIMARY KEY,
+                status TEXT NOT NULL DEFAULT 'Stopped'
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS simulated_market_data (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                instrument_token INTEGER NOT NULL,
+                timestamp DATETIME NOT NULL,
+                last_price REAL NOT NULL
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS five_minute_candles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                instrument_token INTEGER NOT NULL,
+                timestamp DATETIME NOT NULL,
+                open REAL NOT NULL,
+                high REAL NOT NULL,
+                low REAL NOT NULL,
+                close REAL NOT NULL,
+                volume INTEGER NOT NULL,
+                ema REAL
+            )
+        """)
+
+        conn.commit()
+        logging.info("Core database schema ensured (tables present or created).")
+    except Exception as e:
+        logging.error(f"ensure_core_schema failed: {e}", exc_info=True)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
 
 def get_db_connection(timeout=30.0, retries=3):
     """

@@ -1,0 +1,7 @@
+# Moirai 2.0 prediction overlay (optional)
+# Install with: pip install -r requirements-moirai.txt
+# Requires Python 3.10, 3.11, or 3.12 (scipy has no pre-built wheels for 3.13 on Windows).
+# First run downloads Salesforce/moirai-2.0-R-small from Hugging Face; requires network access.
+uni2ts
+gluonts
+huggingface_hub

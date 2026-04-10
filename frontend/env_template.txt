@@ -1,0 +1,6 @@
+# CRA reads REACT_APP_* at build time.
+# npm start + setupProxy: backend http://localhost:8003 (leave these unset).
+# Docker image build: leave empty for same-origin via Nginx on :5175 (compose passes empty args).
+
+# REACT_APP_API_BASE=
+# REACT_APP_SOCKET_BASE=

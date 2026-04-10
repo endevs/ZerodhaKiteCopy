@@ -52,7 +52,7 @@ from requests.exceptions import (
     ConnectionError as RequestsConnectionError,
     Timeout as RequestsTimeout,
 )
-from database import get_db_connection
+from database import get_db_connection, ensure_core_schema
 from live_trade import (
     ensure_live_trade_tables,
     create_deployment as live_create_deployment,
@@ -1424,6 +1424,12 @@ if ASYNC_MODE == 'eventlet':
 app = Flask(__name__)
 app.secret_key = config.SECRET_KEY
 
+# Behind Docker Nginx / host reverse proxy: trust X-Forwarded-* for Host, scheme (OAuth, cookies)
+if os.getenv('TRUST_PROXY', '').lower() in ('1', 'true', 'yes'):
+    from werkzeug.middleware.proxy_fix import ProxyFix
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+    logging.info('TRUST_PROXY enabled: X-Forwarded-* headers honored')
+
 # Generate a server startup timestamp to invalidate old sessions
 # This ensures sessions are cleared when server restarts
 import time
@@ -1444,10 +1450,14 @@ CORS(app,
 # In production, CORS_ORIGINS should include production domain
 socketio_cors_origins = list(config.CORS_ORIGINS)
 # Add localhost origins for development (safe to include even in production)
-if 'http://localhost:8001' not in socketio_cors_origins:
-    socketio_cors_origins.append('http://localhost:8001')
-if 'http://127.0.0.1:8001' not in socketio_cors_origins:
-    socketio_cors_origins.append('http://127.0.0.1:8001')
+for _origin in (
+    'http://localhost:8001',
+    'http://127.0.0.1:8001',
+    'http://localhost:8003',
+    'http://127.0.0.1:8003',
+):
+    if _origin not in socketio_cors_origins:
+        socketio_cors_origins.append(_origin)
 # Add production domain if FRONTEND_URL is set and not localhost
 if config.FRONTEND_URL and 'localhost' not in config.FRONTEND_URL:
     production_origin = config.FRONTEND_URL.rstrip('/')
@@ -1476,6 +1486,36 @@ socketio = SocketIO(app,
                     cookie=None)  # Disable cookie to avoid session issues
                     # Note: path defaults to '/socket.io/' - don't override unless needed
 
+# Fresh Docker volume: empty SQLite — create users/strategies before OAuth or ALTER migrations
+try:
+    ensure_core_schema()
+except Exception as e:
+    logging.error(f"ensure_core_schema failed: {e}")
+
+try:
+    from migrate_subscriptions import migrate as migrate_subscriptions_schema
+    migrate_subscriptions_schema()
+except Exception as e:
+    logging.warning(f"Subscription tables migration: {e}")
+
+try:
+    from migrate_plan_prices import migrate_plan_prices
+    migrate_plan_prices()
+except Exception as e:
+    logging.warning(f"plan_prices migration: {e}")
+
+try:
+    from migrate_database import migrate_strategies_table
+    migrate_strategies_table()
+except Exception as e:
+    logging.warning(f"Strategies column migration: {e}")
+
+try:
+    from migrate_add_user_name import migrate_add_user_name
+    migrate_add_user_name()
+except Exception as e:
+    logging.warning(f"user_name migration: {e}")
+
 # Ensure live trade tables exist on startup
 ensure_live_trade_tables()
 
@@ -1502,11 +1542,11 @@ def _get_backend_url() -> str:
     Forces HTTPS for production domains.
     
     Returns:
-        Backend URL string (e.g., 'https://drpinfotech.com' or 'http://localhost:8001')
+        Backend URL string (e.g., 'https://drpinfotech.com' or 'http://localhost:8003')
     """
     if has_request_context():
         # Use request to get the current backend URL
-        host = request.host  # 'localhost:8001' or 'drpinfotech.com'
+        host = request.host  # e.g. 'localhost:8003' or 'drpinfotech.com'
         
         # Force HTTPS for production domains (drpinfotech.com)
         if 'drpinfotech.com' in host or 'localhost' not in host and '127.0.0.1' not in host:
@@ -1520,7 +1560,13 @@ def _get_backend_url() -> str:
             scheme = request.scheme  # 'http' or 'https'
             return f"{scheme}://{host}"
     # Fallback if no request context (shouldn't happen in normal flow)
-    return os.getenv('BACKEND_URL', 'http://localhost:8001')
+    return os.getenv('BACKEND_URL', 'http://localhost:8003')
+
+def _get_google_oauth_redirect_uri() -> str:
+    """OAuth redirect_uri; GOOGLE_REDIRECT_URI wins when set (local vs production)."""
+    if config.GOOGLE_REDIRECT_URI:
+        return config.GOOGLE_REDIRECT_URI
+    return f"{_get_backend_url()}/api/auth/google/callback"
 
 def _get_frontend_url(default: str = 'http://localhost:3000') -> str:
     """
@@ -3316,6 +3362,116 @@ def api_plotly_index_candles():
     })
 
 
+# Bank stocks to overlay on main candlestick chart (HDFCBANK, ICICIBANK, KOTAKBANK, SBIN)
+CONSTITUENT_OVERLAY_SYMBOLS = ['HDFCBANK', 'ICICIBANK', 'KOTAKBANK', 'SBIN']
+
+
+@app.route('/api/plotly/constituent-overlays', methods=['GET'])
+def api_plotly_constituent_overlays():
+    """Fetch close prices for HDFCBANK, ICICIBANK, KOTAKBANK, SBIN aligned to index timestamps for chart overlay."""
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'error': 'User not logged in'}), 401
+
+    date_str = request.args.get('date')
+    interval = request.args.get('interval', '5minute')
+
+    if not date_str:
+        return jsonify({'error': 'date parameter is required'}), 400
+    try:
+        selected_date = datetime.datetime.strptime(date_str, '%Y-%m-%d').date()
+    except ValueError:
+        return jsonify({'error': 'Invalid date format. Use YYYY-MM-DD'}), 400
+    if selected_date > datetime.date.today():
+        return jsonify({'error': 'Date cannot be in the future'}), 400
+
+    allowed_intervals = {'minute', '3minute', '5minute', '15minute', '30minute', '60minute'}
+    if interval not in allowed_intervals:
+        return jsonify({'error': f'Invalid interval. Allowed: {", ".join(sorted(allowed_intervals))}'}), 400
+
+    def _fetch_overlays(kite_client):
+        from index_constituents import get_constituent_tokens
+        from timesfm_service import _fetch_candles_for_range
+
+        # Use BANKNIFTY index to get timestamps (constituents are BankNifty stocks)
+        idx_token = 260105
+        index_candles = _fetch_candles_for_range(
+            kite_client, idx_token, selected_date, selected_date, interval
+        )
+        if not index_candles:
+            return None, []
+
+        # Build timestamp -> index for alignment
+        def _ts_key(c):
+            dt = c.get('date') or c.get('Date')
+            if isinstance(dt, datetime.datetime):
+                return dt
+            if isinstance(dt, str):
+                try:
+                    return datetime.datetime.fromisoformat(dt.replace('Z', '+00:00'))
+                except ValueError:
+                    return None
+            return None
+
+        index_ts = []
+        for c in index_candles:
+            k = _ts_key(c)
+            if k:
+                index_ts.append(k)
+
+        const_tokens = get_constituent_tokens(kite_client, 'BANKNIFTY')
+        overlays = {}
+        for sym in CONSTITUENT_OVERLAY_SYMBOLS:
+            if sym not in const_tokens:
+                continue
+            token = const_tokens[sym]
+            candles = _fetch_candles_for_range(
+                kite_client, token, selected_date, selected_date, interval
+            )
+            if not candles:
+                continue
+            # Build ts -> close map
+            ts_to_close = {}
+            for c in candles:
+                k = _ts_key(c)
+                if k:
+                    ts_to_close[k] = float(c.get('close', 0) or 0)
+            # Align to index timestamps (forward fill)
+            aligned = []
+            last_close = None
+            for ts in index_ts:
+                if ts in ts_to_close:
+                    last_close = ts_to_close[ts]
+                aligned.append(last_close if last_close is not None else None)
+            if any(v is not None for v in aligned):
+                overlays[sym] = aligned
+        return index_ts, overlays
+
+    try:
+        index_ts, overlays = _with_valid_kite_client(
+            session['user_id'],
+            'constituent overlays',
+            _fetch_overlays,
+            preferred_tokens=[session.get('access_token')],
+        )
+    except kite_exceptions.TokenException:
+        return jsonify({'error': 'Zerodha session expired. Please log in again.', 'authExpired': True}), 401
+    except RuntimeError as err:
+        return jsonify({'error': str(err)}), 400
+    except Exception as err:
+        logging.error(f"/api/plotly/constituent-overlays error: {err}", exc_info=True)
+        return jsonify({'error': f'Failed to fetch overlays: {str(err)}'}), 500
+
+    if index_ts is None:
+        index_ts = []
+    timestamps = [t.isoformat() for t in index_ts]
+    return jsonify({
+        'date': date_str,
+        'interval': interval,
+        'timestamps': timestamps,
+        'overlays': overlays or {},
+    })
+
+
 @app.route('/api/prediction/forecast', methods=['GET'])
 def api_prediction_forecast():
     """Run TimesFM + LSTM + Ensemble forecast. Returns actual, predictions, timestamps for chart."""
@@ -3383,6 +3539,8 @@ def api_prediction_forecast():
         'timesfm': res.get('timesfm', []),
         'lstm': res.get('lstm'),
         'ensemble': res.get('ensemble'),
+        'moirai': res.get('moirai'),
+        'moirai_error': res.get('moirai_error'),
         'timestamps': res.get('timestamps', []),
         'best_model': res.get('best_model', 'TimesFM'),
         'mae': res.get('mae', 0),
@@ -3391,6 +3549,51 @@ def api_prediction_forecast():
     if full_day and not is_live and res.get('candles'):
         payload['candles'] = res['candles']
     return jsonify(payload)
+
+
+@app.route('/api/constituents/analysis', methods=['GET'])
+def api_constituents_analysis():
+    """Run BankNifty + constituents analysis: correlation, beta, divergence, signals, backtest."""
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'error': 'User not logged in'}), 401
+
+    date_str = request.args.get('date')
+    if not date_str:
+        date_str = datetime.date.today().isoformat()
+    try:
+        selected_date = datetime.datetime.strptime(date_str, '%Y-%m-%d').date()
+    except ValueError:
+        return jsonify({'error': 'Invalid date format. Use YYYY-MM-DD'}), 400
+
+    if selected_date > datetime.date.today():
+        return jsonify({
+            'error': 'Date cannot be in the future',
+            'server_date': datetime.date.today().isoformat(),
+        }), 400
+
+    include_prediction = request.args.get('include_prediction', 'true').lower() in ('true', '1', 'yes')
+
+    def _run(kite_client):
+        from constituents_service import run_constituents_analysis
+        return run_constituents_analysis(kite_client, selected_date, include_prediction=include_prediction)
+
+    try:
+        res = _with_valid_kite_client(
+            session['user_id'],
+            f"constituents analysis for {selected_date}",
+            _run,
+            preferred_tokens=[session.get('access_token')],
+        )
+    except kite_exceptions.TokenException:
+        return jsonify({'error': 'Zerodha session expired. Please log in again.', 'authExpired': True}), 401
+    except Exception as err:
+        logging.error("/api/constituents/analysis error: %s", err, exc_info=True)
+        return jsonify({'error': str(err)}), 500
+
+    if res.get('error'):
+        return jsonify({'error': res['error']}), 400
+
+    return jsonify(res)
 
 
 @app.route('/api/backtest/run', methods=['POST'])
@@ -4499,9 +4702,9 @@ def api_google_auth():
         state_token = secrets.token_urlsafe(32)
         session['google_oauth_state'] = state_token
         
-        # Build Google OAuth URL
+        # Build Google OAuth URL (redirect_uri must match Google Console exactly)
+        redirect_uri = _get_google_oauth_redirect_uri()
         backend_url = _get_backend_url()
-        redirect_uri = f"{backend_url}/api/auth/google/callback"
         
         # Log the redirect URI for debugging
         logging.info(f"Google OAuth redirect_uri: {redirect_uri}")
@@ -4552,15 +4755,15 @@ def api_google_callback():
             frontend_url = _get_frontend_url()
             return redirect(f"{frontend_url}/login?error=no_code")
         
-        # Exchange code for access token
-        backend_url = _get_backend_url()
+        # Exchange code for access token (redirect_uri must match authorize step)
+        redirect_uri = _get_google_oauth_redirect_uri()
         token_url = "https://oauth2.googleapis.com/token"
         token_data = {
             'client_id': GOOGLE_CLIENT_ID,
             'client_secret': GOOGLE_CLIENT_SECRET,
             'code': code,
             'grant_type': 'authorization_code',
-            'redirect_uri': f"{backend_url}/api/auth/google/callback"
+            'redirect_uri': redirect_uri,
         }
         
         token_response = requests.post(token_url, data=token_data, timeout=10)

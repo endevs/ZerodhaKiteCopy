@@ -9,7 +9,7 @@ import { MountainEvent, MountainEventType } from './advancedCharts/MountainStrat
 
 type BtStrategy = 'mountain' | 'ema_crossover';
 
-type TabKey = 'live' | 'backtest' | 'archive' | 'prediction';
+type TabKey = 'live' | 'backtest' | 'archive' | 'prediction' | 'constituents';
 
 const NIFTY_TOKEN = 256265;
 const BANKNIFTY_TOKEN = 260105;
@@ -119,6 +119,10 @@ const AdvancedChartsContent: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
   const [isLiveStreaming, setIsLiveStreaming] = useState<boolean>(false);
+  const [constituentOverlays, setConstituentOverlays] = useState<{
+    timestamps: string[];
+    overlays: Record<string, number[]>;
+  } | null>(null);
 
   // Backtest state
   const [btStrategy, setBtStrategy] = useState<BtStrategy>('mountain');
@@ -155,6 +159,8 @@ const AdvancedChartsContent: React.FC = () => {
     timesfm: number[];
     lstm: number[] | null;
     ensemble: number[] | null;
+    moirai: number[] | null;
+    moirai_error?: string | null;
     timestamps: string[];
     best_model: string;
     mae: number;
@@ -165,6 +171,31 @@ const AdvancedChartsContent: React.FC = () => {
   const [predictionRsiOverbought, setPredictionRsiOverbought] = useState<number>(70);
   const [predictionRsiOversold, setPredictionRsiOversold] = useState<number>(30);
   const [predictionWarmupCandles, setPredictionWarmupCandles] = useState<PlotlyCandlePoint[]>([]);
+
+  // Constituents tab state
+  const [constituentsDate, setConstituentsDate] = useState<string>(todayStr());
+  const [constituentsLoading, setConstituentsLoading] = useState<boolean>(false);
+  const [constituentsError, setConstituentsError] = useState<string | null>(null);
+  const [constituentsData, setConstituentsData] = useState<{
+    date: string;
+    index_candles: Array<{ timestamp: string; open: number; high: number; low: number; close: number; volume?: number }>;
+    constituent_candles: Record<string, Array<{ timestamp: string; open: number; high: number; low: number; close: number; volume?: number }>>;
+    metrics: {
+      log_returns: Record<string, number[]>;
+      rolling_corr_20: Record<string, number[]>;
+      rolling_beta_20: Record<string, number[]>;
+      divergence_score: Record<string, number[]>;
+      lead_lag: Record<string, { best_lag: number; corr: number }>;
+    };
+    signals: Array<{ time: string; type: string; constituent: string; details: string; value?: number }>;
+    backtest: { pnl: number; trades: any[]; win_rate: number; sharpe: number; max_drawdown: number; total_trades: number };
+    predicted_line?: number[] | null;
+    prediction_mae?: number | null;
+    constituent_summary: Array<{ symbol: string; weight_pct?: number; avg_correlation: number; avg_beta: number; avg_divergence: number; lead_lag: number }>;
+    metrics_timestamps?: string[];
+    unified_chart_data?: Array<Record<string, string | number>>;
+    constituent_weights?: Record<string, number>;
+  } | null>(null);
 
   // Archive tab state
   interface ArchiveEntry {
@@ -329,6 +360,43 @@ const AdvancedChartsContent: React.FC = () => {
   }, [selectedIndex, selectedDate, kiteInterval, activeTab]);
 
   useEffect(() => { fetchCandles(); }, [fetchCandles]);
+
+  // ---------- Constituent overlays (HDFCBANK, ICICIBANK, KOTAKBANK, SBIN) for main chart ----------
+  const fetchConstituentOverlays = useCallback(async () => {
+    if (!selectedDate || rawCandles.length === 0) {
+      setConstituentOverlays(null);
+      return;
+    }
+    try {
+      const url = apiUrl(
+        `/api/plotly/constituent-overlays?date=${selectedDate}&interval=${kiteInterval}`,
+      );
+      const resp = await fetch(url, { credentials: 'include' });
+      const data = await resp.json();
+      if (!resp.ok) {
+        setConstituentOverlays(null);
+        return;
+      }
+      if (data.timestamps?.length && Object.keys(data.overlays || {}).length > 0) {
+        setConstituentOverlays({
+          timestamps: data.timestamps,
+          overlays: data.overlays,
+        });
+      } else {
+        setConstituentOverlays(null);
+      }
+    } catch {
+      setConstituentOverlays(null);
+    }
+  }, [selectedDate, kiteInterval, rawCandles.length]);
+
+  useEffect(() => {
+    if (activeTab === 'live' && rawCandles.length > 0) {
+      fetchConstituentOverlays();
+    } else {
+      setConstituentOverlays(null);
+    }
+  }, [activeTab, rawCandles.length, fetchConstituentOverlays]);
 
   // ---------- saveToArchive ----------
   const saveToArchive = useCallback(async (payload: {
@@ -803,6 +871,8 @@ const AdvancedChartsContent: React.FC = () => {
         timesfm: data.timesfm || [],
         lstm: data.lstm ?? null,
         ensemble: data.ensemble ?? null,
+        moirai: data.moirai ?? null,
+        moirai_error: data.moirai_error ?? null,
         timestamps: data.timestamps || [],
         best_model: data.best_model || 'TimesFM',
         mae: data.mae ?? 0,
@@ -815,6 +885,56 @@ const AdvancedChartsContent: React.FC = () => {
       setPredictionLoading(false);
     }
   }, [predictionIndex, predictionDate]);
+
+  // ---------- Constituents tab fetch ----------
+  const fetchConstituents = useCallback(async () => {
+    if (constituentsDate > todayStr()) {
+      setConstituentsError('Date cannot be in the future. Please select today or a past date.');
+      setConstituentsLoading(false);
+      return;
+    }
+    setConstituentsLoading(true);
+    setConstituentsError(null);
+    try {
+      const url = apiUrl(`/api/constituents/analysis?date=${constituentsDate}`);
+      const res = await fetch(url, { credentials: 'include' });
+      const data = await res.json();
+      if (!res.ok) {
+        const errMsg = data.error || 'Failed to load constituents analysis';
+        setConstituentsError(errMsg);
+        if (data.server_date && errMsg.includes('future')) {
+          setConstituentsDate(data.server_date);
+        }
+        return;
+      }
+      if (data.authExpired) {
+        setConstituentsError('Zerodha session expired. Please log in again.');
+        return;
+      }
+      if (data.error) {
+        setConstituentsError(data.error);
+        return;
+      }
+      setConstituentsData(data);
+    } catch (e) {
+      setConstituentsError(e instanceof Error ? e.message : 'Failed to load constituents');
+    } finally {
+      setConstituentsLoading(false);
+    }
+  }, [constituentsDate]);
+
+  useEffect(() => {
+    setConstituentsError(null);
+  }, [constituentsDate]);
+
+  // Auto-load constituents when tab is constituents, date is today, and we have no data for this date
+  useEffect(() => {
+    if (activeTab === 'constituents' && constituentsDate === todayStr() && !constituentsLoading &&
+        !constituentsError &&
+        (!constituentsData || constituentsData.date !== constituentsDate)) {
+      fetchConstituents();
+    }
+  }, [activeTab, constituentsDate, constituentsData, constituentsLoading, constituentsError, fetchConstituents]);
 
   // ---------- Prediction tab chart data (candlesticks, RSI, ADX, overlays) ----------
   const predictionChartState = useMemo(() => {
@@ -860,6 +980,8 @@ const AdvancedChartsContent: React.FC = () => {
       overlays.push({ name: 'LSTM', x: overlayX, y: predictionData.lstm, color: '#2ca02c' });
     if (predictionData.ensemble?.length)
       overlays.push({ name: 'Ensemble', x: overlayX, y: predictionData.ensemble, color: '#ff7f0e' });
+    if (predictionData.moirai?.length)
+      overlays.push({ name: 'Moirai 2.0', x: overlayX, y: predictionData.moirai, color: '#9467bd' });
 
     return {
       chartCandles: computeEma5(chartCandles),
@@ -966,6 +1088,45 @@ const AdvancedChartsContent: React.FC = () => {
     return liveTrades.filter((t) => t.entry_time.startsWith(todayPrefix));
   }, [activeTab, selectedDate, liveTrades, todayPrefix]);
 
+  const constituentOverlayTraces = useMemo((): PredictionOverlay[] => {
+    if (!constituentOverlays || chartData.length === 0) return [];
+    const { timestamps, overlays } = constituentOverlays;
+    const norm = (t: string | Date) => {
+      const s = typeof t === 'string' ? t : (t as Date).toISOString();
+      return s.replace(/\.\d+Z?$/i, '').replace('Z', '');
+    };
+    const tsToIdx = new Map<string, number>();
+    timestamps.forEach((ts, i) => tsToIdx.set(norm(ts), i));
+    const colors: Record<string, string> = {
+      HDFCBANK: '#22c55e',
+      ICICIBANK: '#3b82f6',
+      KOTAKBANK: '#f59e0b',
+      SBIN: '#ef4444',
+    };
+    const traces: PredictionOverlay[] = [];
+    for (const [sym, values] of Object.entries(overlays)) {
+      const x: (string | Date)[] = [];
+      const y: number[] = [];
+      for (const c of chartData) {
+        const key = norm(c.time);
+        const idx = tsToIdx.get(key);
+        if (idx != null && values[idx] != null && !Number.isNaN(values[idx])) {
+          x.push(c.time);
+          y.push(values[idx]);
+        }
+      }
+      if (x.length > 0 && y.length > 0) {
+        traces.push({
+          name: sym,
+          x,
+          y,
+          color: colors[sym] ?? '#6b7280',
+        });
+      }
+    }
+    return traces;
+  }, [constituentOverlays, chartData]);
+
   const liveEventsDisplayLast5 = useMemo(() => {
     if (activeTab !== 'live' || selectedDate !== todayPrefix) return liveEvents;
     const todayEvents = liveEvents.filter((e) => e.timestamp.startsWith(todayPrefix));
@@ -1030,6 +1191,12 @@ const AdvancedChartsContent: React.FC = () => {
               <button type="button" className={`nav-link ${activeTab === 'prediction' ? 'active' : ''}`}
                 onClick={() => setActiveTab('prediction')}>
                 <i className="bi bi-graph-up-arrow me-2" />Prediction
+              </button>
+            </li>
+            <li className="nav-item" role="presentation">
+              <button type="button" className={`nav-link ${activeTab === 'constituents' ? 'active' : ''}`}
+                onClick={() => setActiveTab('constituents')}>
+                <i className="bi bi-diagram-3 me-2" />Constituents
               </button>
             </li>
           </ul>
@@ -1134,6 +1301,7 @@ const AdvancedChartsContent: React.FC = () => {
                 adxData={liveAdxDisplay}
                 indexLabel={`${selectedIndex} Close`}
                 markers={isToday ? liveMarkersDisplay : undefined}
+                predictionOverlays={constituentOverlayTraces}
               />
 
               {isToday && (
@@ -2340,6 +2508,12 @@ const AdvancedChartsContent: React.FC = () => {
                       <span><strong>MAE:</strong> {predictionData.mae.toFixed(2)}</span>
                     )}
                   </div>
+                  {predictionData.moirai_error && (
+                    <div className="alert alert-warning py-2 small mb-2">
+                      <i className="bi bi-exclamation-triangle me-2"></i>
+                      Moirai 2.0 unavailable: {predictionData.moirai_error}
+                    </div>
+                  )}
                   {predictionChartState ? (
                     <PlotlyCandlestickChart
                       data={predictionChartState.chartCandles}
@@ -2402,6 +2576,17 @@ const AdvancedChartsContent: React.FC = () => {
                                 marker: { size: 5 },
                               }]
                             : []),
+                          ...(predictionData.moirai
+                            ? [{
+                                x: predictionData.timestamps,
+                                y: predictionData.moirai,
+                                type: 'scatter',
+                                mode: 'lines+markers',
+                                name: 'Moirai 2.0',
+                                line: { color: '#9467bd', width: 1.5 },
+                                marker: { size: 5 },
+                              }]
+                            : []),
                         ]}
                         layout={{
                           title: `${predictionIndex} 5-min Forecast${predictionData.is_live ? ' [Live]' : ''}`,
@@ -2417,6 +2602,327 @@ const AdvancedChartsContent: React.FC = () => {
                     </div>
                   )}
                 </div>
+              )}
+            </div>
+          )}
+
+          {/* ============ CONSTITUENTS TAB ============ */}
+          {activeTab === 'constituents' && (
+            <div>
+              <div className="row g-3 mb-3 align-items-end">
+                <div className="col-md-3">
+                  <label className="form-label fw-bold">Date</label>
+                  <input type="date" className="form-control" value={constituentsDate}
+                    onChange={(e) => setConstituentsDate(e.target.value)} max={todayStr()} />
+                </div>
+                <div className="col-md-2 d-flex align-items-end">
+                  <button type="button" className="btn btn-primary" onClick={fetchConstituents} disabled={constituentsLoading}>
+                    {constituentsLoading ? (
+                      <>
+                        <span className="spinner-border spinner-border-sm me-2" role="status"></span>
+                        Loading...
+                      </>
+                    ) : (
+                      <>Load Chart</>
+                    )}
+                  </button>
+                </div>
+              </div>
+              {constituentsError && (
+                <div className="alert alert-danger py-2 mb-3">{constituentsError}</div>
+              )}
+              {constituentsData && (
+                <>
+                  {/* Performance metrics */}
+                  <div className="row g-2 mb-3">
+                    <div className="col-md-2">
+                      <div className="card bg-light">
+                        <div className="card-body py-2">
+                          <small className="text-muted">P&L</small>
+                          <div className={`fw-bold ${constituentsData.backtest.pnl >= 0 ? 'text-success' : 'text-danger'}`}>
+                            {constituentsData.backtest.pnl >= 0 ? '+' : ''}{constituentsData.backtest.pnl.toFixed(2)}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="col-md-2">
+                      <div className="card bg-light">
+                        <div className="card-body py-2">
+                          <small className="text-muted">Win Rate</small>
+                          <div className="fw-bold">{constituentsData.backtest.win_rate}%</div>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="col-md-2">
+                      <div className="card bg-light">
+                        <div className="card-body py-2">
+                          <small className="text-muted">Sharpe</small>
+                          <div className="fw-bold">{constituentsData.backtest.sharpe.toFixed(2)}</div>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="col-md-2">
+                      <div className="card bg-light">
+                        <div className="card-body py-2">
+                          <small className="text-muted">Max DD</small>
+                          <div className="fw-bold">{constituentsData.backtest.max_drawdown}%</div>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="col-md-2">
+                      <div className="card bg-light">
+                        <div className="card-body py-2">
+                          <small className="text-muted">Trades</small>
+                          <div className="fw-bold">{constituentsData.backtest.total_trades}</div>
+                        </div>
+                      </div>
+                    </div>
+                    {constituentsData.prediction_mae != null && (
+                      <div className="col-md-2">
+                        <div className="card bg-info bg-opacity-25">
+                          <div className="card-body py-2">
+                            <small className="text-muted">Pred vs Actual MAE</small>
+                            <div className="fw-bold">{constituentsData.prediction_mae.toFixed(2)}</div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* How to read these metrics - collapsible info panel */}
+                  <div className="mb-3">
+                    <button className="btn btn-outline-secondary btn-sm" type="button" data-bs-toggle="collapse" data-bs-target="#constituentsMetricsHelp">
+                      How to read these metrics
+                    </button>
+                    <div className="collapse mt-2" id="constituentsMetricsHelp">
+                      <div className="card card-body small">
+                        <table className="table table-sm table-bordered mb-0">
+                          <thead><tr><th>Metric</th><th>Meaning</th><th>How to Use</th></tr></thead>
+                          <tbody>
+                            <tr><td><strong>Rolling Correlation (20)</strong></td><td>How closely the stock moves with BankNifty over the last 20 five-minute candles. Range: -1 to +1.</td><td>High (&gt;0.8): Stock tracks index well. Low (&lt;0.6): Stock is decoupling; may signal opportunity or risk.</td></tr>
+                            <tr><td><strong>Rolling Beta (20)</strong></td><td>For every 1% move in BankNifty, how much does the stock typically move?</td><td>Beta &gt; 1: Stock amplifies index moves. Beta &lt; 1: Stock dampens index moves. Beta ~1: Moves in line.</td></tr>
+                            <tr><td><strong>Avg Correlation</strong></td><td>Time-average of rolling correlation for the day.</td><td>Quick snapshot: which stocks are most/least correlated with the index.</td></tr>
+                            <tr><td><strong>Avg Beta</strong></td><td>Time-average of rolling beta for the day.</td><td>Which stocks are most volatile vs index (high beta) or defensive (low beta).</td></tr>
+                            <tr><td><strong>Avg Divergence</strong></td><td>How much the stock deviates from its expected move (expected = beta × index return).</td><td>High divergence: stock has idiosyncratic moves; low: follows index closely.</td></tr>
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Unified chart: All 14 Banks + BankNifty (normalized to 100 at open) */}
+                  {constituentsData.unified_chart_data && constituentsData.unified_chart_data.length > 0 && (
+                    <div className="mb-4">
+                      <div className="card">
+                        <div className="card-header py-2 d-flex justify-content-between align-items-center flex-wrap gap-2">
+                          <strong>All Constituents vs BankNifty (Normalized to 100 at Open)</strong>
+                          {constituentsData.constituent_weights && Object.keys(constituentsData.constituent_weights).length > 0 && (
+                            <small className="text-muted">
+                              Index weight: {Object.entries(constituentsData.constituent_weights)
+                                .sort((a, b) => (b[1] ?? 0) - (a[1] ?? 0))
+                                .slice(0, 8)
+                                .map(([s, w]) => `${s} ${((w ?? 0) * 100).toFixed(1)}%`)
+                                .join(' | ')}
+                            </small>
+                          )}
+                        </div>
+                        <div className="card-body p-2" style={{ height: 380 }}>
+                          <Plot
+                            data={[
+                              ...(constituentsData.unified_chart_data[0]?.BANKNIFTY != null
+                                ? [{
+                                    x: constituentsData.unified_chart_data.map((r) => r.timestamp),
+                                    y: constituentsData.unified_chart_data.map((r) => r.BANKNIFTY),
+                                    type: 'scatter' as const,
+                                    mode: 'lines' as const,
+                                    name: 'BANKNIFTY',
+                                    line: { width: 3, color: '#1f77b4', dash: 'dash' },
+                                  }]
+                                : []),
+                              ...Object.keys(constituentsData.unified_chart_data[0] || {})
+                                .filter((k) => k !== 'timestamp' && k !== 'BANKNIFTY')
+                                .map((sym, idx) => ({
+                                  x: constituentsData.unified_chart_data!.map((r) => r.timestamp),
+                                  y: constituentsData.unified_chart_data!.map((r) => (r[sym] as number) ?? 0),
+                                  type: 'scatter' as const,
+                                  mode: 'lines' as const,
+                                  name: sym,
+                                  line: { width: 1.5 },
+                                })),
+                            ]}
+                            layout={{
+                              margin: { t: 20, r: 20, b: 50, l: 50 },
+                              height: 350,
+                              yaxis: { title: 'Normalized (100 = Open)' },
+                              xaxis: { tickangle: -45 },
+                              showlegend: true,
+                              legend: { orientation: 'h', y: 1.08, x: 0 },
+                            }}
+                            config={{ responsive: true }}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Main chart: BankNifty candlesticks + predicted overlay */}
+                  {constituentsData.index_candles.length > 0 && (
+                    <div className="mb-4">
+                      <PlotlyCandlestickChart
+                        data={constituentsData.index_candles.map((c) => ({
+                          time: c.timestamp.includes('T') ? c.timestamp : `${c.timestamp.replace(' ', 'T')}:00`,
+                          open: c.open,
+                          high: c.high,
+                          low: c.low,
+                          close: c.close,
+                          volume: c.volume ?? 0,
+                          indexClose: c.close,
+                          ema5: null,
+                        }))}
+                        title={`BANKNIFTY + Constituents – ${constituentsData.date}`}
+                        height={420}
+                        showIndexLine={true}
+                        showEma={true}
+                        showVolume={true}
+                        predictionOverlays={constituentsData.predicted_line && constituentsData.index_candles.length >= 12
+                          ? [{
+                              name: 'Predicted (next 12)',
+                              x: constituentsData.index_candles.slice(-12).map((c) =>
+                                c.timestamp.includes('T') ? c.timestamp : `${c.timestamp.replace(' ', 'T')}:00`
+                              ),
+                              y: constituentsData.predicted_line,
+                              color: '#9467bd',
+                            }]
+                          : undefined}
+                      />
+                    </div>
+                  )}
+
+                  {/* Rolling correlation / beta / divergence charts */}
+                  <div className="row mb-3">
+                    {Object.keys(constituentsData.metrics.rolling_corr_20 || {}).length > 0 && (
+                      <div className="col-md-6 mb-3">
+                        <div className="card">
+                          <div className="card-header py-2"><strong>Rolling Correlation (20) vs BankNifty</strong></div>
+                          <div className="card-body p-2" style={{ height: 280 }}>
+                            <Plot
+                              data={Object.entries(constituentsData.metrics.rolling_corr_20 || {}).map(([sym, vals]) => {
+                                const ts = constituentsData.metrics_timestamps?.length === vals.length
+                                  ? constituentsData.metrics_timestamps
+                                  : constituentsData.index_candles.slice(-vals.length).map((c) => c.timestamp);
+                                return {
+                                  x: ts,
+                                  y: vals,
+                                  type: 'scatter',
+                                  mode: 'lines',
+                                  name: sym,
+                                  line: { width: 1.5 },
+                                };
+                              })}
+                              layout={{
+                                margin: { t: 20, r: 20, b: 40, l: 50 },
+                                height: 260,
+                                showlegend: true,
+                                legend: { orientation: 'h', y: 1.08 },
+                                xaxis: { tickangle: -45 },
+                              }}
+                              config={{ responsive: true }}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                    {Object.keys(constituentsData.metrics.rolling_beta_20 || {}).length > 0 && (
+                      <div className="col-md-6 mb-3">
+                        <div className="card">
+                          <div className="card-header py-2"><strong>Rolling Beta (20) vs BankNifty</strong></div>
+                          <div className="card-body p-2" style={{ height: 280 }}>
+                            <Plot
+                              data={Object.entries(constituentsData.metrics.rolling_beta_20 || {}).map(([sym, vals]) => {
+                                const ts = constituentsData.metrics_timestamps?.length === vals.length
+                                  ? constituentsData.metrics_timestamps
+                                  : constituentsData.index_candles.slice(-vals.length).map((c) => c.timestamp);
+                                return {
+                                  x: ts,
+                                  y: vals,
+                                  type: 'scatter',
+                                  mode: 'lines',
+                                  name: sym,
+                                  line: { width: 1.5 },
+                                };
+                              })}
+                              layout={{
+                                margin: { t: 20, r: 20, b: 40, l: 50 },
+                                height: 260,
+                                showlegend: true,
+                                legend: { orientation: 'h', y: 1.08 },
+                                xaxis: { tickangle: -45 },
+                              }}
+                              config={{ responsive: true }}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Constituents summary table */}
+                  <div className="table-responsive mb-3">
+                    <table className="table table-sm table-striped">
+                      <thead className="table-dark">
+                        <tr>
+                          <th>Symbol</th>
+                          <th>Weight %</th>
+                          <th>Avg Correlation</th>
+                          <th>Avg Beta</th>
+                          <th>Avg Divergence</th>
+                          <th>Lead/Lag</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {constituentsData.constituent_summary.map((s, i) => (
+                          <tr key={i}>
+                            <td><code>{s.symbol}</code></td>
+                            <td>{s.weight_pct != null ? `${s.weight_pct}%` : '–'}</td>
+                            <td>{s.avg_correlation.toFixed(3)}</td>
+                            <td>{s.avg_beta.toFixed(3)}</td>
+                            <td>{s.avg_divergence.toFixed(4)}</td>
+                            <td>{s.lead_lag > 0 ? `+${s.lead_lag} (leads)` : s.lead_lag < 0 ? `${s.lead_lag} (lags)` : '0'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {/* Signals table */}
+                  <div className="table-responsive">
+                    <h6>Trading Signals</h6>
+                    <table className="table table-sm table-hover">
+                      <thead className="table-secondary">
+                        <tr>
+                          <th>Time</th>
+                          <th>Type</th>
+                          <th>Constituent</th>
+                          <th>Details</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {constituentsData.signals.length === 0 ? (
+                          <tr><td colSpan={4} className="text-muted">No signals</td></tr>
+                        ) : (
+                          constituentsData.signals.slice(0, 50).map((s, i) => (
+                            <tr key={i}>
+                              <td className="small">{s.time}</td>
+                              <td><span className="badge bg-primary">{s.type}</span></td>
+                              <td>{s.constituent || '–'}</td>
+                              <td className="small">{s.details}</td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
               )}
             </div>
           )}

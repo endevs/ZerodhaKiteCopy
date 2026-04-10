@@ -1,5 +1,10 @@
 # Root (optional docker-compose .env at repo root)
 /.env
+/database.db
+/.cursor/
+
+# Local SQLite copies outside backend/
+/frontend/database.db
 
 # Backend
 /backend/.env
@@ -19,6 +24,8 @@
 /frontend/.env.development.local
 /frontend/.env.production.local
 /frontend/.env
+/frontend/.env.development
+/frontend/.env.production
 
 # But allow example files
 !/frontend/.env.example
@@ -39,3 +46,10 @@
 # OS
 .DS_Store
 Thumbs.db
+
+# RL / data artifacts (optional local; fetch or train on server)
+/backend/nifty50_rl/data/
+/backend/nifty50_rl/models/
+/backend/nifty50_rl/reports/
+/backend/simple_ORB_trading/reports/
+/backend/timesfm_validation_chart.png

@@ -7,7 +7,7 @@ const sanitizeTarget = (value) => {
 
 // Use environment variable or default to localhost for development
 // In production, this should be set via REACT_APP_API_BASE
-const DEFAULT_TARGET = 'http://localhost:8001';
+const DEFAULT_TARGET = 'http://localhost:8003';
 const target = sanitizeTarget(process.env.REACT_APP_API_BASE) || DEFAULT_TARGET;
 
 // Log in development only
@@ -21,6 +21,14 @@ module.exports = function (app) {
     createProxyMiddleware({
       target,
       changeOrigin: true,
+    })
+  );
+  app.use(
+    '/socket.io',
+    createProxyMiddleware({
+      target,
+      changeOrigin: true,
+      ws: true,
     })
   );
 };

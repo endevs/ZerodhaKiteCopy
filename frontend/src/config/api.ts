@@ -1,4 +1,4 @@
-const DEFAULT_API_PORT = 8001;
+const DEFAULT_API_PORT = 8003;
 const LOCALHOST = 'localhost';
 
 const sanitizeBase = (input?: string | null): string | null => {
@@ -15,8 +15,9 @@ const inferBaseFromWindow = (): string => {
 
   const { protocol, hostname, port } = window.location;
 
+  // Localhost: use same origin so /api and /socket.io hit the dev server (setupProxy) or Docker Nginx (:5175), not a bare :8003 on the host.
   if (hostname === LOCALHOST || hostname === '127.0.0.1') {
-    return `${protocol}//${hostname}:${DEFAULT_API_PORT}`;
+    return window.location.origin;
   }
 
   // For production (e.g., drpinfotech.com), use the same domain
@@ -57,7 +58,7 @@ let resolvedSocketBase =
 
 // Runtime override for Socket.IO - ensure production uses correct URL
 if (typeof window !== 'undefined') {
-  const { protocol, hostname, port } = window.location;
+  const { protocol, hostname } = window.location;
   const isProduction = hostname !== 'localhost' && hostname !== '127.0.0.1';
   
   if (isProduction) {
@@ -66,19 +67,14 @@ if (typeof window !== 'undefined') {
     const socketProtocol = protocol === 'https:' ? 'wss:' : 'ws:';
     resolvedSocketBase = `${socketProtocol}//${hostname}`;
   } else {
-    // For localhost, use the API base (which includes port 8001)
-    const isLocalhostUrl = resolvedSocketBase && (resolvedSocketBase.includes('localhost') || resolvedSocketBase.includes('127.0.0.1'));
-    if (isLocalhostUrl) {
-      // Keep localhost URL as is
-    } else {
-      resolvedSocketBase = resolvedApiBase;
-    }
+    // Localhost: Socket.IO follows API base (same origin + proxied /socket.io/).
+    resolvedSocketBase = resolvedApiBase;
   }
 }
 
 // Final cleanup: remove any port numbers from production URLs
 if (resolvedSocketBase && !resolvedSocketBase.includes('localhost') && !resolvedSocketBase.includes('127.0.0.1')) {
-  // Remove any port number (3000, 8001, etc.) from production URLs
+  // Remove any port number (3000, 8003, etc.) from production URLs
   resolvedSocketBase = resolvedSocketBase.replace(/:(\d+)(\/|$)/, '$2');
 }
 
