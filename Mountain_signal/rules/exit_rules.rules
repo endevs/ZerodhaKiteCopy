@@ -1,0 +1,24 @@
+EXIT_PRIORITY
+  - index_stop
+  - index_target
+  - market_close
+
+EXIT "PE Index Stop"
+  WHEN candle.close rises above signal.high
+  THEN
+    exit reason INDEX_STOP
+    log "PE index stop triggered @ {exit_price}"
+
+EXIT "PE Index Target"
+  WHEN
+    first candle.high drops below ema(5)
+    AND next 2 candle.close are above ema(5)
+  THEN
+    exit reason INDEX_TARGET
+    log "PE index target achieved @ {exit_price}"
+
+EXIT "Market Close"
+  WHEN clock.time is at or after 15:15
+  THEN
+    exit reason MARKET_CLOSE
+    log "PE position auto-closed at market close"

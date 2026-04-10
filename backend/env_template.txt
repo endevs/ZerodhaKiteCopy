@@ -1,0 +1,45 @@
+# Local / dev — copy to backend/.env (used by docker-compose.yml). Never commit .env.
+# Production server: use backend/.env.production from .env.production.example + docker-compose.prod.yml
+
+# Docker Compose: set TRUST_PROXY=1 in compose environment (already set in docker-compose.yml).
+# UI: http://localhost:5175 (Nginx). Google OAuth callback: register http://localhost:8003/api/auth/google/callback
+#   and set GOOGLE_REDIRECT_URI below to match (avoids Nginx $host stripping :5175).
+
+# Server
+SERVER_HOST=0.0.0.0
+SERVER_PORT=8003
+DEBUG=False
+
+# Public backend URL (browser hits host-mapped port in Docker)
+BACKEND_URL=http://localhost:8003
+
+# URLs (production: use your HTTPS origin, no port if 443)
+FRONTEND_URL=http://localhost:5175
+CORS_ORIGINS=http://localhost:3000,http://localhost:3001,http://localhost:5175,http://localhost:8003
+
+SECRET_KEY=
+DATABASE_PATH=database.db
+
+# Google OAuth — must match Google Cloud Console exactly
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+# Docker local: http://localhost:8003/api/auth/google/callback (add same URI + http://localhost:8003 origin in Google Console)
+# Alt (inferred Host): http://localhost:5175/... only if Nginx forwards $http_host — see frontend/nginx.conf
+# Production: https://your-domain.com/api/auth/google/callback
+GOOGLE_REDIRECT_URI=http://localhost:8003/api/auth/google/callback
+
+# Optional AI
+GROQ_API_KEY=
+GROQ_MODEL=llama-3.1-8b-instant
+LOG_LEVEL=INFO
+
+# SMTP
+SMTP_SERVER=smtp.gmail.com
+USERNAME_EMAIL=
+PASSWORD_EMAIL=
+EMAIL_FROM=
+
+# Razorpay
+RAZORPAY_KEY_ID=
+RAZORPAY_KEY_SECRET=
+RAZORPAY_WEBHOOK_SECRET=

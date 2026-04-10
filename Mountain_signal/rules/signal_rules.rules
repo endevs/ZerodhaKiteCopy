@@ -1,0 +1,39 @@
+RULE "Identify PE Signal"
+  WHEN
+    candle.low is above ema(5)
+    AND rsi(14) is greater than 70
+    AND no_active_trade exists
+    AND candle.start_time is after last_exit_time
+  THEN
+    set signal.type to PE
+    set signal.low to candle.low
+    set signal.high to candle.high
+    set signal.time to candle.start_time
+    set signal.candle_index to candle.index
+    log "PE signal candle identified at {signal.time} (H:{signal.high} L:{signal.low})"
+
+RULE "Reset PE Signal"
+  WHEN
+    existing signal.type is PE
+    AND no_active_trade exists
+    AND candle.start_time is after signal.time
+    AND candle.low is above ema(5)
+    AND rsi(14) is greater than 70
+    AND candle.close is greater than signal.high
+  THEN
+    replace signal.low with candle.low
+    replace signal.high with candle.high
+    replace signal.time with candle.start_time
+    replace signal.candle_index with candle.index
+    set pe_signal_price_above_low to false
+    log "PE signal reset to newer candle {signal.time}"
+
+RULE "Clear PE Signal"
+  WHEN
+    signal.type is PE
+    AND no_active_trade exists
+    AND candle.low falls below ema(5)
+    AND rsi(14) is 70 or below
+  THEN
+    clear signal
+    log "PE signal cleared because criteria no longer met"

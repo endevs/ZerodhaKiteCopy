@@ -1,0 +1,35 @@
+# Pull pre-built images from Docker Hub (no build on server).
+# Set env before up: export DOCKERHUB_NAMESPACE=yourdockerhubuser IMAGE_TAG=1.0.0
+# Requires: backend/.env.production on the server (see backend/.env.production.example)
+#
+# docker compose -f docker-compose.hub.yml pull
+# docker compose -f docker-compose.hub.yml up -d
+
+name: zerodhakite
+
+services:
+  backend:
+    image: ${DOCKERHUB_NAMESPACE:?set DOCKERHUB_NAMESPACE}/zerodhakite-backend:${IMAGE_TAG:-latest}
+    env_file:
+      - ./backend/.env.production
+    environment:
+      TRUST_PROXY: "1"
+      SERVER_PORT: "8003"
+      SERVER_HOST: "0.0.0.0"
+      DATABASE_PATH: /app/data/database.db
+    volumes:
+      - zerodhakite_data:/app/data
+    ports:
+      - "127.0.0.1:8003:8003"
+    restart: unless-stopped
+
+  frontend:
+    image: ${DOCKERHUB_NAMESPACE:?set DOCKERHUB_NAMESPACE}/zerodhakite-frontend:${IMAGE_TAG:-latest}
+    ports:
+      - "5175:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  zerodhakite_data:

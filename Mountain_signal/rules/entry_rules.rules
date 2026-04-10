@@ -1,0 +1,19 @@
+ENTRY "PE Breakout Entry"
+  FOR signal.type == PE
+  TRIGGER when candle.close falls below signal.low
+  REQUIREMENTS
+    first_entry: none
+    re_entry:
+      - highest candle.high since last exit is above signal.low
+      - permitted while the current signal remains active
+      - permitted again if a new signal candle replaces the prior one
+  ACTIONS
+    select option_contract
+      instrument: index
+      strike_rounding: BANKNIFTY -> 100, NIFTY -> 50
+      expiry_policy: BANKNIFTY -> monthly, NIFTY -> weekly
+    trade_execution
+      stop_loss: -17% of option_premium
+      target: +45% of option_premium
+      lot_size: BANKNIFTY -> 30, NIFTY -> 75
+    log "PE option trade opened @ {entry_price} (symbol {option_symbol})"

@@ -1,0 +1,40 @@
+# Production on EC2 (alongside other stacks). Project name isolates networks/volumes.
+# Env: copy backend/.env.production.example → backend/.env.production (gitignored) on the server.
+# Use: docker compose -f docker-compose.prod.yml up -d --build
+
+name: zerodhakite
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    env_file:
+      - ./backend/.env.production
+    environment:
+      TRUST_PROXY: "1"
+      SERVER_PORT: "8003"
+      SERVER_HOST: "0.0.0.0"
+      DATABASE_PATH: /app/data/database.db
+    volumes:
+      - zerodhakite_data:/app/data
+    # Loopback only — visible in Docker Desktop; not exposed on LAN. Prefer :5175 for users.
+    ports:
+      - "127.0.0.1:8003:8003"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        REACT_APP_API_BASE: ""
+        REACT_APP_SOCKET_BASE: ""
+    ports:
+      - "5175:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  zerodhakite_data:

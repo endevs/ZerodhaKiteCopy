@@ -1,5 +1,10 @@
+# Root (optional docker-compose .env at repo root)
+/.env
+
 # Backend
 /backend/.env
+/backend/.env.production
+/backend/timesfm_model/
 /backend/.env.local
 /backend/.env.*.local
 /backend/database.db
@@ -20,12 +25,16 @@
 !/frontend/.env.development.example
 !/frontend/.env.production.example
 !/backend/.env.example
+!/backend/.env.production.example
 
 # IDE
 .idea/
 .vscode/
 *.swp
 *.swo
+
+# TimesFM (cloned for install)
+/timesfm/
 
 # OS
 .DS_Store
