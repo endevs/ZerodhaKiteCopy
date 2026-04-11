@@ -9,9 +9,11 @@
 #   $env:DEPLOY_SSH_KEY = "D:\keys\Key_DRP_Ubuntu.pem"   # optional; Windows OpenSSH -i
 #   $env:DOCKERHUB_NAMESPACE = "baparaj"                 # optional; default baparaj
 #   $env:IMAGE_TAG = "latest"                             # optional
+#   $env:DEPLOY_SYNC_ENV = "1"                            # optional; scp backend/.env.production to server first
 #   .\scripts\remote-deploy-via-ssh.ps1
 
 $ErrorActionPreference = "Stop"
+$root = Split-Path $PSScriptRoot -Parent
 $ssh = $env:DEPLOY_SSH
 $path = $env:DEPLOY_PATH
 $key = $env:DEPLOY_SSH_KEY
@@ -37,6 +39,16 @@ if ($key) {
 # Use bash -lc '...' (single-quoted script). Windows OpenSSH + PowerShell breaks
 # bash -lc "cd '...' && ..." — cd silently fails and commands run in ~.
 if ($path -match "'") { throw "DEPLOY_PATH must not contain single quotes." }
+
+$localEnvProd = Join-Path $root "backend\.env.production"
+if ($env:DEPLOY_SYNC_ENV -eq "1") {
+    if (-not (Test-Path -LiteralPath $localEnvProd)) {
+        throw "DEPLOY_SYNC_ENV=1 requires backend/.env.production (run .\scripts\setup-env.ps1 -Env production or copy from .env.production.example)."
+    }
+    $remoteEnv = "${ssh}:${path}/backend/.env.production"
+    Write-Host "DEPLOY_SYNC_ENV: scp -> $remoteEnv" -ForegroundColor Cyan
+    & scp @sshArgs $localEnvProd $remoteEnv
+}
 
 $inner = "docker run --rm --privileged tonistiigi/binfmt --install amd64 2>/dev/null || true; cd $path && git pull origin main || true && export DOCKERHUB_NAMESPACE=$ns IMAGE_TAG=$tag && docker compose -f docker-compose.hub.yml pull && docker compose -f docker-compose.hub.yml up -d && docker compose -f docker-compose.hub.yml ps"
 

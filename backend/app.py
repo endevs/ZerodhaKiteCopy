@@ -1566,9 +1566,11 @@ def _get_google_oauth_redirect_uri() -> str:
     """OAuth redirect_uri; must match Google Cloud Console *Authorized redirect URIs* exactly."""
     if config.GOOGLE_REDIRECT_URI:
         return config.GOOGLE_REDIRECT_URI
-    # Prefer BACKEND_URL from env so CDN/proxy Host headers cannot drift the redirect (fixes redirect_uri_mismatch).
+    # Production only: pin redirect from BACKEND_URL so CloudFront/proxy Host cannot drift (redirect_uri_mismatch).
+    # Local (localhost / 127.0.0.1): keep using _get_backend_url() from the request — separate from .env.production flow.
     backend_env = (os.getenv('BACKEND_URL') or '').strip().rstrip('/')
-    if backend_env:
+    be_low = backend_env.lower()
+    if backend_env and 'localhost' not in be_low and '127.0.0.1' not in be_low:
         return f"{backend_env}/api/auth/google/callback"
     return f"{_get_backend_url()}/api/auth/google/callback"
 

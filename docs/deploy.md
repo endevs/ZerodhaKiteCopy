@@ -40,6 +40,15 @@ cp backend/.env.production.example backend/.env.production
 # Edit backend/.env.production — set SECRET_KEY, GOOGLE_*, Razorpay, SMTP, etc. Never commit.
 ```
 
+**Interactive env (Windows):** `.\scripts\setup-env.ps1` — generates `backend/.env` (local) or `backend/.env.production` (production); never commit those files.
+
+**Docker Hub → EC2:**
+
+1. `.\scripts\docker-hub-push.ps1` (after `docker login`; builds/pushes multi-arch `linux/amd64` + `linux/arm64`).
+2. On your PC, ensure `backend/.env.production` is filled (from setup script or copied from `.env.production.example`).
+3. `$env:DEPLOY_SSH = "ubuntu@<ec2-host>"`; optional `$env:DEPLOY_SSH_KEY = "C:\path\to\key.pem"`.
+4. `$env:DEPLOY_SYNC_ENV = "1"` then `.\scripts\remote-deploy-via-ssh.ps1` — uploads `.env.production`, `git pull`, `docker compose -f docker-compose.hub.yml pull && up -d`.
+
 Use a **separate Google OAuth Web client** for production (only `https://drpinfotech.com` origins + redirect) if you also use localhost in another client.
 
 ### Docker + Google Sign-In (local)
@@ -63,7 +72,7 @@ GOOGLE_REDIRECT_URI=http://localhost:8003/api/auth/google/callback
 
 Production URLs are in **`backend/.env.production.example`** (`https://drpinfotech.com`). Register those exact URIs on your **production** OAuth client.
 
-**`redirect_uri_mismatch` (Google error 400):** The app sends the URI logged as `Google OAuth redirect_uri:` in backend logs. It must match **Authorized redirect URIs** in Google Cloud Console **character-for-character** (https not http, `drpinfotech.com` vs `www`, no extra slash). Set **`BACKEND_URL=https://drpinfotech.com`** and **`GOOGLE_REDIRECT_URI=https://drpinfotech.com/api/auth/google/callback`** in **`backend/.env.production`** on the server, restart the backend container, then retry.
+**`redirect_uri_mismatch` (Google error 400):** The app sends the URI logged as `Google OAuth redirect_uri:` in backend logs. It must match **Authorized redirect URIs** in Google Cloud Console **character-for-character** (https not http, `drpinfotech.com` vs `www`, no extra slash). On the **server**, set **`BACKEND_URL=https://drpinfotech.com`** and **`GOOGLE_REDIRECT_URI=https://drpinfotech.com/api/auth/google/callback`** in **`backend/.env.production`**, restart the backend. **Local** still uses **`backend/.env`** + request host unless **`GOOGLE_REDIRECT_URI`** is set (see `env_template.txt`).
 
 ### Zerodha Kite Connect (redirect URL & ports)
 

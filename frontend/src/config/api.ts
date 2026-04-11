@@ -103,3 +103,25 @@ export const apiUrl = (path: string): string => {
   return `${API_BASE_URL}${path}`;
 };
 
+/**
+ * Parse JSON from an API response. If the edge/origin returned HTML (index.html or
+ * CloudFront error page), throw a message that points to routing/port misconfig.
+ */
+export async function parseResponseJson<T = unknown>(response: Response): Promise<T> {
+  const ct = (response.headers.get('content-type') || '').toLowerCase();
+  if (ct.includes('application/json')) {
+    return response.json() as Promise<T>;
+  }
+  const text = await response.text();
+  const start = text.trimStart().slice(0, 80);
+  if (start.startsWith('<!') || start.toLowerCase().startsWith('<html')) {
+    throw new Error(
+      'API returned HTML instead of JSON. Check CloudFront: route /api/* (and /socket.io/*) to the EC2 ' +
+        'frontend on port 5175 (Nginx proxies to Flask), or to Flask directly on port 8003 — not 8000 or an S3/static-only origin.'
+    );
+  }
+  throw new Error(
+    `Expected JSON from API (HTTP ${response.status}), got ${ct || 'unknown content-type'}: ${start.slice(0, 120)}`
+  );
+}
+

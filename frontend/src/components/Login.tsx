@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { apiUrl } from '../config/api';
+import { apiUrl, parseResponseJson } from '../config/api';
 import { Link, useNavigate } from 'react-router-dom';
 import LoaderOverlay from './LoaderOverlay';
 import SupportChat from './SupportChat';
@@ -73,7 +73,11 @@ const Login: React.FC = () => {
         });
         
         if (response.ok) {
-          const data = await response.json();
+          const data = (await parseResponseJson(response)) as {
+            authenticated?: boolean;
+            user_id?: number | null;
+            zerodha_credentials_present?: boolean;
+          };
           const isAuthenticated = data.authenticated === true || (data.user_id !== undefined && data.user_id !== null);
           if (isAuthenticated) {
             // Check if user has API credentials
