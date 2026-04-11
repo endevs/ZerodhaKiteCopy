@@ -80,7 +80,7 @@ def zerodha_callback(request: Request):
         kite.set_access_token(access_token)
 
         # Redirect the user to the frontend dashboard
-        return RedirectResponse(url="http://localhost:3000/dashboard")
+        return RedirectResponse(url="http://localhost:5175/dashboard")
 
     except Exception as e:
         logging.error(f"Error generating session: {e}")

@@ -1568,15 +1568,15 @@ def _get_google_oauth_redirect_uri() -> str:
         return config.GOOGLE_REDIRECT_URI
     return f"{_get_backend_url()}/api/auth/google/callback"
 
-def _get_frontend_url(default: str = 'http://localhost:3000') -> str:
+def _get_frontend_url(default: str = 'http://localhost:5175') -> str:
     """
     Get frontend URL that works in both local and production environments.
     
     Priority:
-    1. config.FRONTEND_URL (if set and not localhost default)
+    1. config.FRONTEND_URL (if set and not legacy localhost:3000 placeholder)
     2. Request Origin header (if available and not localhost)
     3. Request Referer header (if available and not localhost)
-    4. Default fallback (usually localhost:3000)
+    4. Default fallback (Docker/local UI: localhost:5175)
     
     Args:
         default: Default URL to use if none can be determined

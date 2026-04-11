@@ -21,11 +21,14 @@ SERVER_HOST = os.getenv('SERVER_HOST', '0.0.0.0')
 SERVER_PORT = int(os.getenv('SERVER_PORT', 8003))
 DEBUG = os.getenv('DEBUG', 'False').lower() == 'true'
 
-# CORS Configuration
-CORS_ORIGINS = [origin.strip() for origin in os.getenv('CORS_ORIGINS', 'http://localhost:3000,http://localhost:3001').split(',')]
+# CORS Configuration (Docker/local: 5175 + 8003; 3000 kept for optional `npm start` dev)
+CORS_ORIGINS = [origin.strip() for origin in os.getenv(
+    'CORS_ORIGINS',
+    'http://localhost:5175,http://localhost:8003,http://localhost:3000,http://localhost:3001',
+).split(',')]
 
 # Frontend URL Configuration
-FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:3000')
+FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:5175')
 
 # Razorpay Configuration
 RAZORPAY_KEY_ID = os.getenv('RAZORPAY_KEY_ID', '')

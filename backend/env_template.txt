@@ -2,8 +2,8 @@
 # Production server: use backend/.env.production from .env.production.example + docker-compose.prod.yml
 
 # Docker Compose: set TRUST_PROXY=1 in compose environment (already set in docker-compose.yml).
-# UI: http://localhost:5175 (Nginx). Google OAuth callback: register http://localhost:8003/api/auth/google/callback
-#   and set GOOGLE_REDIRECT_URI below to match (avoids Nginx $host stripping :5175).
+# UI: http://localhost:5175 (Nginx). Google OAuth: http://localhost:8003/api/auth/google/callback
+# Zerodha Kite redirect URL: http://localhost:5175/callback (via Nginx → backend) OR http://localhost:8003/callback (direct to mapped port)
 
 # Server
 SERVER_HOST=0.0.0.0

@@ -18,9 +18,9 @@ services:
       DATABASE_PATH: /app/data/database.db
     volumes:
       - zerodhakite_data:/app/data
-    # Loopback only — visible in Docker Desktop; not exposed on LAN. Prefer :5175 for users.
+    # All interfaces :8003 — restrict with security group / firewall; prefer :5175 for browsers.
     ports:
-      - "127.0.0.1:8003:8003"
+      - "8003:8003"
     restart: unless-stopped
 
   frontend:

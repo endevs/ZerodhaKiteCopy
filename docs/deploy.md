@@ -8,7 +8,7 @@ Flask-SocketIO backend + CRA frontend. **Compose project name:** `zerodhakite` (
 |-----|------|-------------------|
 | AstrologyDRP | 5173 / 8001 | 8001 |
 | AI_toolsDRP | 5174 | 8002 |
-| **This app** | **5175** → Nginx **80** | **8003** on **`127.0.0.1` only** (optional direct API/debug); browsers should use **5175** |
+| **This app** | **5175** → Nginx **80** | **8003** on **`0.0.0.0`** (direct API); restrict with **security group**; browsers usually use **5175** |
 
 ## Clone (do not use GitHub `/tree/...` URLs)
 
@@ -62,6 +62,15 @@ GOOGLE_REDIRECT_URI=http://localhost:8003/api/auth/google/callback
 ```
 
 Production URLs are in **`backend/.env.production.example`** (`https://drpinfotech.com`). Register those exact URIs on your **production** OAuth client.
+
+### Zerodha Kite Connect (redirect URL & ports)
+
+Same stack as the table above: **browser UI on host `5175`**, Flask on **`8003`** mapped to **`0.0.0.0:8003`** on the host (allow **TCP 8003** in the security group if you need direct access from outside).
+
+- **Kite developer console → Redirect URL** must match **`{BACKEND_URL}/callback`** (see `backend/app.py`). Examples:
+  - **Production:** `https://drpinfotech.com/callback` (no port when using HTTPS on **443**).
+  - **Local Docker:** `http://localhost:5175/callback` (Nginx on **5175** proxies `/callback` to the backend) **or** `http://localhost:8003/callback` (direct to the mapped backend port).
+- **CloudFront:** If the default behavior sends `/*` to the **frontend** origin on **`5175`**, **`/callback`** is handled by **Nginx** → backend (see `frontend/nginx.conf`). You do **not** need port **8000**; align origins with **5175** / **443** (TLS), not legacy **3000** / **8000**.
 
 ## Local Docker
 
