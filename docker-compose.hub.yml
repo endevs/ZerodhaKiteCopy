@@ -9,6 +9,8 @@ name: zerodhakite
 
 services:
   backend:
+    # Hub `latest` is often amd64-only; ARM64 EC2 needs binfmt (see docs/deploy.md) or multi-arch images.
+    platform: linux/amd64
     image: ${DOCKERHUB_NAMESPACE:?set DOCKERHUB_NAMESPACE}/zerodhakite-backend:${IMAGE_TAG:-latest}
     env_file:
       - ./backend/.env.production
@@ -24,6 +26,7 @@ services:
     restart: unless-stopped
 
   frontend:
+    platform: linux/amd64
     image: ${DOCKERHUB_NAMESPACE:?set DOCKERHUB_NAMESPACE}/zerodhakite-frontend:${IMAGE_TAG:-latest}
     ports:
       - "5175:80"
