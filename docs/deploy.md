@@ -63,6 +63,8 @@ GOOGLE_REDIRECT_URI=http://localhost:8003/api/auth/google/callback
 
 Production URLs are in **`backend/.env.production.example`** (`https://drpinfotech.com`). Register those exact URIs on your **production** OAuth client.
 
+**`redirect_uri_mismatch` (Google error 400):** The app sends the URI logged as `Google OAuth redirect_uri:` in backend logs. It must match **Authorized redirect URIs** in Google Cloud Console **character-for-character** (https not http, `drpinfotech.com` vs `www`, no extra slash). Set **`BACKEND_URL=https://drpinfotech.com`** and **`GOOGLE_REDIRECT_URI=https://drpinfotech.com/api/auth/google/callback`** in **`backend/.env.production`** on the server, restart the backend container, then retry.
+
 ### Zerodha Kite Connect (redirect URL & ports)
 
 Same stack as the table above: **browser UI on host `5175`**, Flask on **`8003`** mapped to **`0.0.0.0:8003`** on the host (allow **TCP 8003** in the security group if you need direct access from outside).
@@ -71,6 +73,18 @@ Same stack as the table above: **browser UI on host `5175`**, Flask on **`8003`*
   - **Production:** `https://drpinfotech.com/callback` (no port when using HTTPS on **443**).
   - **Local Docker:** `http://localhost:5175/callback` (Nginx on **5175** proxies `/callback` to the backend) **or** `http://localhost:8003/callback` (direct to the mapped backend port).
 - **CloudFront:** If the default behavior sends `/*` to the **frontend** origin on **`5175`**, **`/callback`** is handled by **Nginx** → backend (see `frontend/nginx.conf`). You do **not** need port **8000**; align origins with **5175** / **443** (TLS), not legacy **3000** / **8000**.
+
+### CloudFront — avoid “HTML instead of JSON” on `/api/*`
+
+If the browser console shows `Unexpected token '<'` / `not valid JSON` for `/api/...`, the **CDN returned HTML** (usually `index.html` or an error page), not Flask JSON.
+
+| Symptom | Typical cause | Fix |
+|--------|----------------|-----|
+| JSON parse error on login | Default behavior points to **S3** (static CRA build only) | Point **`/*`** (or at least **`/api/*`**, **`/socket.io/*`**, **`/callback`**) to **EC2 Nginx on port 5175**, or add path behaviors to **5175** |
+| JSON parse error | **`/api/*`** origin uses port **8000** | Use **8003** (Flask in Docker) or **5175** (Nginx proxies `/api/`) |
+| JSON parse error | API origin wrong host / timeout | Custom error page is HTML — fix origin health and **security group** (allow **5175** / **8003** from CloudFront or `0.0.0.0/0` as you prefer) |
+
+**Simplest setup:** one **custom origin** = EC2 public DNS (or ALB), **HTTP port 5175**, default behavior **`/*`** with **Managed-CachingDisabled** (or tuned) for `/api/*` if split. Nginx in the frontend container already proxies **`/api/`**, **`/socket.io/`**, **`/callback`** to the backend.
 
 ## Local Docker
 

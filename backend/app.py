@@ -1563,9 +1563,13 @@ def _get_backend_url() -> str:
     return os.getenv('BACKEND_URL', 'http://localhost:8003')
 
 def _get_google_oauth_redirect_uri() -> str:
-    """OAuth redirect_uri; GOOGLE_REDIRECT_URI wins when set (local vs production)."""
+    """OAuth redirect_uri; must match Google Cloud Console *Authorized redirect URIs* exactly."""
     if config.GOOGLE_REDIRECT_URI:
         return config.GOOGLE_REDIRECT_URI
+    # Prefer BACKEND_URL from env so CDN/proxy Host headers cannot drift the redirect (fixes redirect_uri_mismatch).
+    backend_env = (os.getenv('BACKEND_URL') or '').strip().rstrip('/')
+    if backend_env:
+        return f"{backend_env}/api/auth/google/callback"
     return f"{_get_backend_url()}/api/auth/google/callback"
 
 def _get_frontend_url(default: str = 'http://localhost:5175') -> str:
