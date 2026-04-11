@@ -38,7 +38,7 @@ if ($key) {
 # bash -lc "cd '...' && ..." — cd silently fails and commands run in ~.
 if ($path -match "'") { throw "DEPLOY_PATH must not contain single quotes." }
 
-$inner = "cd $path && git pull origin main || true && export DOCKERHUB_NAMESPACE=$ns IMAGE_TAG=$tag && docker compose -f docker-compose.hub.yml pull && docker compose -f docker-compose.hub.yml up -d && docker compose -f docker-compose.hub.yml ps"
+$inner = "docker run --rm --privileged tonistiigi/binfmt --install amd64 2>/dev/null || true; cd $path && git pull origin main || true && export DOCKERHUB_NAMESPACE=$ns IMAGE_TAG=$tag && docker compose -f docker-compose.hub.yml pull && docker compose -f docker-compose.hub.yml up -d && docker compose -f docker-compose.hub.yml ps"
 
 Write-Host "SSH: $ssh  Path: $path  Tag: $tag"
 & ssh @sshArgs $ssh "bash -lc '$inner'"
