@@ -10,6 +10,8 @@ Flask-SocketIO backend + CRA frontend. **Compose project name:** `zerodhakite` (
 | AI_toolsDRP | 5174 | 8002 |
 | **This app** | **5175** → Nginx **80** | **8003** on **`0.0.0.0`** (direct API); restrict with **security group**; browsers usually use **5175** |
 
+**SPA entry (same bundle on drpinfotech.com):** **`/`** — multi-product welcome page with links to **`/trading`** (Zerodha marketing), **astro.drpinfotech.com**, **ai.drpinfotech.com**. **`/login`**, **`/dashboard`**, etc. are unchanged. If CloudFront’s **default origin is S3** static failover, redeploy or upload the **same** built `index.html` + assets after a release so `/` stays in sync with the EC2 app.
+
 ## Clone (do not use GitHub `/tree/...` URLs)
 
 ```bash

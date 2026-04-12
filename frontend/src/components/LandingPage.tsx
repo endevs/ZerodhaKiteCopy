@@ -10,7 +10,9 @@ const LandingPage: React.FC = () => {
       <header className="landing-hero">
         <nav className="landing-nav container">
           <div className="d-flex align-items-center">
-            <img src="/drp-infotech-logo.png" alt="DRP Infotech Pvt Ltd" className="landing-logo" />
+            <Link to="/" className="d-inline-flex align-items-center text-decoration-none">
+              <img src="/drp-infotech-logo.png" alt="DRP Infotech Pvt Ltd" className="landing-logo" />
+            </Link>
           </div>
           <div className="d-flex align-items-center gap-3">
             <Link to="/login" className="btn btn-outline-light btn-sm px-3">

@@ -143,7 +143,7 @@ ZerodhaKite/
 │   │   │   ├── Navigation.tsx
 │   │   │   ├── DashboardContent.tsx
 │   │   │   └── ...
-│   │   ├── App.tsx
+│   │   ├── DrpWelcome.tsx
 │   │   └── index.tsx
 │   └── package.json
 └── README.md

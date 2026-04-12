@@ -1,0 +1,261 @@
+.drp-welcome {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  background: linear-gradient(160deg, #040b2e 0%, #0c1f57 40%, #152a6e 100%);
+  color: #fff;
+  position: relative;
+  overflow-x: hidden;
+}
+
+.drp-welcome::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  opacity: 0.2;
+  background:
+    radial-gradient(ellipse 80% 50% at 15% 10%, rgba(99, 140, 255, 0.45), transparent),
+    radial-gradient(ellipse 60% 40% at 90% 80%, rgba(59, 130, 246, 0.35), transparent);
+  pointer-events: none;
+}
+
+.drp-welcome-inner {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: 2rem 1.25rem 3rem;
+  max-width: 1100px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+.drp-welcome-header {
+  margin-bottom: 3rem;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  text-align: left;
+}
+
+/* Logo sits top-left in normal flow — no overlap with heading */
+.drp-welcome-toprow {
+  width: 100%;
+  display: flex;
+  justify-content: flex-start;
+  align-items: center;
+  margin-bottom: 1.5rem;
+}
+
+.drp-welcome-logo {
+  height: 52px;
+  width: auto;
+  object-fit: contain;
+  display: block;
+  filter: drop-shadow(0 4px 12px rgba(0, 0, 0, 0.25));
+}
+
+.drp-welcome-title {
+  font-size: clamp(1.75rem, 5vw, 2.75rem);
+  font-weight: 800;
+  letter-spacing: -0.015em;
+  margin: 0 0 1rem;
+  line-height: 1.15;
+  text-align: left;
+  width: 100%;
+}
+
+.drp-welcome-subtitle {
+  font-size: 1.15rem;
+  color: rgba(255, 255, 255, 0.85);
+  max-width: 42rem;
+  margin: 0 0 2.5rem;
+  line-height: 1.7;
+  text-align: left;
+  width: 100%;
+}
+
+.drp-welcome-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 2.25rem;
+  flex: 1;
+  align-content: start;
+}
+
+@media (min-width: 768px) {
+  .drp-welcome-grid {
+    grid-template-columns: repeat(3, 1fr);
+    gap: 2rem;
+    align-items: stretch;
+  }
+}
+
+.drp-welcome-card {
+  display: flex;
+  flex-direction: column;
+  background: rgba(13, 23, 60, 0.75);
+  border: 1px solid rgba(147, 197, 253, 0.22);
+  border-radius: 24px;
+  padding: 2.75rem 2.5rem;
+  min-height: 280px;
+  text-decoration: none;
+  color: inherit;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  position: relative;
+  overflow: hidden;
+}
+
+.drp-welcome-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, transparent, rgba(147, 197, 253, 0.5), transparent);
+  transform: translateX(-100%);
+  transition: transform 0.5s ease;
+}
+
+.drp-welcome-card:hover::before {
+  transform: translateX(100%);
+}
+
+.drp-welcome-card:hover {
+  transform: translateY(-8px) scale(1.025);
+  background: rgba(21, 42, 110, 0.85);
+  border-color: rgba(147, 197, 253, 0.55);
+  box-shadow: 
+    0 32px 80px rgba(0, 0, 0, 0.4),
+    0 0 0 1px rgba(255, 255, 255, 0.15) inset,
+    0 0 40px rgba(147, 197, 253, 0.15);
+}
+
+.drp-welcome-card:hover .drp-welcome-card-icon {
+  transform: scale(1.1) rotate(5deg);
+}
+
+.drp-welcome-card:focus-visible {
+  outline: 2px solid #93c5fd;
+  outline-offset: 3px;
+}
+
+.drp-welcome-card-icon {
+  width: 72px;
+  height: 72px;
+  border-radius: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 2rem;
+  margin-bottom: 2rem;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.25);
+  background: rgba(255, 255, 255, 0.05);
+  position: relative;
+  overflow: hidden;
+}
+
+.drp-welcome-card-icon::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(circle at 30% 30%, rgba(255, 255, 255, 0.15), transparent 60%);
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+
+.drp-welcome-card:hover .drp-welcome-card-icon::after {
+  opacity: 1;
+}
+
+.drp-welcome-card-icon--trading {
+  background: linear-gradient(135deg, #3b82f6, #0ea5e9, #2563eb);
+  box-shadow: 0 8px 28px rgba(59, 130, 246, 0.5);
+}
+
+.drp-welcome-card-icon--astro {
+  background: linear-gradient(135deg, #8b5cf6, #a855f7, #d946ef);
+  box-shadow: 0 8px 28px rgba(139, 92, 246, 0.5);
+}
+
+.drp-welcome-card-icon--ai {
+  background: linear-gradient(135deg, #10b981, #34d399, #14b8a6);
+  box-shadow: 0 8px 28px rgba(16, 185, 129, 0.5);
+}
+
+.drp-welcome-card h2 {
+  font-size: 1.5rem;
+  font-weight: 800;
+  margin: 0 0 1rem;
+  letter-spacing: -0.02em;
+  line-height: 1.25;
+  color: #fff;
+}
+
+@supports ((-webkit-background-clip: text) or (background-clip: text)) {
+  .drp-welcome-card h2 {
+    background: linear-gradient(135deg, #ffffff 0%, rgba(255, 255, 255, 0.9) 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: transparent;
+  }
+}
+
+.drp-welcome-card p {
+  font-size: 1.05rem;
+  color: rgba(255, 255, 255, 0.8);
+  margin: 0 0 1.5rem;
+  line-height: 1.7;
+  flex: 1;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.drp-welcome-card-cta {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #93c5fd;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  padding-top: 1.5rem;
+  padding-bottom: 1.5rem;
+  border-top: 1px solid rgba(147, 197, 253, 0.18);
+  background: linear-gradient(180deg, rgba(147, 197, 253, 0.05) 0%, transparent 100%);
+}
+
+.drp-welcome-card:hover .drp-welcome-card-cta {
+  color: #e0e7ff;
+}
+
+.drp-welcome-card-cta::before {
+  content: '';
+  width: 24px;
+  height: 24px;
+  background: rgba(147, 197, 253, 0.1);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.65rem;
+}
+
+.drp-welcome-footer {
+  margin-top: auto;
+  padding-top: 2.5rem;
+  text-align: center;
+}
+
+.drp-welcome-footer small {
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 0.8rem;
+}
