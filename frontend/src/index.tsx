@@ -4,6 +4,7 @@ import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import 'bootstrap/dist/css/bootstrap.min.css';
 import './index.css';
 import DrpWelcome from './components/DrpWelcome';
+import OpenBookPage from './components/OpenBookPage';
 import LandingPage from './components/LandingPage';
 import Login from './components/Login';
 import Signup from './components/Signup';
@@ -27,6 +28,7 @@ root.render(
       <Routes>
         <Route path="/" element={<DrpWelcome />} />
         <Route path="/trading" element={<LandingPage />} />
+        <Route path="/openbook" element={<OpenBookPage />} />
         <Route path="/login" element={<Login />} />
         <Route path="/signup" element={<Signup />} />
         <Route path="/verify-otp" element={<VerifyOtp />} />

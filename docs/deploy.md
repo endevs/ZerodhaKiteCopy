@@ -10,7 +10,9 @@ Flask-SocketIO backend + CRA frontend. **Compose project name:** `zerodhakite` (
 | AI_toolsDRP | 5174 | 8002 |
 | **This app** | **5175** → Nginx **80** | **8003** on **`0.0.0.0`** (direct API); restrict with **security group**; browsers usually use **5175** |
 
-**SPA entry (same bundle on drpinfotech.com):** **`/`** — multi-product welcome page with links to **`/trading`** (Zerodha marketing), **astro.drpinfotech.com**, **ai.drpinfotech.com**. **`/login`**, **`/dashboard`**, etc. are unchanged. If CloudFront’s **default origin is S3** static failover, redeploy or upload the **same** built `index.html` + assets after a release so `/` stays in sync with the EC2 app.
+**SPA entry (same bundle on drpinfotech.com):** **`/`** — multi-product welcome page with links to **`/trading`** (Zerodha marketing), **astro.drpinfotech.com**, **ai.drpinfotech.com**, and **`/openbook`** (OpenBook Android product page). **`/login`**, **`/dashboard`**, etc. are unchanged. If CloudFront’s **default origin is S3** static failover, redeploy or upload the **same** built `index.html` + assets after a release so `/` stays in sync with the EC2 app.
+
+**OpenBook APK (large file, gitignored):** Before `npm run build` or `docker-hub-push.ps1`, copy **`app-release.apk`** into **`frontend/public/android/openbook/app-release.apk`** so the download link and Docker image include it. The repo keeps **`frontend/public/android/openbook/screenshots/`** in git; the APK is excluded from git to avoid a ~100MB+ blob—use your release pipeline or manual copy on the build machine.
 
 ## Clone (do not use GitHub `/tree/...` URLs)
 

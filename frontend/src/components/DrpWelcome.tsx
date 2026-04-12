@@ -18,8 +18,8 @@ const DrpWelcome: React.FC = () => {
           </div>
           <h1 className="drp-welcome-title">Welcome to DRP Infotech</h1>
           <p className="drp-welcome-subtitle">
-            Choose a product to continue. Each experience opens in context—trading on this site, or our
-            dedicated apps on their own domains.
+            Choose a product to continue. Each experience opens in context—trading on this site, our
+            dedicated web apps on their own domains, or OpenBook on Android.
           </p>
         </header>
 
@@ -68,6 +68,20 @@ const DrpWelcome: React.FC = () => {
               Open AI tools <i className="bi bi-box-arrow-up-right" />
             </span>
           </a>
+
+          <Link to="/openbook" className="drp-welcome-card">
+            <div className="drp-welcome-card-icon drp-welcome-card-icon--openbook" aria-hidden>
+              <i className="bi bi-phone" />
+            </div>
+            <h2>OpenBook</h2>
+            <p>
+              Android EdTech: snap textbook pages, revise with quizzes, and track progress—download the APK from
+              the product page.
+            </p>
+            <span className="drp-welcome-card-cta">
+              Learn more &amp; download <i className="bi bi-arrow-right" />
+            </span>
+          </Link>
         </div>
 
         <footer className="drp-welcome-footer">

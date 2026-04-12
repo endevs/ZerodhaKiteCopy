@@ -27,7 +27,7 @@
   display: flex;
   flex-direction: column;
   padding: 2rem 1.25rem 3rem;
-  max-width: 1100px;
+  max-width: 1200px;
   margin: 0 auto;
   width: 100%;
 }
@@ -85,9 +85,9 @@
   align-content: start;
 }
 
-@media (min-width: 768px) {
+@media (min-width: 640px) {
   .drp-welcome-grid {
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
     gap: 2rem;
     align-items: stretch;
   }
@@ -186,6 +186,11 @@
 .drp-welcome-card-icon--ai {
   background: linear-gradient(135deg, #10b981, #34d399, #14b8a6);
   box-shadow: 0 8px 28px rgba(16, 185, 129, 0.5);
+}
+
+.drp-welcome-card-icon--openbook {
+  background: linear-gradient(135deg, #f59e0b, #ea580c, #0d9488);
+  box-shadow: 0 8px 28px rgba(245, 158, 11, 0.45);
 }
 
 .drp-welcome-card h2 {

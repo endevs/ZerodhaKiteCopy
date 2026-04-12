@@ -1,0 +1,318 @@
+.openbook-page {
+  min-height: 100vh;
+  font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  background: linear-gradient(165deg, #f0fdfa 0%, #ecfeff 35%, #f8fafc 100%);
+  color: #0f172a;
+}
+
+.openbook-nav {
+  background: linear-gradient(135deg, #0d9488 0%, #0f766e 100%);
+  color: #fff;
+  padding: 1rem 1.25rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  box-shadow: 0 4px 24px rgba(13, 148, 136, 0.25);
+}
+
+.openbook-nav a {
+  color: #fff;
+  text-decoration: none;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.openbook-nav a:hover {
+  text-decoration: underline;
+}
+
+.openbook-nav-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 700;
+  font-size: 1.1rem;
+}
+
+.openbook-inner {
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 2rem 1.25rem 4rem;
+}
+
+.openbook-hero h1 {
+  font-size: clamp(1.85rem, 4vw, 2.5rem);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: #0f766e;
+  margin: 0 0 0.5rem;
+}
+
+.openbook-tagline {
+  font-size: 1.15rem;
+  color: #475569;
+  margin: 0 0 1.5rem;
+  line-height: 1.5;
+}
+
+.openbook-benefits {
+  background: #fff;
+  border: 1px solid rgba(13, 148, 136, 0.2);
+  border-radius: 16px;
+  padding: 1.25rem 1.5rem;
+  margin-bottom: 2rem;
+  box-shadow: 0 8px 30px rgba(15, 23, 42, 0.06);
+}
+
+.openbook-benefits h2 {
+  font-size: 1rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #0d9488;
+  margin: 0 0 0.75rem;
+}
+
+.openbook-benefits ul {
+  margin: 0;
+  padding-left: 1.25rem;
+  color: #334155;
+  line-height: 1.65;
+}
+
+.openbook-benefits li {
+  margin-bottom: 0.5rem;
+}
+
+.openbook-download {
+  background: linear-gradient(135deg, #0d9488, #0f766e);
+  color: #fff;
+  border-radius: 16px;
+  padding: 1.5rem 1.5rem;
+  margin-bottom: 2.5rem;
+  text-align: center;
+  box-shadow: 0 12px 40px rgba(13, 148, 136, 0.35);
+}
+
+.openbook-download h2 {
+  margin: 0 0 0.5rem;
+  font-size: 1.25rem;
+}
+
+.openbook-download p {
+  margin: 0 0 1rem;
+  font-size: 0.95rem;
+  opacity: 0.95;
+  line-height: 1.5;
+}
+
+.openbook-download .btn-download {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: #fff;
+  color: #0f766e;
+  font-weight: 700;
+  padding: 0.85rem 1.75rem;
+  border-radius: 999px;
+  text-decoration: none;
+  font-size: 1rem;
+  border: none;
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.openbook-download .btn-download:hover {
+  color: #0d9488;
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+
+.openbook-download small {
+  display: block;
+  margin-top: 1rem;
+  font-size: 0.8rem;
+  opacity: 0.9;
+}
+
+/* Gallery Grid - Responsive 2-3 columns */
+.openbook-gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+  gap: 2rem;
+  margin-bottom: 2.5rem;
+}
+
+.openbook-gallery h2 {
+  font-size: 1.5rem;
+  color: #0f766e;
+  margin: 0 0 1.5rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 2px solid rgba(13, 148, 136, 0.25);
+}
+
+/* ============================================
+   OPENBOOK FEATURE CARD - Grid Pattern Design
+   ============================================ */
+
+/* Card container - Split: Image/Grid on left, Content on right */
+.openbook-shot {
+  background: #fff;
+  border-radius: 16px;
+  overflow: hidden;
+  border: 1px solid #e2e8f0;
+  box-shadow: 0 4px 20px rgba(15, 23, 42, 0.06);
+  transition: all 0.25s ease;
+  display: flex;
+  flex-direction: row;
+}
+
+.openbook-shot:hover {
+  box-shadow: 0 12px 35px rgba(13, 148, 136, 0.15);
+  transform: translateY(-3px);
+}
+
+/* Left side: Image with grid pattern overlay */
+.openbook-shot-image {
+  position: relative;
+  width: 42%;
+  height: 280px;
+  flex-shrink: 0;
+  background: #0f172a;
+  overflow: hidden;
+  border-radius: 8px 0 0 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Grid pattern background - subtle squares */
+.openbook-shot-image::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image: 
+    linear-gradient(rgba(13, 148, 136, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(13, 148, 136, 0.05) 1px, transparent 1px);
+  background-size: 12px 12px;
+  background-position: center;
+}
+
+/* Image within grid pattern */
+.openbook-shot-image img {
+  position: relative;
+  z-index: 1;
+  width: 90%;
+  max-width: 180px;
+  height: auto;
+  border: 3px solid rgba(13, 148, 136, 0.3);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.95);
+  padding: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+  transition: transform 0.3s ease;
+}
+
+.openbook-shot:hover .openbook-shot-image img {
+  transform: scale(1.05);
+}
+
+/* Hover effect on grid background */
+.openbook-shot:hover .openbook-shot-image::before {
+  background-image: 
+    linear-gradient(rgba(13, 148, 136, 0.1) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(13, 148, 136, 0.1) 1px, transparent 1px);
+}
+
+/* Right side: Content description */
+.openbook-shot-content {
+  width: 58%;
+  padding: 1.75rem 1.75rem 1.75rem 1.25rem;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  background: linear-gradient(to bottom, rgba(240, 253, 250, 0.3), transparent);
+  border-radius: 0 8px 8px 0;
+  position: relative;
+}
+
+/* Decorative corner accent */
+.openbook-shot-content::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 60px;
+  height: 60px;
+  background: linear-gradient(135deg, rgba(13, 148, 136, 0.1) 0%, transparent 100%);
+  border-radius: 0 8px 0 16px;
+}
+
+.openbook-shot-content h3 {
+  margin: 0 0 0.5rem;
+  font-size: 1.05rem;
+  color: #0f766e;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.openbook-shot-content p {
+  margin: 0 0 0.75rem;
+  color: #475569;
+  font-size: 0.88rem;
+  line-height: 1.6;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.openbook-shot-content span {
+  font-size: 0.7rem;
+  color: #94a3b8;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 0.5rem;
+  padding-left: 0.5rem;
+  border-left: 2px solid rgba(13, 148, 136, 0.5);
+}
+
+/* Decorative line between title and description */
+.openbook-shot-content::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 1rem;
+  height: 2px;
+  background: linear-gradient(90deg, rgba(13, 148, 136, 0.3), transparent);
+}
+
+/* Responsive: Mobile-first approach - Stack vertically */
+@media (max-width: 640px) {
+  .openbook-shot {
+    flex-direction: column;
+  }
+  
+  .openbook-shot-image {
+    width: 100%;
+    height: 180px;
+    border-radius: 8px 8px 0 0 !important;
+  }
+  
+  .openbook-shot-content {
+    width: 100%;
+    border-radius: 0 0 8px 8px !important;
+    padding: 1.25rem;
+  }
+}
+
+.openbook-footer-note {
+  text-align: center;
+  color: #64748b;
+  font-size: 0.85rem;
+  margin-top: 2rem;
+}
