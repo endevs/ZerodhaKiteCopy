@@ -67,6 +67,8 @@ const OpenBookPage: React.FC = () => {
         </section>
 
         <p className="openbook-footer-note">
+          <Link to="/legal/openbook-privacy-policy">Privacy policy (OpenBook)</Link>
+          {' · '}
           Questions or partnerships? Use <Link to="/legal/contact">Contact us</Link> on the main site.
         </p>
 

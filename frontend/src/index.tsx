@@ -14,6 +14,7 @@ import VerifyOtp from './components/VerifyOtp';
 import ProtectedRoute from './components/ProtectedRoute';
 import ContactPage from './components/legal/ContactPage';
 import PrivacyPolicyPage from './components/legal/PrivacyPolicyPage';
+import OpenBookPrivacyPolicyPage from './components/legal/OpenBookPrivacyPolicyPage';
 import CancellationPolicyPage from './components/legal/CancellationPolicyPage';
 import ShippingPolicyPage from './components/legal/ShippingPolicyPage';
 import TermsPage from './components/legal/TermsPage';
@@ -50,6 +51,7 @@ root.render(
         />
         <Route path="/legal/contact" element={<ContactPage />} />
         <Route path="/legal/privacy-policy" element={<PrivacyPolicyPage />} />
+        <Route path="/legal/openbook-privacy-policy" element={<OpenBookPrivacyPolicyPage />} />
         <Route path="/legal/cancellation-policy" element={<CancellationPolicyPage />} />
         <Route path="/legal/shipping-policy" element={<ShippingPolicyPage />} />
         <Route path="/legal/terms" element={<TermsPage />} />
