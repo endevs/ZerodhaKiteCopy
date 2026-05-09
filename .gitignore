@@ -3,6 +3,9 @@
 /database.db
 /.cursor/
 
+# Local SSH deploy overrides (DEPLOY_SSH, optional key paths)
+/scripts/deploy.local.ps1
+
 # Local SQLite copies outside backend/
 /frontend/database.db
 

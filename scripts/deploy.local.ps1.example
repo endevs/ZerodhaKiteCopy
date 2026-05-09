@@ -1,0 +1,11 @@
+# Copy this file to deploy.local.ps1 in the SAME folder (scripts/).
+# scripts/deploy.local.ps1 is gitignored — set real values for your SSH host / path / key.
+#
+# Copy-Item .\scripts\deploy.local.ps1.example .\scripts\deploy.local.ps1
+# notepad .\scripts\deploy.local.ps1
+#
+$env:DEPLOY_SSH = "ubuntu@ec2-xxxx.compute.amazonaws.com"   # PUBLIC DNS or IP you use from THIS PC — not private 172.31.x.x
+$env:DEPLOY_PATH = "/home/ubuntu/apps/zerodhakite"
+$env:DOCKERHUB_NAMESPACE = "baparaj"
+$env:IMAGE_TAG = "latest"
+# $env:DEPLOY_SSH_KEY = "D:\keys\Key_DRP_Ubuntu.pem"

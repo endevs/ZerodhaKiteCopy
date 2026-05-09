@@ -11,9 +11,16 @@
 #   $env:IMAGE_TAG = "latest"                             # optional
 #   $env:DEPLOY_SYNC_ENV = "1"                            # optional; scp backend/.env.production to server first
 #   .\scripts\remote-deploy-via-ssh.ps1
+#
+# Optional: copy scripts/deploy.local.ps1.example to scripts/deploy.local.ps1 (gitignored) and fill DEPLOY_*.
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
+$localDeploy = Join-Path $PSScriptRoot "deploy.local.ps1"
+if (Test-Path -LiteralPath $localDeploy) {
+    Write-Host "Loading scripts/deploy.local.ps1" -ForegroundColor Cyan
+    . $localDeploy
+}
 $ssh = $env:DEPLOY_SSH
 $path = $env:DEPLOY_PATH
 $key = $env:DEPLOY_SSH_KEY
@@ -50,7 +57,7 @@ if ($env:DEPLOY_SYNC_ENV -eq "1") {
     & scp @sshArgs $localEnvProd $remoteEnv
 }
 
-$inner = "docker run --rm --privileged tonistiigi/binfmt --install amd64 2>/dev/null || true; cd $path && git pull origin main || true && export DOCKERHUB_NAMESPACE=$ns IMAGE_TAG=$tag && docker compose -f docker-compose.hub.yml pull && docker compose -f docker-compose.hub.yml up -d && docker compose -f docker-compose.hub.yml ps"
+$inner = "docker run --rm --privileged tonistiigi/binfmt --install amd64 2>/dev/null || true; cd $path && git pull origin main || true && export DOCKERHUB_NAMESPACE=$ns IMAGE_TAG=$tag && docker compose -f docker-compose.hub.yml pull && docker compose -f docker-compose.hub.yml up -d --force-recreate && docker compose -f docker-compose.hub.yml ps"
 
 Write-Host "SSH: $ssh  Path: $path  Tag: $tag"
 & ssh @sshArgs $ssh "bash -lc '$inner'"
