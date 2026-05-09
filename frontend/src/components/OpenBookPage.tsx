@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import './OpenBookPage.css';
 import '../App.css';
 import PolicyLinks from './PolicyLinks';
-import { openBookApkPath, openBookBenefits, openBookScreenshots } from '../data/openBookContent';
+import { openBookBenefits, openBookPlayStoreUrl, openBookScreenshots } from '../data/openBookContent';
 
 const OpenBookPage: React.FC = () => {
   return (
@@ -40,14 +40,14 @@ const OpenBookPage: React.FC = () => {
         <section className="openbook-download" aria-labelledby="openbook-download-heading">
           <h2 id="openbook-download-heading">Download for Android</h2>
           <p>
-            Install the release APK on your phone. You may need to allow installs from your browser or files app,
-            and enable “Install unknown apps” for that source if Android prompts you.
+            OpenBook is now available on Google Play. Use the official Play Store listing to install and receive
+            updates.
           </p>
-          <a className="btn-download" href={openBookApkPath} download="OpenBook-app-release.apk">
-            <i className="bi bi-download" aria-hidden />
-            Download APK
+          <a className="btn-download" href={openBookPlayStoreUrl} target="_blank" rel="noopener noreferrer">
+            <i className="bi bi-google-play" aria-hidden />
+            Get it on Google Play
           </a>
-          <small>Android only. For best results use a recent Android version. Install from this APK is offered alongside any future Play Store listing.</small>
+          <small>Official Play Store listing for OpenBook: com.drpinfotech.openbook.</small>
         </section>
 
         <section className="openbook-gallery" aria-labelledby="openbook-gallery-heading">

@@ -5,6 +5,7 @@ import 'bootstrap/dist/css/bootstrap.min.css';
 import './index.css';
 import DrpWelcome from './components/DrpWelcome';
 import OpenBookPage from './components/OpenBookPage';
+import AstroDrpPage from './components/AstroDrpPage';
 import LandingPage from './components/LandingPage';
 import Login from './components/Login';
 import Signup from './components/Signup';
@@ -15,6 +16,7 @@ import ProtectedRoute from './components/ProtectedRoute';
 import ContactPage from './components/legal/ContactPage';
 import PrivacyPolicyPage from './components/legal/PrivacyPolicyPage';
 import OpenBookPrivacyPolicyPage from './components/legal/OpenBookPrivacyPolicyPage';
+import AstroDrpPrivacyPolicyPage from './components/legal/AstroDrpPrivacyPolicyPage';
 import CancellationPolicyPage from './components/legal/CancellationPolicyPage';
 import ShippingPolicyPage from './components/legal/ShippingPolicyPage';
 import TermsPage from './components/legal/TermsPage';
@@ -30,6 +32,7 @@ root.render(
         <Route path="/" element={<DrpWelcome />} />
         <Route path="/trading" element={<LandingPage />} />
         <Route path="/openbook" element={<OpenBookPage />} />
+        <Route path="/astrodrp" element={<AstroDrpPage />} />
         <Route path="/login" element={<Login />} />
         <Route path="/signup" element={<Signup />} />
         <Route path="/verify-otp" element={<VerifyOtp />} />
@@ -52,6 +55,7 @@ root.render(
         <Route path="/legal/contact" element={<ContactPage />} />
         <Route path="/legal/privacy-policy" element={<PrivacyPolicyPage />} />
         <Route path="/legal/openbook-privacy-policy" element={<OpenBookPrivacyPolicyPage />} />
+        <Route path="/legal/astrodrp-privacy-policy" element={<AstroDrpPrivacyPolicyPage />} />
         <Route path="/legal/cancellation-policy" element={<CancellationPolicyPage />} />
         <Route path="/legal/shipping-policy" element={<ShippingPolicyPage />} />
         <Route path="/legal/terms" element={<TermsPage />} />

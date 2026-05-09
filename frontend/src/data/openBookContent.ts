@@ -10,6 +10,8 @@ export interface OpenBookScreenshot {
 }
 
 export const openBookApkPath = '/android/openbook/app-release.apk';
+export const openBookPlayStoreUrl =
+  'https://play.google.com/store/apps/details?id=com.drpinfotech.openbook&pcampaignid=web_share';
 
 export const openBookScreenshots: OpenBookScreenshot[] = [
   {

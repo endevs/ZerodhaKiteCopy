@@ -1,0 +1,186 @@
+.astrodpr-page {
+  min-height: 100vh;
+  font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  background: linear-gradient(165deg, #f5f3ff 0%, #eff6ff 35%, #f8fafc 100%);
+  color: #0f172a;
+}
+
+.astrodpr-nav {
+  background: linear-gradient(135deg, #4338ca 0%, #1d4ed8 100%);
+  color: #fff;
+  padding: 1rem 1.25rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.astrodpr-nav a {
+  color: #fff;
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.astrodpr-nav a:hover {
+  text-decoration: underline;
+}
+
+.astrodpr-nav-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 700;
+  font-size: 1.1rem;
+}
+
+.astrodpr-inner {
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 2rem 1.25rem 4rem;
+}
+
+.astrodpr-hero h1 {
+  font-size: clamp(1.85rem, 4vw, 2.5rem);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: #312e81;
+  margin: 0 0 0.5rem;
+}
+
+.astrodpr-tagline {
+  font-size: 1.1rem;
+  color: #475569;
+  margin: 0 0 1.5rem;
+  line-height: 1.55;
+}
+
+.astrodpr-benefits {
+  background: #fff;
+  border: 1px solid rgba(67, 56, 202, 0.2);
+  border-radius: 16px;
+  padding: 1.25rem 1.5rem;
+  margin-bottom: 2rem;
+}
+
+.astrodpr-benefits h2 {
+  font-size: 1rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #4338ca;
+  margin: 0 0 0.75rem;
+}
+
+.astrodpr-benefits ul {
+  margin: 0;
+  padding-left: 1.25rem;
+  color: #334155;
+  line-height: 1.65;
+}
+
+.astrodpr-download {
+  background: linear-gradient(135deg, #4338ca, #1d4ed8);
+  color: #fff;
+  border-radius: 16px;
+  padding: 1.5rem;
+  margin-bottom: 2.5rem;
+  text-align: center;
+}
+
+.astrodpr-download h2 {
+  margin: 0 0 0.5rem;
+  font-size: 1.25rem;
+}
+
+.astrodpr-download p {
+  margin: 0 0 1rem;
+  font-size: 0.95rem;
+  line-height: 1.5;
+}
+
+.astrodpr-download .btn-download {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: #fff;
+  color: #1d4ed8;
+  font-weight: 700;
+  padding: 0.85rem 1.75rem;
+  border-radius: 999px;
+  text-decoration: none;
+}
+
+.astrodpr-download small {
+  display: block;
+  margin-top: 1rem;
+  font-size: 0.8rem;
+  opacity: 0.95;
+}
+
+.astrodpr-gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+  gap: 1.5rem;
+  margin-bottom: 2.5rem;
+}
+
+.astrodpr-shot {
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 16px;
+  overflow: hidden;
+}
+
+.astrodpr-shot-image {
+  background: #e0e7ff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+}
+
+.astrodpr-shot-image img {
+  width: 100%;
+  max-width: 260px;
+  height: auto;
+  border-radius: 8px;
+  border: 2px solid rgba(67, 56, 202, 0.25);
+}
+
+.astrodpr-shot-content {
+  padding: 1rem 1.25rem 1.25rem;
+}
+
+.astrodpr-shot-content span {
+  font-size: 0.72rem;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.astrodpr-shot-content h3 {
+  margin: 0.5rem 0;
+  color: #312e81;
+  font-size: 1rem;
+}
+
+.astrodpr-shot-content p {
+  margin: 0;
+  color: #475569;
+  font-size: 0.9rem;
+  line-height: 1.55;
+}
+
+.astrodpr-footer-note {
+  text-align: center;
+  color: #64748b;
+  font-size: 0.85rem;
+  margin-top: 1.5rem;
+}
+
+@media (max-width: 640px) {
+  .astrodpr-gallery {
+    grid-template-columns: 1fr;
+  }
+}
+

@@ -193,6 +193,11 @@
   box-shadow: 0 8px 28px rgba(245, 158, 11, 0.45);
 }
 
+.drp-welcome-card-icon--astrodrp {
+  background: linear-gradient(135deg, #7c3aed, #2563eb, #0ea5e9);
+  box-shadow: 0 8px 28px rgba(59, 130, 246, 0.45);
+}
+
 .drp-welcome-card h2 {
   font-size: 1.5rem;
   font-weight: 800;

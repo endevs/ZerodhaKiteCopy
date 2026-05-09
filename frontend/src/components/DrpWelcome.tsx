@@ -75,8 +75,22 @@ const DrpWelcome: React.FC = () => {
             </div>
             <h2>OpenBook</h2>
             <p>
-              Android EdTech: snap textbook pages, revise with quizzes, and track progress—download the APK from
-              the product page.
+              Android EdTech: snap textbook pages, revise with quizzes, and track progress—get it on Google
+              Play from the product page.
+            </p>
+            <span className="drp-welcome-card-cta">
+              Learn more &amp; download <i className="bi bi-arrow-right" />
+            </span>
+          </Link>
+
+          <Link to="/astrodrp" className="drp-welcome-card">
+            <div className="drp-welcome-card-icon drp-welcome-card-icon--astrodrp" aria-hidden>
+              <i className="bi bi-moon-stars" />
+            </div>
+            <h2>AstroDRP</h2>
+            <p>
+              Android astrology app: kundli insights, daily guidance, and astro tools. In testing now, with
+              Google Play release coming soon.
             </p>
             <span className="drp-welcome-card-cta">
               Learn more &amp; download <i className="bi bi-arrow-right" />
