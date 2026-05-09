@@ -10,7 +10,33 @@ Flask-SocketIO backend + CRA frontend. **Compose project name:** `zerodhakite` (
 | AI_toolsDRP | 5174 | 8002 |
 | **This app** | **5175** → Nginx **80** | **8003** on **`0.0.0.0`** (direct API); restrict with **security group**; browsers usually use **5175** |
 
-**SPA entry (same bundle on drpinfotech.com):** **`/`** — multi-product welcome page with links to **`/trading`** (Zerodha marketing), **astro.drpinfotech.com**, **ai.drpinfotech.com**, and **`/openbook`** (OpenBook Android product page). **`/login`**, **`/dashboard`**, etc. are unchanged. If CloudFront’s **default origin is S3** static failover, redeploy or upload the **same** built `index.html` + assets after a release so `/` stays in sync with the EC2 app.
+**SPA entry (same bundle on drpinfotech.com):** **`/`** — multi-product welcome page with links to **`/trading`**, static failover summaries for **`/astrology/`** and **`/ai/`** (no live-app dependency during S3 failover), **`/openbook`**, etc. **`/login`**, **`/dashboard`**, etc. are unchanged. If CloudFront fails over to the **handcrafted static site** under repo folder **`s3/`** (instead of uploading the CRA build), sync that folder so `/`, **`/astrology/`**, **`/ai/`**, `/openbook/`, `/astrodrp/`, `/trading/`, and **`/legal/...`** match the hub (see **S3 static failover checklist** below).
+
+### S3 static failover checklist (`s3/` handcrafted HTML)
+
+When the primary EC2/origin is unhealthy and CloudFront serves the **failover bucket** (or prefix), users need **real S3 keys** for each URL—React Router does not run on S3. This repo maintains matching pages under **`s3/`**:
+
+| Path (example) | S3 object key |
+|----------------|---------------|
+| `/` | `index.html` |
+| `/trading/` | `trading/index.html` |
+| `/astrology/` | `astrology/index.html` |
+| `/ai/` | `ai/index.html` |
+| `/openbook/` | `openbook/index.html` |
+| `/astrodrp/` | `astrodrp/index.html` |
+| `/legal/openbook-privacy-policy/` | `legal/openbook-privacy-policy/index.html` |
+| `/legal/astrodrp-privacy-policy/` | `legal/astrodrp-privacy-policy/index.html` |
+
+**Before upload / `aws s3 sync`:**
+
+1. **Logo:** ensure **`s3/assets/drp-infotech-logo.png`** exists (copied from `frontend/public/` or your brand asset).
+2. **Screenshots:** keep **`s3/android/openbook/screenshots/*.jpg`** and **`s3/android/astrodpr/screenshots/*.jpg`** in sync with `frontend/public/android/.../screenshots/` after UI changes.
+3. **AstroDRP APK (optional):** copy the release **`astroDRP.apk`** to **`s3/android/astrodpr/astroDRP.apk`** on the machine that uploads to S3—this path is referenced by **`s3/astrodrp/index.html`**; APKs are **gitignored** under **`s3/`** to avoid large blobs in Git.
+4. Upload the **whole** **`s3/`** tree (including **`css/`**, **`js/`**, top-level **`*.html`** policy pages CloudFront might still serve) to your failover bucket/prefix.
+
+**CloudFront:** confirm behaviors or origins map **`/astrology*`**, **`/ai*`**, **`/openbook*`**, **`/astrodrp*`**, **`/legal/*`**, **`/trading*`** (and default `/`) to the failover origin when active, with **403/404** or **502** fallbacks pointing at this static site as documented in your distribution. Prefer **directory-style** URLs ending in `/` so `index.html` resolves predictably.
+
+If you prefer failover = **full CRA `frontend/build`** instead, upload that build and keep **`index.html`** + hashed assets current after each frontend release—that path is separate from the handcrafted **`s3/`** tree.
 
 **Android APKs (large files, gitignored):**
 - **OpenBook:** copy **`app-release.apk`** into **`frontend/public/android/openbook/app-release.apk`** before `npm run build` / `docker-hub-push.ps1`.

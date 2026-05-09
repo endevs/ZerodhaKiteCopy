@@ -970,3 +970,553 @@ body {
     }
 }
 
+/* ============================================
+   S3 static failover — welcome hub & product pages
+   (DrpWelcome-style hub; OpenBook / AstroDRP / trading)
+   ============================================ */
+
+.s3-failover-hub-body {
+    min-height: 100vh;
+    margin: 0;
+    background: linear-gradient(160deg, #050a24 0%, #0c1f57 42%, #1b4ed8 100%);
+    color: #fff;
+    font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+}
+
+.s3-failover-hub {
+    min-height: 100vh;
+    display: flex;
+    align-items: stretch;
+    justify-content: center;
+    padding: 2rem 1rem 3rem;
+    box-sizing: border-box;
+}
+
+.s3-failover-hub-inner {
+    width: 100%;
+    max-width: 1100px;
+}
+
+.s3-failover-hub-header {
+    text-align: center;
+    margin-bottom: 2.25rem;
+}
+
+.s3-failover-hub-toprow {
+    display: flex;
+    justify-content: center;
+    margin-bottom: 1.25rem;
+}
+
+.s3-failover-hub-logo {
+    height: 72px;
+    width: auto;
+    object-fit: contain;
+    filter: drop-shadow(0 12px 30px rgba(0, 0, 0, 0.35));
+}
+
+.s3-failover-hub-title {
+    font-weight: 800;
+    font-size: clamp(1.75rem, 4vw, 2.5rem);
+    letter-spacing: -0.02em;
+    margin-bottom: 0.75rem;
+    color: #fff;
+}
+
+.s3-failover-hub-subtitle {
+    margin: 0 auto;
+    max-width: 44rem;
+    font-size: 1.05rem;
+    line-height: 1.65;
+    color: rgba(255, 255, 255, 0.82);
+}
+
+.s3-failover-grid {
+    display: grid;
+    gap: 1.25rem;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+}
+
+.s3-failover-card {
+    display: flex;
+    flex-direction: column;
+    gap: 0.65rem;
+    padding: 1.35rem 1.25rem 1.5rem;
+    border-radius: 18px;
+    text-decoration: none;
+    color: var(--text-dark);
+    background: rgba(255, 255, 255, 0.97);
+    border: 1px solid rgba(255, 255, 255, 0.35);
+    box-shadow: 0 18px 40px -20px rgba(0, 0, 0, 0.45);
+    transition: transform 0.22s ease, box-shadow 0.22s ease;
+}
+
+.s3-failover-card:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 24px 50px -18px rgba(27, 78, 216, 0.45);
+    color: var(--text-dark);
+}
+
+.s3-failover-card h2 {
+    font-size: 1.2rem;
+    font-weight: 700;
+    margin: 0;
+    color: var(--text-dark);
+}
+
+.s3-failover-card p {
+    margin: 0;
+    flex: 1;
+    font-size: 0.92rem;
+    line-height: 1.55;
+    color: rgba(27, 31, 59, 0.78);
+}
+
+.s3-failover-card-icon {
+    width: 52px;
+    height: 52px;
+    border-radius: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.45rem;
+    color: #fff;
+}
+
+.s3-failover-card-icon--trading {
+    background: linear-gradient(135deg, #1b4ed8, #2355ff);
+}
+
+.s3-failover-card-icon--astro {
+    background: linear-gradient(135deg, #5b21b6, #7c3aed);
+}
+
+.s3-failover-card-icon--ai {
+    background: linear-gradient(135deg, #0f766e, #14b8a6);
+}
+
+.s3-failover-card-icon--openbook {
+    background: linear-gradient(135deg, #0d9488, #2dd4bf);
+}
+
+.s3-failover-card-icon--astrodrp {
+    background: linear-gradient(135deg, #3730a3, #6366f1);
+}
+
+.s3-failover-card-cta {
+    font-size: 0.88rem;
+    font-weight: 600;
+    color: var(--primary-blue);
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+}
+
+.s3-failover-card:hover .s3-failover-card-cta {
+    color: var(--primary-medium);
+}
+
+.s3-failover-hub-footer {
+    margin-top: 2.75rem;
+    text-align: center;
+}
+
+.s3-failover-policy-links {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    align-items: center;
+    gap: 0.5rem 0.75rem;
+    font-size: 0.85rem;
+    margin-bottom: 0.85rem;
+}
+
+.s3-failover-policy-links a {
+    color: rgba(255, 255, 255, 0.9);
+    text-decoration: none;
+    font-weight: 500;
+}
+
+.s3-failover-policy-links a:hover {
+    text-decoration: underline;
+    color: #fff;
+}
+
+.s3-failover-policy-links span {
+    color: rgba(255, 255, 255, 0.35);
+    user-select: none;
+}
+
+.s3-failover-copyright {
+    display: block;
+    color: rgba(255, 255, 255, 0.45);
+    font-size: 0.8rem;
+}
+
+/* Failover secondary pages — shared shell */
+
+.s3-failover-product-body {
+    margin: 0;
+    min-height: 100vh;
+    font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+    background: var(--bg-light);
+    color: var(--text-dark);
+}
+
+.s3-failover-product-body.s3-product-openbook {
+    background: linear-gradient(180deg, #ecfdf9 0%, #f5f7fb 40%);
+}
+
+.s3-failover-product-body.s3-product-astrodrp {
+    background: linear-gradient(180deg, #eef2ff 0%, #f5f7fb 45%);
+}
+
+.s3-failover-product-body.s3-product-vedic {
+    background: linear-gradient(180deg, #f5f3ff 0%, #faf5ff 35%, #f5f7fb 55%);
+}
+
+.s3-failover-product-body.s3-product-ai-tools {
+    background: linear-gradient(180deg, #f0fdfa 0%, #ecfeff 35%, #f5f7fb 55%);
+}
+
+.s3-product-nav {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.85rem 1.25rem;
+    background: rgba(255, 255, 255, 0.92);
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid rgba(12, 31, 87, 0.08);
+    box-shadow: 0 4px 20px rgba(4, 11, 46, 0.06);
+}
+
+.s3-product-nav a {
+    text-decoration: none;
+    font-weight: 600;
+    font-size: 0.9rem;
+    color: var(--primary-blue);
+}
+
+.s3-product-nav a:hover {
+    text-decoration: underline;
+}
+
+.s3-product-nav-brand {
+    font-weight: 700;
+    font-size: 1rem;
+    color: var(--text-dark);
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    text-decoration: none;
+}
+
+.s3-product-nav--teal {
+    border-bottom-color: rgba(13, 148, 136, 0.2);
+}
+
+.s3-product-nav--teal a:not(.s3-product-nav-brand) {
+    color: #0f766e;
+}
+
+.s3-product-nav--teal .s3-product-nav-brand {
+    color: #0f766e;
+}
+
+.s3-product-nav--indigo {
+    border-bottom-color: rgba(67, 56, 202, 0.2);
+}
+
+.s3-product-nav--indigo a:not(.s3-product-nav-brand) {
+    color: #4338ca;
+}
+
+.s3-product-nav--indigo .s3-product-nav-brand {
+    color: #3730a3;
+}
+
+.s3-product-nav--vedic {
+    border-bottom-color: rgba(124, 58, 237, 0.25);
+}
+
+.s3-product-nav--vedic span.s3-product-nav-brand {
+    color: #5b21b6;
+}
+
+.s3-product-nav--vedic a:not(.s3-product-nav-brand) {
+    color: #6d28d9;
+}
+
+.s3-product-nav--ai-tools {
+    border-bottom-color: rgba(20, 184, 166, 0.3);
+}
+
+.s3-product-nav--ai-tools a:not(.s3-product-nav-brand) {
+    color: #0f766e;
+}
+
+.s3-product-nav--ai-tools span.s3-product-nav-brand {
+    color: #0d9488;
+}
+
+.s3-failover-static-panel {
+    background: rgba(255, 255, 255, 0.95);
+    border-radius: 16px;
+    padding: 1.35rem 1.35rem 1.2rem;
+    margin-bottom: 1.25rem;
+    border: 1px solid rgba(12, 31, 87, 0.08);
+    box-shadow: 0 8px 28px rgba(4, 11, 46, 0.06);
+}
+
+.s3-failover-static-panel--vedic {
+    border-color: rgba(124, 58, 237, 0.25);
+    box-shadow: 0 8px 28px rgba(91, 33, 182, 0.08);
+}
+
+.s3-failover-static-panel--ai {
+    border-color: rgba(20, 184, 166, 0.3);
+    box-shadow: 0 8px 28px rgba(15, 118, 110, 0.08);
+}
+
+.s3-failover-static-list {
+    margin: 0;
+    padding-left: 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+    color: rgba(27, 31, 59, 0.85);
+    line-height: 1.55;
+    font-size: 0.95rem;
+}
+
+.s3-failover-policy-links--light a {
+    color: var(--primary-blue);
+}
+
+.s3-failover-policy-links--light a:hover {
+    color: var(--primary-medium);
+}
+
+.s3-failover-policy-links--light span {
+    color: rgba(27, 31, 59, 0.35);
+}
+
+.s3-product-inner,
+.s3-android-inner {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 2rem 1.25rem 3rem;
+}
+
+.s3-product-hero,
+.s3-android-hero {
+    margin-bottom: 1.75rem;
+}
+
+.s3-product-hero h1,
+.s3-android-hero h1 {
+    font-weight: 800;
+    font-size: clamp(1.75rem, 4vw, 2.25rem);
+    margin-bottom: 0.75rem;
+    color: var(--text-dark);
+}
+
+.s3-product-tagline,
+.s3-android-tagline {
+    font-size: 1.05rem;
+    line-height: 1.65;
+    color: rgba(27, 31, 59, 0.8);
+    margin: 0;
+}
+
+.s3-product-note {
+    border-radius: 16px !important;
+}
+
+/* OpenBook / AstroDRP content blocks */
+
+.s3-android-gallery-heading {
+    margin: 2rem 0 1rem;
+}
+
+.s3-android-gallery-heading h2 {
+    font-size: 1.35rem;
+    font-weight: 700;
+}
+
+.s3-android-panel {
+    background: rgba(255, 255, 255, 0.9);
+    border: 1px solid rgba(13, 148, 136, 0.2);
+    border-radius: 16px;
+    padding: 1.35rem 1.35rem 1.2rem;
+    margin-bottom: 1.75rem;
+    box-shadow: 0 8px 28px rgba(15, 118, 110, 0.08);
+}
+
+.s3-android-panel h2 {
+    font-size: 1.15rem;
+    margin-bottom: 0.85rem;
+    color: var(--text-dark);
+}
+
+.s3-android-panel ul {
+    margin: 0;
+    padding-left: 1.2rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+    color: rgba(27, 31, 59, 0.82);
+    line-height: 1.55;
+}
+
+.s3-android-panel--indigo {
+    border-color: rgba(79, 70, 229, 0.25);
+    box-shadow: 0 8px 28px rgba(67, 56, 202, 0.1);
+}
+
+.s3-android-download {
+    background: #fff;
+    border: 1px solid rgba(13, 148, 136, 0.25);
+    border-radius: 16px;
+    padding: 1.35rem;
+    margin-bottom: 2rem;
+    box-shadow: 0 10px 32px rgba(15, 118, 110, 0.1);
+}
+
+.s3-android-download h2 {
+    font-size: 1.15rem;
+    margin-bottom: 0.5rem;
+}
+
+.s3-android-download p {
+    margin-bottom: 1rem;
+    color: rgba(27, 31, 59, 0.78);
+    line-height: 1.55;
+}
+
+.s3-android-download small {
+    display: block;
+    margin-top: 0.65rem;
+    color: rgba(27, 31, 59, 0.55);
+    font-size: 0.8rem;
+}
+
+.s3-android-download--indigo {
+    border-color: rgba(99, 102, 241, 0.35);
+    box-shadow: 0 10px 32px rgba(67, 56, 202, 0.12);
+}
+
+.s3-btn-download {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.75rem 1.35rem;
+    border-radius: 12px;
+    font-weight: 600;
+    text-decoration: none;
+    transition: transform 0.18s ease, box-shadow 0.18s ease;
+}
+
+.s3-btn-download:hover {
+    transform: translateY(-2px);
+    color: inherit;
+}
+
+.s3-btn-download--teal {
+    background: linear-gradient(135deg, #0d9488, #14b8a6);
+    color: #fff;
+    box-shadow: 0 12px 28px -10px rgba(13, 148, 136, 0.7);
+}
+
+.s3-btn-download--indigo {
+    background: linear-gradient(135deg, #4338ca, #6366f1);
+    color: #fff;
+    box-shadow: 0 12px 28px -10px rgba(79, 70, 229, 0.55);
+}
+
+.s3-android-gallery {
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+}
+
+.s3-android-shot {
+    display: grid;
+    grid-template-columns: minmax(0, 200px) 1fr;
+    gap: 1rem;
+    background: rgba(255, 255, 255, 0.95);
+    border-radius: 16px;
+    padding: 1rem;
+    border: 1px solid rgba(12, 31, 87, 0.06);
+    box-shadow: 0 10px 30px rgba(4, 11, 46, 0.06);
+    align-items: start;
+}
+
+.s3-android-shot-img {
+    border-radius: 12px;
+    overflow: hidden;
+    background: linear-gradient(145deg, #ccfbf1, #99f6e4);
+    border: 1px solid rgba(13, 148, 136, 0.25);
+}
+
+.s3-android-shot-img--indigo {
+    background: linear-gradient(145deg, #e0e7ff, #c7d2fe);
+    border-color: rgba(99, 102, 241, 0.35);
+}
+
+.s3-android-shot-img img {
+    width: 100%;
+    height: auto;
+    display: block;
+    vertical-align: middle;
+}
+
+.s3-android-shot-label {
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: rgba(27, 31, 59, 0.45);
+}
+
+.s3-android-shot-text h3 {
+    font-size: 1rem;
+    font-weight: 700;
+    margin: 0.25rem 0 0.4rem;
+    color: var(--text-dark);
+}
+
+.s3-android-shot-text p {
+    margin: 0;
+    font-size: 0.9rem;
+    line-height: 1.55;
+    color: rgba(27, 31, 59, 0.75);
+}
+
+.s3-android-footer-note {
+    margin-top: 2rem;
+}
+
+.s3-android-footer-note a {
+    color: var(--primary-blue);
+    font-weight: 500;
+}
+
+.s3-failover-product-body.s3-product-astrodrp .s3-android-footer-note a {
+    color: #4338ca;
+}
+
+@media (max-width: 767.98px) {
+    .s3-android-shot {
+        grid-template-columns: 1fr;
+    }
+
+    .s3-failover-hub-logo {
+        height: 56px;
+    }
+}
+
