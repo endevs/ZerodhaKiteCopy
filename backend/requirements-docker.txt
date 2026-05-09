@@ -1,6 +1,7 @@
 # Same as requirements.txt but torch is installed separately in Dockerfile (CPU wheel, ~200MB vs ~2GB+ CUDA).
 Flask
-gunicorn
+# Gunicorn 26 removed the built-in eventlet worker entry point; keep 22.x for Flask-SocketIO + worker_class eventlet (see gunicorn_conf.py)
+gunicorn>=22,<23
 kiteconnect
 Flask-SocketIO
 eventlet
