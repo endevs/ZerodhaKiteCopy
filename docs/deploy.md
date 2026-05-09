@@ -78,10 +78,12 @@ cp backend/.env.production.example backend/.env.production
 
 **Docker Hub → EC2:**
 
-1. `.\scripts\docker-hub-push.ps1` (after `docker login`; builds/pushes multi-arch `linux/amd64` + `linux/arm64`).
-2. On your PC, ensure `backend/.env.production` is filled (from setup script or copied from `.env.production.example`).
-3. `$env:DEPLOY_SSH = "ubuntu@<ec2-host>"`; optional `$env:DEPLOY_SSH_KEY = "C:\path\to\key.pem"`.
-4. `$env:DEPLOY_SYNC_ENV = "1"` then `.\scripts\remote-deploy-via-ssh.ps1` — uploads `.env.production`, `git pull`, `docker compose -f docker-compose.hub.yml pull && up -d`.
+1. `.\scripts\docker-hub-push.ps1` (after `docker login`). By default it builds **multi-arch** `linux/amd64` + `linux/arm64`. On Windows, QEMU arm builds may fail; use `$env:DOCKER_PLATFORMS = "linux/amd64"` **only** when your EC2 is **x86_64**—**Graviton (ARM) needs a multi-arch push** (e.g. from Linux/macOS CI).
+2. Use the **same** `$env:IMAGE_TAG` when pushing and when deploying (`latest` or a version string); it must match what the server resolves in `docker-compose.hub.yml`.
+3. On your PC, ensure `backend/.env.production` is filled (from setup script or copied from `.env.production.example`).
+4. `$env:DEPLOY_SSH = "ubuntu@<ec2-host>"`; optional `$env:DEPLOY_PATH`, `$env:DEPLOY_SSH_KEY`, `$env:DOCKERHUB_NAMESPACE`, `$env:IMAGE_TAG`.
+5. Optionally `$env:DEPLOY_SYNC_ENV = "1"` then `.\scripts\remote-deploy-via-ssh.ps1` — uploads `.env.production`, `git pull`, `docker compose -f docker-compose.hub.yml pull && up -d`. Without `DEPLOY_SSH` set, the script exits with a clear error—run it from the same PowerShell session after setting env vars.
+6. **S3 static failover:** needs [AWS CLI](https://aws.amazon.com/cli/) configured; then `aws s3 sync ./s3/ s3://<your-failover-bucket>/` from the repo root (no CloudFront edit required; optional invalidations if HTML is cached).
 
 Use a **separate Google OAuth Web client** for production (only `https://drpinfotech.com` origins + redirect) if you also use localhost in another client.
 
