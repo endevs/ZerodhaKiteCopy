@@ -1,5 +1,6 @@
 # Pull pre-built images from Docker Hub (no build on server).
-# Images must be multi-arch (linux/amd64 + linux/arm64) for Graviton EC2 — see scripts/docker-hub-push.ps1
+# Services use platform linux/amd64 so Graviton (ARM) hosts pull the amd64 manifest and run via QEMU/binfmt (see binfmt step in scripts/remote-deploy-via-ssh.ps1).
+# Prefer multi-arch Hub images when available (docker-hub-push.ps1 default); amd64-only Hub builds still deploy with this workaround.
 # Set env before up: export DOCKERHUB_NAMESPACE=yourdockerhubuser IMAGE_TAG=1.0.0
 # Requires: backend/.env.production on the server (see backend/.env.production.example)
 #
@@ -10,6 +11,7 @@ name: zerodhakite
 
 services:
   backend:
+    platform: linux/amd64
     image: ${DOCKERHUB_NAMESPACE:?set DOCKERHUB_NAMESPACE}/zerodhakite-backend:${IMAGE_TAG:-latest}
     env_file:
       - ./backend/.env.production
@@ -25,6 +27,7 @@ services:
     restart: unless-stopped
 
   frontend:
+    platform: linux/amd64
     image: ${DOCKERHUB_NAMESPACE:?set DOCKERHUB_NAMESPACE}/zerodhakite-frontend:${IMAGE_TAG:-latest}
     ports:
       - "5175:80"
