@@ -20,7 +20,8 @@ Write-Host "Building from: $root"
 Write-Host "Namespace: $ns  Tag: $tag"
 Write-Host "Platforms: linux/amd64,linux/arm64 (Hub + Graviton/ARM64 EC2)"
 
-$platforms = "linux/amd64,linux/arm64"
+# Default multi-arch for Graviton; set DOCKER_PLATFORMS=linux/amd64 if arm64 QEMU build fails on Windows.
+$platforms = if ($env:DOCKER_PLATFORMS) { $env:DOCKER_PLATFORMS } else { "linux/amd64,linux/arm64" }
 docker buildx version | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "docker buildx required (Docker Desktop or buildx plugin)" }
 
