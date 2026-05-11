@@ -21,6 +21,9 @@ Write-Host "Namespace: $ns  Tag: $tag"
 # Default multi-arch for Graviton; set DOCKER_PLATFORMS=linux/amd64 if arm64 QEMU build fails on Windows.
 $platforms = if ($env:DOCKER_PLATFORMS) { $env:DOCKER_PLATFORMS } else { "linux/amd64,linux/arm64" }
 Write-Host "Platforms: $platforms"
+if ($platforms -eq "linux/amd64") {
+    Write-Host "WARNING: amd64-only build. Graviton (ARM64) EC2 needs linux/arm64 in the manifest — use default platforms or push from Linux/macOS CI." -ForegroundColor Yellow
+}
 docker buildx version | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "docker buildx required (Docker Desktop or buildx plugin)" }
 
