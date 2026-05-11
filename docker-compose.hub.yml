@@ -1,6 +1,6 @@
 # Pull pre-built images from Docker Hub (no build on server).
-# Do NOT pin platform here: on Graviton (ARM64) Docker pulls the linux/arm64 variant from a multi-arch manifest; on x86_64 it pulls amd64 natively.
-# Forcing linux/amd64 on ARM caused unstable QEMU and Restarting (255) loops. Push multi-arch from docker-hub-push.ps1 (default platforms).
+# platform linux/amd64: required on Graviton until Hub images include linux/arm64 in the manifest (amd64-only tags fail pull without this).
+# Prefer publishing multi-arch (docker-hub-push.ps1 default) then REMOVE the two platform lines below so containers run native ARM (avoids QEMU crash loops).
 # Set env before up: export DOCKERHUB_NAMESPACE=yourdockerhubuser IMAGE_TAG=1.0.0
 # Requires: backend/.env.production on the server (see backend/.env.production.example)
 #
@@ -11,6 +11,7 @@ name: zerodhakite
 
 services:
   backend:
+    platform: linux/amd64
     image: ${DOCKERHUB_NAMESPACE:?set DOCKERHUB_NAMESPACE}/zerodhakite-backend:${IMAGE_TAG:-latest}
     env_file:
       - ./backend/.env.production
@@ -26,6 +27,7 @@ services:
     restart: unless-stopped
 
   frontend:
+    platform: linux/amd64
     image: ${DOCKERHUB_NAMESPACE:?set DOCKERHUB_NAMESPACE}/zerodhakite-frontend:${IMAGE_TAG:-latest}
     ports:
       - "5175:80"
