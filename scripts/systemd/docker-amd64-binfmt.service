@@ -1,0 +1,16 @@
+# Install on EC2 (aarch64) so amd64 Docker images keep working after reboot.
+# Does not restart other containers: registers kernel binfmt only (see docs/deploy.md).
+# See scripts/install-amd64-binfmt-systemd.sh and docs/deploy.md
+[Unit]
+Description=Register QEMU binfmt for linux/amd64 (Docker on aarch64)
+Documentation=https://github.com/tonistiigi/binfmt
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/docker run --rm --privileged tonistiigi/binfmt --install amd64
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

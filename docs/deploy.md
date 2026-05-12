@@ -78,7 +78,7 @@ cp backend/.env.production.example backend/.env.production
 
 **Docker Hub → EC2:**
 
-1. `.\scripts\docker-hub-push.ps1` (after `docker login`). By default it builds **multi-arch** `linux/amd64` + `linux/arm64`. On Windows, QEMU arm builds may fail; use `$env:DOCKER_PLATFORMS = "linux/amd64"` **only** when your EC2 is **x86_64**. **Graviton (ARM64) production:** you **must** publish images that include **`linux/arm64`** in the manifest (push from Windows only amd64 is not enough). Forcing amd64-only images on Graviton via QEMU often leads to **`Restarting (255)`** crash loops and CloudFront failover to S3. After a multi-arch push, on the server: `docker compose -f docker-compose.hub.yml pull && docker compose -f docker-compose.hub.yml up -d` (no `platform:` pin in [`docker-compose.hub.yml`](docker-compose.hub.yml)—Docker selects the host arch).
+1. Publish **multi-arch** images (`linux/amd64` + **`linux/arm64`**): run **`.\scripts\docker-hub-push.ps1`** (after `docker login`) from a machine where buildx can build both platforms, **or** use [GitHub Actions multi-arch](#github-actions-multi-arch-push-to-docker-hub) after configuring **`DOCKERHUB_USERNAME`** / **`DOCKERHUB_TOKEN`**. On Windows, QEMU **arm64** builds may fail; use **`$env:DOCKER_PLATFORMS = "linux/amd64"`** only when your EC2 is **x86_64**. **Graviton (ARM64) production:** the Hub manifest **must** include **`linux/arm64`** — otherwise `docker compose pull` fails or Docker falls back to amd64+QEMU (unstable). [`docker-compose.hub.yml`](docker-compose.hub.yml) has **no `platform:`** pin: Docker selects the **host** architecture. Optional safety net: [binfmt on boot](#graviton-aarch64-keep-amd64-emulation-after-reboot-optional-fallback) if you still run other amd64-only containers.
 2. Use the **same** `$env:IMAGE_TAG` when pushing and when deploying (`latest` or a version string); it must match what the server resolves in `docker-compose.hub.yml`.
 3. On your PC, ensure `backend/.env.production` is filled (from setup script or copied from `.env.production.example`).
 4. **`DEPLOY_SSH` must reach the host from your PC:** use **public DNS / Elastic IP**, not VPC-private `172.31.x.x` (unless Session Manager tunnel / bastion). Optional: copy **[`scripts/deploy.local.ps1.example`](scripts/deploy.local.ps1.example)** to **`scripts/deploy.local.ps1`** (gitignored), set **`DEPLOY_SSH`**, **`DEPLOY_PATH`**, **`DEPLOY_SSH_KEY`** there; **`remote-deploy-via-ssh.ps1`** auto-loads it.
@@ -86,6 +86,54 @@ cp backend/.env.production.example backend/.env.production
 6. Optionally `$env:DEPLOY_SYNC_ENV = "1"` then **`.\scripts\remote-deploy-via-ssh.ps1`** — SCPs **`backend/.env.production`** when set, **`git pull`**, **`docker compose … pull`** and **`up -d --force-recreate`** (refreshes running containers against pulled **`IMAGE_TAG`**).
 7. **On-server alternative (already SSH'd on EC2):** from the clone root run **`chmod +x scripts/ec2-hub-refresh.sh`** once; then **`ZERODHAKITE_ROOT=/path/to/clone ./scripts/ec2-hub-refresh.sh`** (defaults **`$HOME/apps/zerodhakite`**). Only **`docker-compose.hub.yml`** stacks are recreated; astrology / ai_tools containers are unaffected.
 8. **S3 static failover:** needs [AWS CLI](https://aws.amazon.com/cli/) configured; then `aws s3 sync ./s3/ s3://<your-failover-bucket>/` from the repo root (no CloudFront edit required; optional invalidations if HTML is cached).
+
+### Graviton (aarch64): keep amd64 emulation after reboot (optional fallback)
+
+[`docker-compose.hub.yml`](docker-compose.hub.yml) expects **multi-arch** Hub images so containers run **native ARM** and do not need QEMU. If you still run **amd64-only** images on Graviton, the kernel must register **`binfmt_misc`** for amd64 (via `tonistiigi/binfmt`). That registration is **lost on reboot** unless you re-run binfmt at boot.
+
+**Recommended:** push **linux/arm64** (see [GitHub Actions multi-arch](#github-actions-multi-arch-push-to-docker-hub) or [`scripts/docker-hub-push.ps1`](scripts/docker-hub-push.ps1)), then you do not rely on binfmt for ZerodhaKite.
+
+**If you need binfmt on every boot** (same command as deploy scripts):
+
+1. **systemd (persistent on the EC2 instance)** — from the repo clone on the server:
+
+   ```bash
+   sudo chmod +x scripts/install-amd64-binfmt-systemd.sh
+   sudo ./scripts/install-amd64-binfmt-systemd.sh
+   ```
+
+   This installs [`scripts/systemd/docker-amd64-binfmt.service`](scripts/systemd/docker-amd64-binfmt.service), enables **`docker-amd64-binfmt.service`**, and starts it once (after **`docker.service`**). Reboot to verify: `systemctl status docker-amd64-binfmt.service`.
+
+2. **cloud-init** — merge into instance user-data (run after Docker is installed; **once per boot** is enough):
+
+   ```yaml
+   #cloud-config
+   runcmd:
+     - docker run --rm --privileged tonistiigi/binfmt --install amd64
+   ```
+
+   Prefer the **systemd unit** if Docker is managed by systemd and you want a clear dependency on **`docker.service`**.
+
+**Other containers on the same EC2:** **`docker compose -f docker-compose.hub.yml …`** only recreates services defined in that file (Compose project **`zerodhakite`**). It does **not** stop or replace containers from other compose projects (e.g. astrology, ai_tools) on the host.
+
+**Binfmt / systemd unit:** Registration is **kernel-wide** but it does **not** restart or reconfigure existing containers. It only tells the kernel how to **run amd64 executables** when something tries to execute them. Containers that use **native linux/arm64** images are **unchanged** (their binaries are aarch64, so binfmt is not used). Stacks that already run **amd64-only** images on Graviton were already depending on the same mechanism; enabling it at boot avoids surprise failures after reboot without touching other apps’ data or networks.
+
+### GitHub Actions: multi-arch push to Docker Hub
+
+Workflow: [`.github/workflows/docker-hub-push.yml`](../.github/workflows/docker-hub-push.yml). It builds **`linux/amd64`** and **`linux/arm64`** and pushes **`zerodhakite-backend`** / **`zerodhakite-frontend`** on **push to `main`** (when `backend/`, `frontend/`, or the workflow file changes) or **manual `workflow_dispatch`** (optional tag input).
+
+**Repository secrets** (Settings → Secrets and variables → Actions):
+
+| Name | Purpose |
+|------|---------|
+| **`DOCKERHUB_USERNAME`** | Docker Hub login (often same as image namespace) |
+| **`DOCKERHUB_TOKEN`** | [Access token](https://docs.docker.com/docker-hub/access-tokens/) with read/write |
+
+**Optional repository variable:** **`DOCKERHUB_NAMESPACE`** — if your Hub namespace differs from **`DOCKERHUB_USERNAME`**.
+
+If **`DOCKERHUB_TOKEN`** is unset, the workflow job is skipped (e.g. forks) so the workflow file does not break CI.
+
+After the first successful multi-arch push for your tag (e.g. **`latest`**), on Graviton run **`docker compose -f docker-compose.hub.yml pull && docker compose -f docker-compose.hub.yml up -d`** (no **`platform:`** pin in compose — Docker pulls **arm64** automatically).
 
 Use a **separate Google OAuth Web client** for production (only `https://drpinfotech.com` origins + redirect) if you also use localhost in another client.
 
@@ -179,7 +227,7 @@ Optional host Nginx (TLS on 443, upstream is plain HTTP to the container): `prox
 
 ### Docker Hub (optional)
 
-Build and push from a machine with Docker logged in (`docker login`):
+For **Graviton** and [`docker-compose.hub.yml`](docker-compose.hub.yml), use **multi-arch** images ([`scripts/docker-hub-push.ps1`](scripts/docker-hub-push.ps1) or [GitHub Actions](#github-actions-multi-arch-push-to-docker-hub)). The commands below push **single-arch** (host CPU only) and are mainly for quick tests on matching hardware:
 
 ```bash
 export DOCKERHUB_NAMESPACE=yourdockerhubuser

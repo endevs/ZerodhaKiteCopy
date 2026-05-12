@@ -20,6 +20,13 @@ fi
 
 cd "$ROOT"
 echo "==> $(pwd)"
+
+# Graviton (aarch64) + Hub amd64 images require binfmt/qemu; lost after host reboot.
+if [[ "$(uname -m)" == "aarch64" ]] || [[ "$(uname -m)" == "arm64" ]]; then
+  echo "==> binfmt: install linux/amd64 emulation (ARM host)"
+  docker run --rm --privileged tonistiigi/binfmt --install amd64 || true
+fi
+
 echo "==> git pull origin main (best-effort)"
 git pull origin main || true
 

@@ -1,4 +1,5 @@
 # SSH to your server and pull Hub images + restart stack (docker-compose.hub.yml).
+# Graviton: for binfmt that survives reboot, see docs/deploy.md (systemd docker-amd64-binfmt).
 #
 # Prerequisites on server: Docker + Compose plugin, repo cloned, backend/.env.production filled in,
 #   and docker-compose.hub.yml present (git pull).
@@ -57,7 +58,8 @@ if ($env:DEPLOY_SYNC_ENV -eq "1") {
     & scp @sshArgs $localEnvProd $remoteEnv
 }
 
-$inner = "docker run --rm --privileged tonistiigi/binfmt --install amd64 2>/dev/null || true; cd $path && git pull origin main || true && export DOCKERHUB_NAMESPACE=$ns IMAGE_TAG=$tag && docker compose -f docker-compose.hub.yml pull && docker compose -f docker-compose.hub.yml up -d --force-recreate && docker compose -f docker-compose.hub.yml ps"
+# binfmt for amd64 images on ARM (Graviton); harmless on x86. Reboot clears binfmt_misc on ARM.
+$inner = "docker run --rm --privileged tonistiigi/binfmt --install amd64 || true; cd $path && git pull origin main || true && export DOCKERHUB_NAMESPACE=$ns IMAGE_TAG=$tag && docker compose -f docker-compose.hub.yml pull && docker compose -f docker-compose.hub.yml up -d --force-recreate && docker compose -f docker-compose.hub.yml ps"
 
 Write-Host "SSH: $ssh  Path: $path  Tag: $tag"
 & ssh @sshArgs $ssh "bash -lc '$inner'"
