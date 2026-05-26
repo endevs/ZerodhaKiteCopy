@@ -1140,8 +1140,6 @@ const AdvancedChartsContent: React.FC = () => {
     return computeEma5(sessionCandles.length > 0 ? sessionCandles : dayCandles);
   }, [activeTab, selectedDate, rawCandles]);
 
-  const todayPrefix = todayStr();
-
   const liveIndicatorsForChart = useMemo(() => {
     if (activeTab !== 'live' || chartData.length === 0 || liveRsi.length === 0) {
       return { rsi: liveRsi, adx: liveAdx };
@@ -1191,9 +1189,9 @@ const AdvancedChartsContent: React.FC = () => {
   }, [activeTab, chartData, liveMarkers, selectedDate, timeframeMinutes]);
 
   const liveTradesDisplay = useMemo(() => {
-    if (activeTab !== 'live' || selectedDate !== todayPrefix) return liveTrades;
-    return liveTrades.filter((t) => t.entry_time.startsWith(todayPrefix));
-  }, [activeTab, selectedDate, liveTrades, todayPrefix]);
+    if (activeTab !== 'live') return [];
+    return liveTrades.filter((t) => markerOnSelectedDate(t.entry_time, selectedDate));
+  }, [activeTab, selectedDate, liveTrades]);
 
   const constituentOverlayTraces = useMemo((): PredictionOverlay[] => {
     if (!constituentOverlays || chartData.length === 0) return [];
@@ -1236,10 +1234,10 @@ const AdvancedChartsContent: React.FC = () => {
   }, [constituentOverlays, chartData]);
 
   const liveEventsDisplayLast5 = useMemo(() => {
-    if (activeTab !== 'live' || selectedDate !== todayPrefix) return liveEvents;
-    const todayEvents = liveEvents.filter((e) => e.timestamp.startsWith(todayPrefix));
-    return todayEvents.slice(-5);
-  }, [activeTab, selectedDate, liveEvents, todayPrefix]);
+    if (activeTab !== 'live') return [];
+    const dateEvents = liveEvents.filter((e) => markerOnSelectedDate(e.timestamp, selectedDate));
+    return dateEvents.slice(-5);
+  }, [activeTab, selectedDate, liveEvents]);
 
   const filteredEvents = useMemo(() => {
     if (eventFilter === 'ALL') return btEvents;
@@ -1418,8 +1416,7 @@ const AdvancedChartsContent: React.FC = () => {
                 predictionOverlays={constituentOverlayTraces}
               />
 
-              {isToday && (
-                <div className="row mt-3">
+              <div className="row mt-3">
                   <div className="col-lg-6">
                     {liveTradesDisplay.length > 0 && (
                       <div className="mb-3">
@@ -1498,7 +1495,6 @@ const AdvancedChartsContent: React.FC = () => {
                     )}
                   </div>
                 </div>
-              )}
 
               {isToday && (
                 <>
