@@ -36,6 +36,89 @@ const computeEma5 = (candles: PlotlyCandlePoint[]): PlotlyCandlePoint[] => {
   return candles.map((c, idx) => ({ ...c, ema5: ema[idx] ?? null }));
 };
 
+/** Canonical minute key so "2026-05-26 09:20:00" and "2026-05-26T09:20:00" match. */
+const normCandleTime = (t: Date | string): string => {
+  const raw = typeof t === 'string' ? t.trim() : (t as Date).toISOString();
+  const cleaned = raw.replace(/\.\d+Z?$/i, '').replace('Z', '');
+  const match = cleaned.match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?/);
+  if (match) {
+    const sec = match[4] ?? '00';
+    return `${match[1]}T${match[2]}:${match[3]}:${sec}`;
+  }
+  return cleaned.replace(' ', 'T');
+};
+
+const candleTimeMs = (t: Date | string): number => {
+  const d = new Date(typeof t === 'string' ? t : (t as Date).toISOString());
+  const ms = d.getTime();
+  if (!Number.isNaN(ms)) return ms;
+  const parsed = Date.parse(normCandleTime(t).replace('T', ' '));
+  return Number.isNaN(parsed) ? NaN : parsed;
+};
+
+const markerOnSelectedDate = (time: string, datePrefix: string): boolean => {
+  if (time.startsWith(datePrefix) || normCandleTime(time).startsWith(datePrefix)) return true;
+  const ms = candleTimeMs(time);
+  if (Number.isNaN(ms)) return false;
+  const istDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date(ms));
+  return istDate === datePrefix;
+};
+
+/** Snap strategy marker x to nearest visible candle so Plotly stars align. */
+const snapMarkerToChart = (
+  marker: TradeMarker,
+  chartCandles: PlotlyCandlePoint[],
+  intervalMinutes: number,
+): TradeMarker | null => {
+  if (chartCandles.length === 0) return null;
+
+  const exact = chartCandles.find((c) => normCandleTime(c.time) === normCandleTime(marker.time));
+  if (exact) {
+    const snappedTime = typeof exact.time === 'string' ? exact.time : (exact.time as Date).toISOString();
+    return { ...marker, time: snappedTime };
+  }
+
+  const markerMs = candleTimeMs(marker.time);
+  if (Number.isNaN(markerMs)) return null;
+
+  let best = chartCandles[0];
+  let bestDiff = Infinity;
+  for (const c of chartCandles) {
+    const ms = candleTimeMs(c.time);
+    if (Number.isNaN(ms)) continue;
+    const diff = Math.abs(ms - markerMs);
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      best = c;
+    }
+  }
+
+  const maxSnapMs = intervalMinutes * 60 * 1000;
+  if (bestDiff > maxSnapMs) return null;
+
+  const snappedTime = typeof best.time === 'string' ? best.time : (best.time as Date).toISOString();
+  return { ...marker, time: snappedTime };
+};
+
+const getIstMinutes = (t: Date | string): number => {
+  const d = typeof t === 'string' ? new Date(t) : t;
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Kolkata',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(d);
+  const h = Number(parts.find((p) => p.type === 'hour')?.value ?? 0);
+  const m = Number(parts.find((p) => p.type === 'minute')?.value ?? 0);
+  return h * 60 + m;
+};
+
+/** NSE cash session 09:15–15:30 IST */
+const isWithinNseSession = (t: Date | string): boolean => {
+  const minutes = getIstMinutes(t);
+  return minutes >= 9 * 60 + 15 && minutes <= 15 * 60 + 30;
+};
+
 const floorToInterval = (date: Date, intervalMin: number): Date => {
   const d = new Date(date);
   d.setSeconds(0, 0);
@@ -281,10 +364,11 @@ const AdvancedChartsContent: React.FC = () => {
       setError(null);
       setWarning(null);
 
-      const isLiveToday = activeTab === 'live' && selectedDate === todayStr();
+      const isLiveTab = activeTab === 'live';
+      const isLiveToday = isLiveTab && selectedDate === todayStr();
 
-      if (isLiveToday) {
-        // Live tab + today: fetch warmup (3 days before) for valid RSI(14)
+      if (isLiveTab) {
+        // Live tab (today or historical): fetch warmup for valid RSI(14)/ADX
         const warmupFrom = (() => {
           const d = new Date(selectedDate);
           d.setDate(d.getDate() - 3);
@@ -453,7 +537,7 @@ const AdvancedChartsContent: React.FC = () => {
   zerodhaDataRef.current = { orders: zerodhaOrders, positions: zerodhaPositions };
 
   useEffect(() => {
-    if (activeTab !== 'live' || selectedDate !== todayStr() || rawCandles.length === 0) return;
+    if (activeTab !== 'live' || rawCandles.length === 0) return;
 
     const runStrategy = () => {
       const { rawCandles: candles, rsiOb, rsiOs } = liveStrategyDataRef.current;
@@ -1044,44 +1128,67 @@ const AdvancedChartsContent: React.FC = () => {
   }, [selectedDate, selectedIndex, liveTrades, liveEvents, liveRsiOverbought, liveRsiOversold, zerodhaOrders, zerodhaPositions, saveToArchive]);
 
   const chartData = useMemo(() => {
-    if (activeTab !== 'live' || selectedDate !== todayStr() || rawCandles.length === 0) return rawCandles;
-    const todayPrefix = todayStr();
-    return rawCandles.filter((c) => {
+    if (activeTab !== 'live' || rawCandles.length === 0) {
+      return rawCandles;
+    }
+    const datePrefix = selectedDate;
+    const dayCandles = rawCandles.filter((c) => {
       const t = typeof c.time === 'string' ? c.time : (c.time as Date).toISOString();
-      return t.startsWith(todayPrefix);
+      return t.startsWith(datePrefix);
     });
+    const sessionCandles = dayCandles.filter((c) => isWithinNseSession(c.time));
+    return computeEma5(sessionCandles.length > 0 ? sessionCandles : dayCandles);
   }, [activeTab, selectedDate, rawCandles]);
 
   const todayPrefix = todayStr();
-  const liveRsiDisplay = useMemo(() => {
-    if (activeTab !== 'live' || selectedDate !== todayPrefix || rawCandles.length === 0 || liveRsi.length === 0)
-      return liveRsi;
-    const indices: number[] = [];
-    rawCandles.forEach((c, i) => {
-      const t = typeof c.time === 'string' ? c.time : (c.time as Date).toISOString();
-      if (t.startsWith(todayPrefix)) indices.push(i);
-    });
-    return indices.map((i) => liveRsi[i] ?? null);
-  }, [activeTab, selectedDate, rawCandles, liveRsi, todayPrefix]);
 
-  const liveAdxDisplay = useMemo(() => {
-    if (activeTab !== 'live' || selectedDate !== todayPrefix || rawCandles.length === 0 || liveAdx.length === 0)
-      return liveAdx;
-    const indices: number[] = [];
-    rawCandles.forEach((c, i) => {
-      const t = typeof c.time === 'string' ? c.time : (c.time as Date).toISOString();
-      if (t.startsWith(todayPrefix)) indices.push(i);
+  const liveIndicatorsForChart = useMemo(() => {
+    if (activeTab !== 'live' || chartData.length === 0 || liveRsi.length === 0) {
+      return { rsi: liveRsi, adx: liveAdx };
+    }
+    const keyToIdx = new Map<string, number>();
+    rawCandles.forEach((c, i) => keyToIdx.set(normCandleTime(c.time), i));
+    const rsi = chartData.map((c) => {
+      const i = keyToIdx.get(normCandleTime(c.time));
+      return i != null ? liveRsi[i] ?? null : null;
     });
-    return indices.map((i) => liveAdx[i] ?? null);
-  }, [activeTab, selectedDate, rawCandles, liveAdx, todayPrefix]);
+    const adx = chartData.map((c) => {
+      const i = keyToIdx.get(normCandleTime(c.time));
+      return i != null ? liveAdx[i] ?? null : null;
+    });
+    return { rsi, adx };
+  }, [activeTab, chartData, rawCandles, liveRsi, liveAdx]);
+
+  const liveRsiDisplay = liveIndicatorsForChart.rsi;
+  const liveAdxDisplay = liveIndicatorsForChart.adx;
+
+  const liveShowRsiPane =
+    activeTab === 'live' &&
+    liveRsiDisplay.length > 0 &&
+    liveRsiDisplay.some((v) => v != null);
 
   const liveMarkersDisplay = useMemo(() => {
-    if (activeTab !== 'live' || selectedDate !== todayPrefix) return liveMarkers;
-    return liveMarkers.filter((m) => {
-      const t = typeof m.time === 'string' ? m.time : (m.time as Date).toISOString();
-      return t.startsWith(todayPrefix);
-    });
-  }, [activeTab, selectedDate, liveMarkers, todayPrefix]);
+    if (activeTab !== 'live') return liveMarkers;
+    if (chartData.length === 0) return [];
+
+    const snapped: TradeMarker[] = [];
+    const seen = new Set<string>();
+
+    for (const m of liveMarkers) {
+      if (!markerOnSelectedDate(m.time, selectedDate)) continue;
+      if (!isWithinNseSession(m.time)) continue;
+
+      const aligned = snapMarkerToChart(m, chartData, timeframeMinutes);
+      if (!aligned) continue;
+
+      const dedupeKey = `${aligned.action}|${normCandleTime(aligned.time)}|${aligned.price.toFixed(2)}`;
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
+      snapped.push(aligned);
+    }
+
+    return snapped;
+  }, [activeTab, chartData, liveMarkers, selectedDate, timeframeMinutes]);
 
   const liveTradesDisplay = useMemo(() => {
     if (activeTab !== 'live' || selectedDate !== todayPrefix) return liveTrades;
@@ -1121,6 +1228,7 @@ const AdvancedChartsContent: React.FC = () => {
           x,
           y,
           color: colors[sym] ?? '#6b7280',
+          yaxis: 'y4',
         });
       }
     }
@@ -1163,7 +1271,7 @@ const AdvancedChartsContent: React.FC = () => {
             Advanced Charts (Plotly + Kite)
           </h4>
           <small className="text-white-50">
-            Index-only candlestick charts fetched directly from Zerodha Kite API.
+            Index candlesticks from Zerodha Kite; bank constituents on a separate right axis (IST session).
           </small>
         </div>
         <div className="card-body">
@@ -1280,27 +1388,33 @@ const AdvancedChartsContent: React.FC = () => {
 
               {error && <div className="alert alert-danger py-2 small mb-2">{error}</div>}
               {warning && !error && <div className="alert alert-warning py-2 small mb-2">{warning}</div>}
-              {loading && (
+              {loading && chartData.length === 0 && (
                 <div className="text-center text-muted small mb-2">
                   <span className="spinner-border spinner-border-sm me-2" role="status"></span>
                   Fetching candles from Zerodha...
                 </div>
               )}
+              {loading && chartData.length > 0 && (
+                <div className="text-end text-muted small mb-2">
+                  <span className="spinner-border spinner-border-sm me-1" role="status"></span>
+                  Refreshing...
+                </div>
+              )}
 
               <PlotlyCandlestickChart
                 data={chartData}
-                title={`${selectedIndex} – ${kiteInterval} candles${isToday ? ' (Live)' : ''}`}
+                title={`${selectedIndex} – ${kiteInterval} candles (IST)${isToday ? ' · Live' : ''}`}
                 height={520}
                 showIndexLine={false}
                 showEma={showEma}
                 showVolume={showVolume}
-                showRsi={isToday && liveRsiDisplay.length > 0}
+                showRsi={liveShowRsiPane}
                 rsiData={liveRsiDisplay}
                 rsiOverbought={liveRsiOverbought}
                 rsiOversold={liveRsiOversold}
                 adxData={liveAdxDisplay}
                 indexLabel={`${selectedIndex} Close`}
-                markers={isToday ? liveMarkersDisplay : undefined}
+                markers={liveMarkersDisplay}
                 predictionOverlays={constituentOverlayTraces}
               />
 

@@ -9,6 +9,13 @@
 # Local SQLite copies outside backend/
 /frontend/database.db
 
+# Docker + canonical DB on host (see data/README.md, scripts/backup-database.ps1)
+/data/database.db
+/data/database.db-*
+/data/backups/
+!/data/.gitkeep
+!/data/README.md
+
 # Backend
 /backend/.env
 /backend/.env.production

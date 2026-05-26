@@ -5,10 +5,10 @@ flowchart LR
   Browser[Browser]
   Nginx[frontend_Nginx_:80]
   Flask[backend_gunicorn_eventlet_:8003]
-  Vol[(Volume_zerodhakite_data)]
+  Data[(Host_data_database.db)]
   Browser -->|:5175_host| Nginx
   Nginx -->|/api_/socket.io| Flask
-  Flask --> Vol
+  Flask --> Data
 ```
 
 1. User opens `http://host:5175` → static CRA build.

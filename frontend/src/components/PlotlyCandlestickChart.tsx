@@ -25,6 +25,8 @@ export interface PredictionOverlay {
   x: (string | Date)[];
   y: number[];
   color: string;
+  /** Secondary axis for constituent stocks (absolute price, not index scale). */
+  yaxis?: 'y' | 'y4';
 }
 
 interface PlotlyCandlestickChartProps {
@@ -48,6 +50,9 @@ interface ChartErrorBoundaryState {
   hasError: boolean;
   errorMessage: string;
 }
+
+const toPlotTime = (t: Date | string): string =>
+  t instanceof Date ? t.toISOString() : t;
 
 class ChartErrorBoundary extends React.Component<
   { children: React.ReactNode; height: number },
@@ -114,12 +119,11 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
   const hasRsi = showRsi && rsiData && rsiData.some((v) => v != null);
   const hasAdx = showRsi && adxData && adxData.some((v) => v != null);
   const hasVolume = showVolume && (data?.some((d) => (d.volume ?? 0) > 0) ?? false);
+  const hasY4Overlay = predictionOverlays?.some((o) => o.yaxis === 'y4') ?? false;
 
   const traces = useMemo(() => {
     if (!data || data.length === 0) return [];
-    const times = data.map((d) =>
-      d.time instanceof Date ? d.time.toISOString() : d.time
-    );
+    const times = data.map((d) => toPlotTime(d.time));
     const opens = data.map((d) => d.open);
     const highs = data.map((d) => d.high);
     const lows = data.map((d) => d.low);
@@ -145,184 +149,196 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
 
     if (showEma && ema5.some((v) => v != null)) {
       out.push({
-      x: times,
-      y: ema5,
-      type: 'scatter',
-      mode: 'lines',
-      name: 'EMA 5',
-      line: { color: '#ffc107', width: 2 },
-      yaxis: 'y',
-      connectgaps: false,
-    });
-  }
+        x: times,
+        y: ema5,
+        type: 'scatter',
+        mode: 'lines',
+        name: 'EMA 5',
+        line: { color: '#ffc107', width: 2 },
+        yaxis: 'y',
+        connectgaps: false,
+      });
+    }
 
-  if (showIndexLine && indexCloses.some((v) => v != null)) {
-    out.push({
-      x: times,
-      y: indexCloses,
-      type: 'scatter',
-      mode: 'lines',
-      name: indexLabel,
-      line: { color: '#9333ea', width: 2, dash: 'dot' },
-      yaxis: 'y',
-      connectgaps: true,
-    });
-  }
+    if (showIndexLine && indexCloses.some((v) => v != null)) {
+      out.push({
+        x: times,
+        y: indexCloses,
+        type: 'scatter',
+        mode: 'lines',
+        name: indexLabel,
+        line: { color: '#9333ea', width: 2, dash: 'dot' },
+        yaxis: 'y',
+        connectgaps: true,
+      });
+    }
 
-  if (predictionOverlays && predictionOverlays.length > 0) {
-    for (const overlay of predictionOverlays) {
-      const x = overlay.x.map((v) => (v instanceof Date ? v.toISOString() : v));
-      if (x.length > 0 && overlay.y.length === x.length) {
+    if (predictionOverlays && predictionOverlays.length > 0) {
+      for (const overlay of predictionOverlays) {
+        const x = overlay.x.map((v) => toPlotTime(v));
+        if (x.length > 0 && overlay.y.length === x.length) {
+          const onConstituentAxis = overlay.yaxis === 'y4';
+          const trace: Record<string, unknown> = {
+            x,
+            y: overlay.y,
+            type: 'scatter',
+            mode: onConstituentAxis ? 'lines' : 'lines+markers',
+            name: overlay.name,
+            line: { color: overlay.color, width: 1.5 },
+            yaxis: onConstituentAxis ? 'y4' : 'y',
+            connectgaps: false,
+          };
+          if (!onConstituentAxis) {
+            trace.marker = { size: 5 };
+          }
+          out.push(trace);
+        }
+      }
+    }
+
+    if (showVolume && volumes.some((v) => v > 0)) {
+      out.push({
+        x: times,
+        y: volumes,
+        type: 'bar',
+        name: 'Volume',
+        marker: { color: '#8884d8' },
+        yaxis: 'y2',
+        opacity: 0.4,
+      });
+    }
+
+    if (hasRsi && rsiData) {
+      const alignedRsi = times.map((_, i) => rsiData[i] ?? null);
+      out.push({
+        x: times,
+        y: alignedRsi,
+        type: 'scatter',
+        mode: 'lines',
+        name: 'RSI 14',
+        line: { color: '#0d9488', width: 1.5 },
+        yaxis: 'y3',
+        connectgaps: false,
+      });
+      out.push({
+        x: times,
+        y: times.map(() => rsiOverbought),
+        type: 'scatter',
+        mode: 'lines',
+        name: `Overbought (${rsiOverbought})`,
+        line: { color: '#dc3545', width: 1, dash: 'dash' },
+        yaxis: 'y3',
+        showlegend: true,
+        hoverinfo: 'skip',
+      });
+      out.push({
+        x: times,
+        y: times.map(() => rsiOversold),
+        type: 'scatter',
+        mode: 'lines',
+        name: `Oversold (${rsiOversold})`,
+        line: { color: '#198754', width: 1, dash: 'dash' },
+        yaxis: 'y3',
+        showlegend: true,
+        hoverinfo: 'skip',
+      });
+    }
+
+    if (hasAdx && adxData) {
+      const alignedAdx = times.map((_, i) => adxData[i] ?? null);
+      out.push({
+        x: times,
+        y: alignedAdx,
+        type: 'scatter',
+        mode: 'lines',
+        name: 'ADX 14',
+        line: { color: '#9333ea', width: 1.5 },
+        yaxis: 'y3',
+        connectgaps: false,
+      });
+    }
+
+    if (markers && markers.length > 0) {
+      const buyMarkers = markers.filter((m) => m.action === 'entry');
+      const sellMarkers = markers.filter((m) => m.action === 'exit');
+      const signalMarkers = markers.filter((m) => m.action === 'signal');
+
+      if (buyMarkers.length > 0) {
         out.push({
-          x,
-          y: overlay.y,
+          x: buyMarkers.map((m) => m.time),
+          y: buyMarkers.map((m) => m.price),
           type: 'scatter',
-          mode: 'lines+markers',
-          name: overlay.name,
-          line: { color: overlay.color, width: 1.5 },
-          marker: { size: 5 },
+          mode: 'markers',
+          name: 'Entry',
+          marker: {
+            symbol: 'star',
+            size: 14,
+            color: '#198754',
+            line: { width: 1, color: '#fff' },
+          },
+          text: buyMarkers.map(
+            (m) => `${m.direction.toUpperCase()} entry @ ${m.price.toFixed(2)}`,
+          ),
+          hoverinfo: 'text+x',
           yaxis: 'y',
-          connectgaps: false,
+        });
+      }
+
+      if (sellMarkers.length > 0) {
+        out.push({
+          x: sellMarkers.map((m) => m.time),
+          y: sellMarkers.map((m) => m.price),
+          type: 'scatter',
+          mode: 'markers',
+          name: 'Exit',
+          marker: {
+            symbol: 'star',
+            size: 14,
+            color: '#dc3545',
+            line: { width: 1, color: '#fff' },
+          },
+          text: sellMarkers.map(
+            (m) =>
+              `${m.direction.toUpperCase()} exit @ ${m.price.toFixed(2)}${m.label ? ' | ' + m.label : ''}`,
+          ),
+          hoverinfo: 'text+x',
+          yaxis: 'y',
+        });
+      }
+
+      if (signalMarkers.length > 0) {
+        out.push({
+          x: signalMarkers.map((m) => m.time),
+          y: signalMarkers.map((m) => m.price),
+          type: 'scatter',
+          mode: 'markers',
+          name: 'Signal',
+          marker: {
+            symbol: 'star',
+            size: 14,
+            color: '#ff69b4',
+            line: { width: 1, color: '#c71585' },
+          },
+          text: signalMarkers.map(
+            (m) => `PE Signal @ ${m.price.toFixed(2)}${m.label ? ' | ' + m.label : ''}`,
+          ),
+          hoverinfo: 'text+x',
+          yaxis: 'y',
         });
       }
     }
-  }
 
-  if (showVolume && volumes.some((v) => v > 0)) {
-    out.push({
-      x: times,
-      y: volumes,
-      type: 'bar',
-      name: 'Volume',
-      marker: { color: '#8884d8' },
-      yaxis: 'y2',
-      opacity: 0.4,
-    });
-  }
-
-  if (hasRsi && rsiData) {
-    // Ensure RSI length matches times (chartData) to prevent misaligned traces
-    const alignedRsi = times.map((_, i) => rsiData[i] ?? null);
-    out.push({
-      x: times,
-      y: alignedRsi,
-      type: 'scatter',
-      mode: 'lines',
-      name: 'RSI 14',
-      line: { color: '#0d9488', width: 1.5 },
-      yaxis: 'y3',
-      connectgaps: false,
-    });
-    out.push({
-      x: [times[0], times[times.length - 1]],
-      y: [rsiOverbought, rsiOverbought],
-      type: 'scatter',
-      mode: 'lines',
-      name: `Overbought (${rsiOverbought})`,
-      line: { color: '#dc3545', width: 1, dash: 'dash' },
-      yaxis: 'y3',
-      showlegend: true,
-    });
-    out.push({
-      x: [times[0], times[times.length - 1]],
-      y: [rsiOversold, rsiOversold],
-      type: 'scatter',
-      mode: 'lines',
-      name: `Oversold (${rsiOversold})`,
-      line: { color: '#198754', width: 1, dash: 'dash' },
-      yaxis: 'y3',
-      showlegend: true,
-    });
-  }
-
-  if (hasAdx && adxData) {
-    const alignedAdx = times.map((_, i) => adxData[i] ?? null);
-    out.push({
-      x: times,
-      y: alignedAdx,
-      type: 'scatter',
-      mode: 'lines',
-      name: 'ADX 14',
-      line: { color: '#9333ea', width: 1.5 },
-      yaxis: 'y3',
-      connectgaps: false,
-    });
-  }
-
-  if (markers && markers.length > 0) {
-    const buyMarkers = markers.filter((m) => m.action === 'entry');
-    const sellMarkers = markers.filter((m) => m.action === 'exit');
-    const signalMarkers = markers.filter((m) => m.action === 'signal');
-
-    if (buyMarkers.length > 0) {
-      out.push({
-        x: buyMarkers.map((m) => m.time),
-        y: buyMarkers.map((m) => m.price),
-        type: 'scatter',
-        mode: 'markers',
-        name: 'Entry',
-        marker: {
-          symbol: 'star',
-          size: 14,
-          color: '#198754',
-          line: { width: 1, color: '#fff' },
-        },
-        text: buyMarkers.map(
-          (m) => `${m.direction.toUpperCase()} entry @ ${m.price.toFixed(2)}`,
-        ),
-        hoverinfo: 'text+x',
-        yaxis: 'y',
-      });
-    }
-
-    if (sellMarkers.length > 0) {
-      out.push({
-        x: sellMarkers.map((m) => m.time),
-        y: sellMarkers.map((m) => m.price),
-        type: 'scatter',
-        mode: 'markers',
-        name: 'Exit',
-        marker: {
-          symbol: 'star',
-          size: 14,
-          color: '#dc3545',
-          line: { width: 1, color: '#fff' },
-        },
-        text: sellMarkers.map(
-          (m) =>
-            `${m.direction.toUpperCase()} exit @ ${m.price.toFixed(2)}${m.label ? ' | ' + m.label : ''}`,
-        ),
-        hoverinfo: 'text+x',
-        yaxis: 'y',
-      });
-    }
-
-    if (signalMarkers.length > 0) {
-      out.push({
-        x: signalMarkers.map((m) => m.time),
-        y: signalMarkers.map((m) => m.price),
-        type: 'scatter',
-        mode: 'markers',
-        name: 'Signal',
-        marker: {
-          symbol: 'star',
-          size: 14,
-          color: '#ff69b4',
-          line: { width: 1, color: '#c71585' },
-        },
-        text: signalMarkers.map(
-          (m) => `PE Signal @ ${m.price.toFixed(2)}${m.label ? ' | ' + m.label : ''}`,
-        ),
-        hoverinfo: 'text+x',
-        yaxis: 'y',
-      });
-    }
-  }
-
-  return out;
+    return out;
   }, [data, showEma, showVolume, showRsi, showIndexLine, rsiData, rsiOverbought, rsiOversold, adxData, indexLabel, markers, predictionOverlays, hasRsi, hasAdx]);
 
   const chartHeight = hasRsi ? Math.max(height, 620) : height;
+
+  const xRange = useMemo(() => {
+    if (!data || data.length === 0) return undefined;
+    const first = toPlotTime(data[0].time);
+    const last = toPlotTime(data[data.length - 1].time);
+    return [first, last] as [string, string];
+  }, [data]);
 
   const layout = useMemo(() => {
     let priceDomainBottom = 0;
@@ -335,51 +351,62 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
     }
 
     return {
-      uirevision: `${data.length}-${hasRsi}-${hasVolume}`,
+      uirevision: `${data.length}-${hasRsi}-${hasVolume}-${hasY4Overlay}`,
       title: { text: title || '' },
-    height: chartHeight,
-    margin: { l: 50, r: 50, t: title ? 40 : 10, b: 40 },
-    xaxis: {
-      rangeslider: { visible: false },
-      type: 'date',
-      showgrid: true,
-      gridcolor: '#e9ecef',
-    },
-    yaxis: {
-      title: { text: 'Price' },
-      domain: [priceDomainBottom, 1],
-      autorange: true,
-      showgrid: true,
-      gridcolor: '#e9ecef',
-    },
-    ...(hasVolume && {
-      yaxis2: {
-        title: { text: 'Volume' },
-        domain: hasRsi ? [0, 0.12] : [0, 0.2],
-        showgrid: false,
-      },
-    }),
-    ...(hasRsi && {
-      yaxis3: {
-        title: { text: hasAdx ? 'RSI / ADX' : 'RSI' },
-        domain: hasVolume ? [0.15, 0.4] : [0, 0.2],
-        range: [0, 100],
-        autorange: false,
+      height: chartHeight,
+      margin: { l: 50, r: hasY4Overlay ? 72 : 50, t: title ? 40 : 10, b: 40 },
+      xaxis: {
+        rangeslider: { visible: false },
+        type: 'date',
+        range: xRange,
+        tickformat: '%H:%M',
         showgrid: true,
         gridcolor: '#e9ecef',
-        dtick: 10,
       },
-    }),
-    legend: {
-      orientation: 'h',
-      x: 0,
-      y: 1.02,
-    },
-    hovermode: 'x unified',
-    dragmode: 'zoom',
-    showlegend: true,
-  };
-  }, [data.length, hasRsi, hasAdx, hasVolume, height, title]);
+      yaxis: {
+        title: { text: 'Index price' },
+        domain: [priceDomainBottom, 1],
+        autorange: true,
+        showgrid: true,
+        gridcolor: '#e9ecef',
+      },
+      ...(hasVolume && {
+        yaxis2: {
+          title: { text: 'Volume' },
+          domain: hasRsi ? [0, 0.12] : [0, 0.2],
+          showgrid: false,
+        },
+      }),
+      ...(hasRsi && {
+        yaxis3: {
+          title: { text: hasAdx ? 'RSI / ADX' : 'RSI' },
+          domain: hasVolume ? [0.15, 0.4] : [0, 0.2],
+          range: [0, 100],
+          autorange: false,
+          showgrid: true,
+          gridcolor: '#e9ecef',
+          dtick: 10,
+        },
+      }),
+      ...(hasY4Overlay && {
+        yaxis4: {
+          title: { text: 'Constituents' },
+          overlaying: 'y',
+          side: 'right',
+          autorange: true,
+          showgrid: false,
+        },
+      }),
+      legend: {
+        orientation: 'h',
+        x: 0,
+        y: 1.02,
+      },
+      hovermode: 'x unified',
+      dragmode: 'zoom',
+      showlegend: true,
+    };
+  }, [data.length, hasRsi, hasAdx, hasVolume, hasY4Overlay, height, title, chartHeight, xRange]);
 
   if (!data || data.length === 0) {
     return (
@@ -400,7 +427,7 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
   return (
     <ChartErrorBoundary height={chartHeight}>
       <Plot
-        key={`chart-${hasRsi}-${hasVolume}`}
+        key={`chart-${hasRsi}-${hasVolume}-${hasY4Overlay}`}
         data={traces}
         layout={layout}
         style={{ width: '100%', height: chartHeight }}

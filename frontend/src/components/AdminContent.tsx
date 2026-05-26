@@ -83,6 +83,12 @@ const AdminContent: React.FC = () => {
   const [editingPrices, setEditingPrices] = useState<{[key: string]: number}>({});
   const [savingPrices, setSavingPrices] = useState(false);
 
+  const [editingUser, setEditingUser] = useState<User | null>(null);
+  const [editAppKey, setEditAppKey] = useState('');
+  const [editAppSecret, setEditAppSecret] = useState('');
+  const [clearCredentials, setClearCredentials] = useState(false);
+  const [savingCredentials, setSavingCredentials] = useState(false);
+
   useEffect(() => {
     loadUsers();
     if (activeTab === 'strategy-approvals') {
@@ -440,6 +446,61 @@ const AdminContent: React.FC = () => {
     return value.substring(0, 4) + '****' + value.substring(value.length - 4);
   };
 
+  const openEditCredentials = (user: User) => {
+    setEditingUser(user);
+    setEditAppKey('');
+    setEditAppSecret('');
+    setClearCredentials(false);
+  };
+
+  const closeEditCredentials = () => {
+    setEditingUser(null);
+    setEditAppKey('');
+    setEditAppSecret('');
+    setClearCredentials(false);
+    setSavingCredentials(false);
+  };
+
+  const handleSaveCredentials = async () => {
+    if (!editingUser) return;
+
+    if (!clearCredentials) {
+      const key = editAppKey.trim();
+      const secret = editAppSecret.trim();
+      if (!key || !secret) {
+        alert('Please provide both API Key and API Secret, or choose Clear Zerodha credentials.');
+        return;
+      }
+    }
+
+    try {
+      setSavingCredentials(true);
+      const body = clearCredentials
+        ? { clear_zerodha_credentials: true }
+        : { app_key: editAppKey.trim(), app_secret: editAppSecret.trim() };
+
+      const response = await fetch(apiUrl(`/api/admin/users/${editingUser.id}`), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify(body),
+      });
+
+      const data = await response.json();
+      if (data.status === 'success') {
+        alert(data.message || 'Credentials updated successfully');
+        closeEditCredentials();
+        await loadUsers();
+      } else {
+        alert(`Error: ${data.message || 'Failed to update credentials'}`);
+      }
+    } catch (err) {
+      alert(`Error updating credentials: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    } finally {
+      setSavingCredentials(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="container mt-4">
@@ -698,6 +759,13 @@ const AdminContent: React.FC = () => {
                             </td>
                             <td>
                               <div className="btn-group" role="group">
+                                <button
+                                  className="btn btn-sm btn-outline-primary"
+                                  onClick={() => openEditCredentials(user)}
+                                  title="Edit API credentials"
+                                >
+                                  <i className="bi bi-key"></i>
+                                </button>
                                 <button
                                   className="btn btn-sm btn-outline-warning"
                                   onClick={() => handleToggleActive(user.id, user.email_verified)}
@@ -1149,6 +1217,115 @@ const AdminContent: React.FC = () => {
           )}
         </div>
       </div>
+
+      {editingUser && (
+        <div
+          className="modal show d-block"
+          tabIndex={-1}
+          role="dialog"
+          style={{ backgroundColor: 'rgba(0,0,0,0.5)' }}
+        >
+          <div className="modal-dialog modal-dialog-centered">
+            <div className="modal-content">
+              <div className="modal-header">
+                <h5 className="modal-title">
+                  Zerodha API credentials — {editingUser.email}
+                </h5>
+                <button
+                  type="button"
+                  className="btn-close"
+                  aria-label="Close"
+                  onClick={closeEditCredentials}
+                  disabled={savingCredentials}
+                />
+              </div>
+              <div className="modal-body">
+                <p className="text-muted small mb-3">
+                  User ID: {editingUser.id}. Changing credentials clears any active Kite session;
+                  the user must use Welcome → Authenticate with Zerodha again.
+                </p>
+                <p className="small mb-3">
+                  Current API key: <code>{maskSensitiveData(editingUser.app_key)}</code>
+                  {' · '}
+                  Secret: <code>{maskSensitiveData(editingUser.app_secret)}</code>
+                </p>
+                <div className="form-check mb-3">
+                  <input
+                    className="form-check-input"
+                    type="checkbox"
+                    id="clear-zerodha-credentials"
+                    checked={clearCredentials}
+                    onChange={(e) => setClearCredentials(e.target.checked)}
+                    disabled={savingCredentials}
+                  />
+                  <label className="form-check-label" htmlFor="clear-zerodha-credentials">
+                    Clear Zerodha credentials (remove API key and secret)
+                  </label>
+                </div>
+                {!clearCredentials && (
+                  <>
+                    <div className="mb-3">
+                      <label htmlFor="admin-edit-app-key" className="form-label">
+                        Zerodha API Key
+                      </label>
+                      <input
+                        type="text"
+                        id="admin-edit-app-key"
+                        className="form-control"
+                        value={editAppKey}
+                        onChange={(e) => setEditAppKey(e.target.value)}
+                        placeholder="Enter new API key"
+                        disabled={savingCredentials}
+                        autoComplete="off"
+                      />
+                    </div>
+                    <div className="mb-3">
+                      <label htmlFor="admin-edit-app-secret" className="form-label">
+                        Zerodha API Secret
+                      </label>
+                      <input
+                        type="password"
+                        id="admin-edit-app-secret"
+                        className="form-control"
+                        value={editAppSecret}
+                        onChange={(e) => setEditAppSecret(e.target.value)}
+                        placeholder="Enter new API secret"
+                        disabled={savingCredentials}
+                        autoComplete="new-password"
+                      />
+                    </div>
+                  </>
+                )}
+              </div>
+              <div className="modal-footer">
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={closeEditCredentials}
+                  disabled={savingCredentials}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={handleSaveCredentials}
+                  disabled={savingCredentials}
+                >
+                  {savingCredentials ? (
+                    <>
+                      <span className="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true" />
+                      Saving...
+                    </>
+                  ) : (
+                    'Save credentials'
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

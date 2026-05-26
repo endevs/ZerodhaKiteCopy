@@ -263,7 +263,12 @@ docker compose -f docker-compose.prod.yml logs -f frontend
 
 ## Data
 
-SQLite lives in volume **`zerodhakite_data`** at `/app/data/database.db` inside the backend container.
+SQLite file on the host: **`data/database.db`** (bind-mounted to `/app/data/database.db` in the backend container).
+
+- **Back up before upgrades:** `.\scripts\backup-database.ps1` → `data/backups/database-YYYYMMDD-HHMMSS.db`
+- **Restore:** `.\scripts\restore-database.ps1 -BackupPath data\backups\...`
+- **Never** run `docker compose down -v` unless you intend to delete unused named volumes (bind-mounted `data/` is kept, but avoid `-v` as a habit).
+- Native dev: set `DATABASE_PATH=../data/database.db` in `backend/.env` (see [`data/README.md`](../data/README.md)).
 
 ## Native dev (no Docker)
 

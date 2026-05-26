@@ -22,7 +22,7 @@ services:
       SERVER_HOST: "0.0.0.0"
       DATABASE_PATH: /app/data/database.db
     volumes:
-      - zerodhakite_data:/app/data
+      - ./data:/app/data
     ports:
       - "8003:8003"
     restart: unless-stopped
@@ -35,6 +35,3 @@ services:
     depends_on:
       - backend
     restart: unless-stopped
-
-volumes:
-  zerodhakite_data:

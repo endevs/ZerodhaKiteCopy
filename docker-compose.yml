@@ -15,8 +15,13 @@ services:
       SERVER_PORT: "8003"
       SERVER_HOST: "0.0.0.0"
       DATABASE_PATH: /app/data/database.db
+      EVENTLET_NO_GREENDNS: "yes"
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
     volumes:
-      - zerodhakite_data:/app/data
+      # Host ./data/database.db — survives rebuilds; never use `docker compose down -v` on a bind mount.
+      - ./data:/app/data
     # Published on all interfaces (0.0.0.0:8003). Lock down with host firewall / AWS SG if needed.
     ports:
       - "8003:8003"
@@ -32,6 +37,3 @@ services:
       - "5175:80"
     depends_on:
       - backend
-
-volumes:
-  zerodhakite_data:

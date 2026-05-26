@@ -18,7 +18,8 @@ FRONTEND_URL=http://localhost:5175
 CORS_ORIGINS=http://localhost:3000,http://localhost:3001,http://localhost:5175,http://localhost:8003
 
 SECRET_KEY=
-DATABASE_PATH=database.db
+# Same file as Docker (./data bind mount). Legacy: database.db in this folder only if you omit ../data/
+DATABASE_PATH=../data/database.db
 
 # Google OAuth — must match Google Cloud Console exactly
 GOOGLE_CLIENT_ID=

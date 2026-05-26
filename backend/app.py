@@ -1,4 +1,8 @@
 # CRITICAL: Monkey patch must be done BEFORE importing Flask or any other modules
+# Prefer system resolver over eventlet greendns (avoids intermittent "No address found" in Docker on Windows).
+import os
+os.environ.setdefault('EVENTLET_NO_GREENDNS', 'yes')
+
 # Try eventlet first, fallback to gevent, then threading
 try:
     import eventlet
@@ -126,36 +130,19 @@ RETRYABLE_ERROR_KEYWORDS = (
 
 
 def _is_retryable_exception(exc: Exception) -> bool:
-    if isinstance(exc, (kite_exceptions.NetworkException, RequestsConnectionError, RequestsTimeout, RequestException, socket.timeout)):
+    if isinstance(exc, (kite_exceptions.NetworkException, RequestsConnectionError, RequestsTimeout, RequestException, socket.timeout, socket.gaierror, OSError)):
+        if isinstance(exc, OSError) and getattr(exc, 'errno', None) not in (None, -2, -3, 110, 111):
+            # Only treat common network/DNS errno values as transient
+            if not any(keyword in str(exc).lower() for keyword in RETRYABLE_ERROR_KEYWORDS):
+                return False
         return True
     message = str(exc).lower()
     return any(keyword in message for keyword in RETRYABLE_ERROR_KEYWORDS)
 
 
-# region agent log
-def _debug_log(hypothesis_id: str, message: str, data: Dict[str, Any], location: str, run_id: str = "run1") -> None:
-    """
-    Lightweight NDJSON logger for debug session c3dc96.
-    Writes to debug-c3dc96.log as required by the debug harness.
-    """
-    try:
-        payload = {
-            "sessionId": "c3dc96",
-            "id": f"log_{int(time.time() * 1000)}",
-            "timestamp": int(time.time() * 1000),
-            "location": location,
-            "message": message,
-            "data": data,
-            "runId": run_id,
-            "hypothesisId": hypothesis_id,
-        }
-        line = json.dumps(payload, default=str)
-        with open("debug-c3dc96.log", "a", encoding="utf-8") as f:
-            f.write(line + "\n")
-    except Exception:
-        # Never let debug logging break the app
-        pass
-# endregion agent log
+def _is_transient_kite_network_error(exc: Exception) -> bool:
+    """True when Zerodha is unreachable due to DNS/connectivity (not invalid token)."""
+    return _is_retryable_exception(exc) and not isinstance(exc, kite_exceptions.TokenException)
 
 
 def execute_with_retries(description: str, func: Callable[[], Any], *, max_attempts: int = 3, base_delay: float = 1.5) -> Any:
@@ -1561,6 +1548,19 @@ def _get_backend_url() -> str:
             return f"{scheme}://{host}"
     # Fallback if no request context (shouldn't happen in normal flow)
     return os.getenv('BACKEND_URL', 'http://localhost:8003')
+
+def _get_zerodha_callback_base_url() -> str:
+    """
+    Base URL for Kite redirect_uri (.../callback). On localhost, prefer BACKEND_URL from .env
+    so it matches the Kite developer console (e.g. http://localhost:8003) even when the UI
+    is served on another port (5175 via Docker Nginx or 3000 via CRA).
+    """
+    backend_env = (os.getenv('BACKEND_URL') or '').strip().rstrip('/')
+    if backend_env:
+        low = backend_env.lower()
+        if 'localhost' in low or '127.0.0.1' in low:
+            return backend_env
+    return _get_backend_url()
 
 def _get_google_oauth_redirect_uri() -> str:
     """OAuth redirect_uri; must match Google Cloud Console *Authorized redirect URIs* exactly."""
@@ -4548,8 +4548,7 @@ def zerodha_login():
 
     kite.api_key = user['app_key']
     
-    # Get the backend URL to determine if we're in local or production
-    backend_url = _get_backend_url()
+    backend_url = _get_zerodha_callback_base_url()
     redirect_uri = f"{backend_url}/callback"
     
     # For local development (localhost), manually construct the login URL with redirect_uri
@@ -5332,7 +5331,37 @@ def api_admin_manage_user(user_id):
                 
                 updates = []
                 values = []
-                
+                credentials_updated = False
+                clear_creds = bool(data.get('clear_zerodha_credentials'))
+
+                if clear_creds:
+                    updates.extend([
+                        'app_key = ?',
+                        'app_secret = ?',
+                        'zerodha_access_token = ?',
+                        'zerodha_token_created_at = ?',
+                    ])
+                    values.extend([None, None, None, None])
+                    credentials_updated = True
+                else:
+                    app_key_provided = 'app_key' in data
+                    app_secret_provided = 'app_secret' in data
+                    if app_key_provided or app_secret_provided:
+                        app_key = (data.get('app_key') or '').strip()
+                        app_secret = (data.get('app_secret') or '').strip()
+                        if not app_key or not app_secret:
+                            return jsonify({
+                                'status': 'error',
+                                'message': 'Both Zerodha API Key and API Secret are required when updating credentials.',
+                            }), 400
+                        updates.append('app_key = ?')
+                        updates.append('app_secret = ?')
+                        values.extend([app_key, app_secret])
+                        updates.append('zerodha_access_token = ?')
+                        updates.append('zerodha_token_created_at = ?')
+                        values.extend([None, None])
+                        credentials_updated = True
+
                 # Update is_admin
                 if 'is_admin' in data:
                     is_admin = bool(data['is_admin'])
@@ -5352,8 +5381,20 @@ def api_admin_manage_user(user_id):
                 query = f"UPDATE users SET {', '.join(updates)} WHERE id = ?"
                 conn.execute(query, values)
                 conn.commit()
+
+                message = 'User updated successfully'
+                if credentials_updated:
+                    message = (
+                        'Zerodha credentials updated. The user must authenticate with Zerodha again on the Welcome page.'
+                        if not clear_creds
+                        else 'Zerodha API credentials cleared. The user must add new credentials and authenticate with Zerodha.'
+                    )
                 
-                return jsonify({'status': 'success', 'message': 'User updated successfully'}), 200
+                return jsonify({
+                    'status': 'success',
+                    'message': message,
+                    'credentials_updated': credentials_updated,
+                }), 200
             finally:
                 conn.close()
         except Exception as e:
@@ -5609,6 +5650,13 @@ def api_user_data():
                             _update_user_access_token(user_id, None)
                             stored_token = None
                         continue
+                    if _is_transient_kite_network_error(exc):
+                        default_response.update({
+                            'access_token_present': bool(session_token or stored_token),
+                            'token_valid': False,
+                            'message': 'Zerodha API temporarily unreachable. Your login is still valid; market data may resume when connectivity returns.',
+                        })
+                        return jsonify(default_response)
                     default_response['message'] = 'Error validating Zerodha session'
                     return jsonify(default_response), 500
         else:
@@ -8306,6 +8354,13 @@ def api_market_snapshot():
         return jsonify(data)
     except Exception as e:
         logging.error(f"Error fetching market snapshot: {e}", exc_info=True)
+        if _is_transient_kite_network_error(e):
+            return jsonify({
+                'status': 'success',
+                'nifty': None,
+                'banknifty': None,
+                'message': 'Zerodha API temporarily unreachable',
+            })
         return jsonify({'status': 'error', 'message': 'Failed to fetch snapshot'}), 500
 
 @app.route("/api/paper_trade/start", methods=['POST'])
@@ -10539,24 +10594,6 @@ def api_mountain_signal_live_place_order():
         return jsonify({'status': 'error', 'message': market_msg, 'reason': 'market_closed'}), 400
 
     def _place(kite_client: KiteConnect):
-        # region agent log
-        now_utc = datetime.datetime.now(datetime.timezone.utc)
-        now_ist = now_utc.astimezone(IST)
-        _debug_log(
-            hypothesis_id="H1",
-            message="About to place Mountain Signal live order",
-            data={
-                "instrument": instrument,
-                "option_type": option_type,
-                "transaction_type": transaction_type,
-                "index_ltp": index_ltp,
-                "lots": lots,
-                "now_utc": now_utc.isoformat(),
-                "now_ist": now_ist.isoformat(),
-            },
-            location="app.py:api_mountain_signal_live_place_order._place",
-        )
-        # endregion agent log
         if tradingsymbol_param and quantity_param is not None:
             tradingsymbol = tradingsymbol_param
             quantity = int(quantity_param)
@@ -10615,22 +10652,6 @@ def api_mountain_signal_live_place_order():
     except Exception as exc:
         logging.exception("Mountain Signal live place order failed")
         logging.info("[Mountain Signal live] Place order error: %s: %s", type(exc).__name__, exc)
-        # region agent log
-        _debug_log(
-            hypothesis_id="H2",
-            message="Mountain Signal live place order exception",
-            data={
-                "instrument": instrument,
-                "option_type": option_type,
-                "transaction_type": transaction_type,
-                "index_ltp": index_ltp,
-                "lots": lots,
-                "error_type": type(exc).__name__,
-                "error_message": str(exc),
-            },
-            location="app.py:api_mountain_signal_live_place_order",
-        )
-        # endregion agent log
         return jsonify({'status': 'error', 'message': str(exc)}), 500
 
     return jsonify({
