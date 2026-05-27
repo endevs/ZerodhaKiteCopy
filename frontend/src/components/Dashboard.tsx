@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 import Layout from './Layout';
 import Navigation from './Navigation';
 import DashboardContent from './DashboardContent';
@@ -17,6 +18,7 @@ import { apiUrl } from '../config/api';
 import { useSocket } from '../hooks/useSocket';
 
 const Dashboard: React.FC = () => {
+  const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState<string>('dashboard');
   const [userName, setUserName] = useState<string>('Guest');
   const [kiteClientId, setKiteClientId] = useState<string | null>(null);
@@ -65,6 +67,14 @@ const Dashboard: React.FC = () => {
         const response = await fetch(apiUrl('/api/user-data'), { credentials: 'include' });
         const data = await response.json();
         if (response.ok) {
+          // If Zerodha API credentials are saved but the access token is not valid,
+          // the user must re-authenticate with Zerodha before using the dashboard.
+          // Freemium users (no credentials) are not affected.
+          if (data.zerodha_credentials_present && !data.token_valid) {
+            navigate('/welcome', { replace: true });
+            return;
+          }
+
           // Use user_name from backend (which falls back to email if name not set)
           setUserName(data.user_name || data.email || 'User');
           setKiteClientId(data.kite_client_id || null);

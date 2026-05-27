@@ -4845,8 +4845,24 @@ def api_google_callback():
                 
                 frontend_url = _get_frontend_url()
                 if has_app_key and has_app_secret:
-                    # User has credentials, redirect to dashboard
-                    return redirect(f"{frontend_url}/dashboard")
+                    # Validate the stored access token before sending to dashboard.
+                    # If the token is expired or absent the user must re-authenticate
+                    # with Zerodha, so redirect to /welcome instead.
+                    stored_token = (
+                        session.get('access_token')
+                        or user_dict.get('zerodha_access_token')
+                    )
+                    token_valid = False
+                    if stored_token:
+                        try:
+                            _validate_kite_token(user_dict['app_key'], stored_token)
+                            token_valid = True
+                        except Exception:
+                            token_valid = False
+                    if token_valid:
+                        return redirect(f"{frontend_url}/dashboard")
+                    else:
+                        return redirect(f"{frontend_url}/welcome")
                 else:
                     # User needs to configure Zerodha credentials, redirect to welcome page
                     return redirect(f"{frontend_url}/welcome")
