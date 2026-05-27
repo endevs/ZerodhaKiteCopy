@@ -14,7 +14,8 @@ type TabKey = 'live' | 'backtest' | 'archive' | 'prediction' | 'constituents';
 const NIFTY_TOKEN = 256265;
 const BANKNIFTY_TOKEN = 260105;
 
-const todayStr = (): string => new Date().toISOString().split('T')[0];
+const todayStr = (): string =>
+  new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
 
 const INTERVAL_MAP: Record<number, string> = {
   1: 'minute',
@@ -119,11 +120,14 @@ const isWithinNseSession = (t: Date | string): boolean => {
   return minutes >= 9 * 60 + 15 && minutes <= 15 * 60 + 30;
 };
 
-const floorToInterval = (date: Date, intervalMin: number): Date => {
-  const d = new Date(date);
-  d.setSeconds(0, 0);
-  d.setMinutes(Math.floor(d.getMinutes() / intervalMin) * intervalMin);
-  return d;
+/** IST-naive slot key (YYYY-MM-DDTHH:mm:ss) matching API candle time format. */
+const slotKeyIst = (date: Date, intervalMin: number): string => {
+  const ist = new Date(date.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+  ist.setSeconds(0, 0);
+  ist.setMilliseconds(0);
+  ist.setMinutes(Math.floor(ist.getMinutes() / intervalMin) * intervalMin);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${ist.getFullYear()}-${pad(ist.getMonth() + 1)}-${pad(ist.getDate())}T${pad(ist.getHours())}:${pad(ist.getMinutes())}:00`;
 };
 
 const daysAgo = (n: number): string => {
@@ -365,7 +369,6 @@ const AdvancedChartsContent: React.FC = () => {
       setWarning(null);
 
       const isLiveTab = activeTab === 'live';
-      const isLiveToday = isLiveTab && selectedDate === todayStr();
 
       if (isLiveTab) {
         // Live tab (today or historical): fetch warmup for valid RSI(14)/ADX
@@ -444,6 +447,13 @@ const AdvancedChartsContent: React.FC = () => {
   }, [selectedIndex, selectedDate, kiteInterval, activeTab]);
 
   useEffect(() => { fetchCandles(); }, [fetchCandles]);
+
+  // Periodic candle refresh for live today (fallback when socket ticks are unavailable)
+  useEffect(() => {
+    if (activeTab !== 'live' || !isToday) return;
+    const id = setInterval(() => { fetchCandles(); }, 60_000);
+    return () => clearInterval(id);
+  }, [activeTab, isToday, fetchCandles]);
 
   // ---------- Constituent overlays (HDFCBANK, ICICIBANK, KOTAKBANK, SBIN) for main chart ----------
   const fetchConstituentOverlays = useCallback(async () => {
@@ -671,14 +681,13 @@ const AdvancedChartsContent: React.FC = () => {
       if (msgToken !== instrumentToken || lastPrice == null) return;
 
       const tickTime = msg.timestamp ? new Date(msg.timestamp) : new Date();
-      const slotStart = floorToInterval(tickTime, timeframeMinutes);
-      const slotKey = slotStart.toISOString();
+      const slotKey = slotKeyIst(tickTime, timeframeMinutes);
 
       setRawCandles((prev) => {
         const updated = [...prev];
         const existingIdx = updated.findIndex((c) => {
-          const candleSlot = floorToInterval(new Date(c.time), timeframeMinutes);
-          return candleSlot.toISOString() === slotKey;
+          const candleSlotKey = slotKeyIst(new Date(c.time), timeframeMinutes);
+          return normCandleTime(candleSlotKey) === normCandleTime(slotKey);
         });
         if (existingIdx >= 0) {
           const existing = { ...updated[existingIdx] };
@@ -689,7 +698,7 @@ const AdvancedChartsContent: React.FC = () => {
           updated[existingIdx] = existing;
         } else {
           updated.push({
-            time: slotStart.toISOString(), open: lastPrice, high: lastPrice, low: lastPrice,
+            time: slotKey, open: lastPrice, high: lastPrice, low: lastPrice,
             close: lastPrice, volume: 0, indexClose: lastPrice, ema5: null,
           });
         }
