@@ -44,3 +44,33 @@ EMAIL_FROM=
 RAZORPAY_KEY_ID=
 RAZORPAY_KEY_SECRET=
 RAZORPAY_WEBHOOK_SECRET=
+
+# Docker + Playwright auto-auth: redirect must reach the backend container (not :5175 frontend).
+# Register in Zerodha developer console: http://localhost:8003/callback
+#
+# Optional: Playwright-based Zerodha auto-auth (global fallback)
+# KITE_AUTOMATION_USER_ID=RD2033
+# KITE_AUTOMATION_PASSWORD=
+# KITE_AUTOMATION_TOTP_SECRET=
+#
+# Optional: Per-app-user override (preferred; <id> = users.id from your DB)
+# KITE_AUTOMATION_USER_<app_user_id>_USER_ID=
+# KITE_AUTOMATION_USER_<app_user_id>_PASSWORD=
+# KITE_AUTOMATION_USER_<app_user_id>_TOTP_SECRET=
+#
+# Debug Playwright login locally (visible browser + screenshots on failure):
+# KITE_AUTOMATION_HEADED=1
+# KITE_AUTOMATION_HEADLESS=1
+# PLAYWRIGHT_DEBUG_DIR=/app/data
+# DISPLAY=:99
+# KITE_AUTOMATION_ATTEMPT_TIMEOUT_SECONDS=120
+#
+# Runtime precedence:
+# 1) User-saved details in DB (Welcome form) are used first
+# 2) If DB details are missing, env variables above are used as fallback
+#
+# Note: DB secrets are plaintext in this phase (temporary).
+#       Planned next phase will migrate to encrypted-at-rest storage.
+#
+# After editing .env: docker compose up -d --build
+# Smoke test: .\docker-test.ps1

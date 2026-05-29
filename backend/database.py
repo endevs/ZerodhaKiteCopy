@@ -36,9 +36,23 @@ def ensure_core_schema():
                 google_picture TEXT,
                 is_admin BOOLEAN NOT NULL DEFAULT 0,
                 current_subscription_id INTEGER,
-                subscription_trial_ends_at DATETIME
+                subscription_trial_ends_at DATETIME,
+                kite_user_id TEXT,
+                kite_password TEXT,
+                kite_totp_secret TEXT,
+                auto_auth_configured_at DATETIME
             )
         """)
+        cur.execute("PRAGMA table_info(users)")
+        user_columns = {row[1] for row in cur.fetchall()}
+        for column_name, column_def in (
+            ("kite_user_id", "TEXT"),
+            ("kite_password", "TEXT"),
+            ("kite_totp_secret", "TEXT"),
+            ("auto_auth_configured_at", "DATETIME"),
+        ):
+            if column_name not in user_columns:
+                cur.execute(f"ALTER TABLE users ADD COLUMN {column_name} {column_def}")
 
         cur.execute("""
             CREATE TABLE IF NOT EXISTS user_contact_messages (
@@ -138,6 +152,39 @@ def ensure_core_schema():
                 ema REAL
             )
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS legacy_kite_accounts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                legacy_user_id TEXT NOT NULL UNIQUE,
+                name TEXT,
+                email TEXT,
+                api_key TEXT,
+                api_secret TEXT,
+                request_token TEXT,
+                access_token TEXT,
+                public_token TEXT,
+                totp_secret TEXT,
+                kite_password TEXT,
+                strategy TEXT,
+                allowed_exchanges TEXT,
+                paper_trade_strategies TEXT,
+                nfo_buy_and_sell TEXT,
+                account_status TEXT,
+                metadata_json TEXT,
+                imported_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS legacy_kite_access_audit (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                admin_user_id INTEGER NOT NULL,
+                action TEXT NOT NULL,
+                legacy_account_id INTEGER,
+                legacy_user_id TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
 
         conn.commit()
         logging.info("Core database schema ensured (tables present or created).")
@@ -204,7 +251,11 @@ def create_tables():
             otp TEXT,
             otp_expiry DATETIME,
             zerodha_access_token TEXT,
-            zerodha_token_created_at DATETIME
+            zerodha_token_created_at DATETIME,
+            kite_user_id TEXT,
+            kite_password TEXT,
+            kite_totp_secret TEXT,
+            auto_auth_configured_at DATETIME
         )
     """)
     conn.execute('DROP TABLE IF EXISTS user_contact_messages')
@@ -301,6 +352,41 @@ def create_tables():
             close REAL NOT NULL,
             volume INTEGER NOT NULL,
             ema REAL
+        )
+    ''')
+    conn.execute('DROP TABLE IF EXISTS legacy_kite_accounts')
+    conn.execute('''
+        CREATE TABLE legacy_kite_accounts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            legacy_user_id TEXT NOT NULL UNIQUE,
+            name TEXT,
+            email TEXT,
+            api_key TEXT,
+            api_secret TEXT,
+            request_token TEXT,
+            access_token TEXT,
+            public_token TEXT,
+            totp_secret TEXT,
+            kite_password TEXT,
+            strategy TEXT,
+            allowed_exchanges TEXT,
+            paper_trade_strategies TEXT,
+            nfo_buy_and_sell TEXT,
+            account_status TEXT,
+            metadata_json TEXT,
+            imported_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    conn.execute('DROP TABLE IF EXISTS legacy_kite_access_audit')
+    conn.execute('''
+        CREATE TABLE legacy_kite_access_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            admin_user_id INTEGER NOT NULL,
+            action TEXT NOT NULL,
+            legacy_account_id INTEGER,
+            legacy_user_id TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     conn.commit()

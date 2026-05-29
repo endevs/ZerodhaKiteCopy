@@ -7,14 +7,70 @@ import PolicyLinks from './PolicyLinks';
 
 const API_TUTORIAL_URL = 'https://youtu.be/r88L9AqnNaE?si=kdMDw04MxVZ8WCax';
 
-const WelcomeContent: React.FC<{ message: { type: string; text: string } | null; onLogout: () => void }> = ({ message, onLogout }) => {
+type AutoAuthState = {
+  status: 'idle' | 'running' | 'succeeded' | 'failed' | 'needs_manual' | 'not_configured';
+  reason?: string | null;
+  attempts?: number;
+};
+
+type CredentialsStateResponse = {
+  has_credentials?: boolean;
+  auto_auth_details_present?: boolean;
+  missing_fields?: string[];
+};
+
+const WelcomeContent: React.FC<{
+  message: { type: string; text: string } | null;
+  onLogout: () => void;
+  autoAuthEnabled: boolean;
+  autoAuthState: AutoAuthState | null;
+  onStartAutoAuth: () => Promise<void>;
+}> = ({ message, onLogout, autoAuthEnabled, autoAuthState, onStartAutoAuth }) => {
   const navigate = useNavigate();
   const [loading, setLoading] = useState(true);
   const [hasCredentials, setHasCredentials] = useState(false);
+  const [hasAutoAuthDetails, setHasAutoAuthDetails] = useState(false);
   const [appKey, setAppKey] = useState('');
   const [appSecret, setAppSecret] = useState('');
+  const [kiteUserId, setKiteUserId] = useState('');
+  const [kitePassword, setKitePassword] = useState('');
+  const [kiteTotpSecret, setKiteTotpSecret] = useState('');
   const [feedback, setFeedback] = useState<{ type: string; text: string } | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [startingAutoAuth, setStartingAutoAuth] = useState(false);
+  const [missingFields, setMissingFields] = useState<string[]>([]);
+  const statusToAlertClass = (status?: AutoAuthState['status']): string => {
+    if (status === 'running') return 'info';
+    if (status === 'succeeded') return 'success';
+    if (status === 'failed' || status === 'needs_manual' || status === 'not_configured') return 'warning';
+    return 'secondary';
+  };
+  const statusLabel = (state: AutoAuthState | null): string => {
+    if (!state) return 'idle';
+    if (state.status === 'not_configured') return 'not configured';
+    return state.status.replace('_', ' ');
+  };
+
+  const reasonMessage = (reason?: string | null): string | null => {
+    if (!reason) return null;
+    const messages: Record<string, string> = {
+      timeout:
+        'Kite did not return a login token in time. In the Zerodha developer console, set the redirect URL to http://localhost:8003/callback (exact match), verify your TOTP secret, then try again or use manual authentication.',
+      otp_rejected:
+        'The TOTP code was rejected. Update your TOTP secret under profile settings and try again.',
+      selector_mismatch:
+        'The Kite login page layout changed. Use manual authentication for now.',
+      external_2fa_required:
+        'Zerodha is asking for approval in the Kite mobile app instead of a TOTP code. Use Authenticate with Zerodha (manual login) for this account.',
+      request_token_missing:
+        'Kite redirected without a login token. Check your API key and redirect URL.',
+      exchange_failed:
+        'Could not exchange the login token for an access token. Check API key and secret.',
+      user_not_logged_in:
+        'Your app session expired during automation. Sign in again and retry.',
+    };
+    return messages[reason] ?? reason;
+  };
 
   useEffect(() => {
     const fetchCredentialsStatus = async () => {
@@ -27,6 +83,8 @@ const WelcomeContent: React.FC<{ message: { type: string; text: string } | null;
         }
         const data = await response.json();
         setHasCredentials(Boolean(data?.has_credentials));
+        setHasAutoAuthDetails(Boolean(data?.auto_auth_details_present));
+        setMissingFields(Array.isArray(data?.missing_fields) ? data.missing_fields : []);
       } catch (error) {
         console.error('Unable to fetch user credential status:', error);
       } finally {
@@ -45,33 +103,84 @@ const WelcomeContent: React.FC<{ message: { type: string; text: string } | null;
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ app_key: appKey.trim(), app_secret: appSecret.trim() }),
+        body: JSON.stringify({
+          app_key: appKey.trim(),
+          app_secret: appSecret.trim(),
+          kite_user_id: kiteUserId.trim(),
+          kite_password: kitePassword.trim(),
+          kite_totp_secret: kiteTotpSecret.trim(),
+        }),
       });
       const data = await response.json();
       if (!response.ok) {
-        // Use backend error message which is now user-friendly
-        throw new Error(data?.message || 'Failed to store credentials. Please check that both API Key and Secret are provided.');
+        throw new Error(data?.message || 'Failed to store credentials. Please check that all fields are provided.');
       }
       setFeedback({ type: 'success', text: data.message || 'Credentials saved successfully.' });
-      setHasCredentials(true);
+      setHasCredentials(Boolean(data?.has_credentials));
+      setHasAutoAuthDetails(Boolean(data?.auto_auth_details_present));
+      setMissingFields(Array.isArray(data?.missing_fields) ? data.missing_fields : []);
       setAppKey('');
       setAppSecret('');
+      setKiteUserId('');
+      setKitePassword('');
+      setKiteTotpSecret('');
     } catch (error: any) {
-      // Display user-friendly error messages
       let errorMessage = error.message || 'An unexpected error occurred. Please try again.';
-      
-      // Make error messages more user-friendly
-      if (errorMessage.includes('API key') || errorMessage.includes('API Secret')) {
-        // Already user-friendly from backend
-      } else if (errorMessage.includes('Failed to store')) {
-        errorMessage = 'Unable to save your API credentials. Please ensure both API Key and Secret are correct and try again.';
+      if (errorMessage.includes('Failed to store')) {
+        errorMessage = 'Unable to save your credentials. Please ensure API and auto-auth details are filled correctly.';
       } else if (errorMessage.includes('Unexpected error')) {
         errorMessage = 'An error occurred while saving your credentials. Please check your internet connection and try again.';
       }
-      
       setFeedback({ type: 'danger', text: errorMessage });
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const handleSaveAutoAuthDetails = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setFeedback(null);
+    setSubmitting(true);
+    try {
+      const response = await fetch(apiUrl('/api/user-credentials'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          kite_user_id: kiteUserId.trim(),
+          kite_password: kitePassword.trim(),
+          kite_totp_secret: kiteTotpSecret.trim(),
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        if (Array.isArray(data?.missing_fields)) {
+          setMissingFields(data.missing_fields);
+        }
+        throw new Error(data?.message || 'Failed to store auto-auth details.');
+      }
+      setFeedback({ type: 'success', text: data.message || 'Auto-auth details saved successfully.' });
+      setHasAutoAuthDetails(Boolean(data?.auto_auth_details_present));
+      setMissingFields(Array.isArray(data?.missing_fields) ? data.missing_fields : []);
+      setKiteUserId('');
+      setKitePassword('');
+      setKiteTotpSecret('');
+    } catch (error: any) {
+      setFeedback({ type: 'danger', text: error.message || 'Failed to save auto-auth details.' });
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleStartAutoAuth = async () => {
+    setStartingAutoAuth(true);
+    setFeedback(null);
+    try {
+      await onStartAutoAuth();
+    } catch (error: any) {
+      setFeedback({ type: 'danger', text: error?.message || 'Failed to start automated authentication.' });
+    } finally {
+      setStartingAutoAuth(false);
     }
   };
 
@@ -107,9 +216,89 @@ const WelcomeContent: React.FC<{ message: { type: string; text: string } | null;
           {feedback.text}
         </div>
       )}
+      {missingFields.length > 0 && (
+        <div className="alert alert-warning mb-3 small" role="alert">
+          Missing required fields: {missingFields.join(', ')}
+        </div>
+      )}
 
       {hasCredentials ? (
         <div className="d-grid gap-3">
+          <button
+            className="btn btn-outline-info"
+            type="button"
+            onClick={handleStartAutoAuth}
+            disabled={startingAutoAuth || autoAuthState?.status === 'running' || !autoAuthEnabled}
+          >
+            {startingAutoAuth || autoAuthState?.status === 'running'
+              ? 'Auto Authentication in progress...'
+              : 'Auto Authentication'}
+          </button>
+          {!autoAuthEnabled && (
+            <div className="alert alert-warning mb-0 small" role="alert">
+              Auto Authentication is not configured yet. Please ask admin to set automation credentials.
+            </div>
+          )}
+          {!hasAutoAuthDetails && (
+            <form onSubmit={handleSaveAutoAuthDetails} className="d-flex flex-column gap-2">
+              <div>
+                <label htmlFor="kite_user_id_existing" className="form-label small mb-1">
+                  Kite User ID
+                </label>
+                <input
+                  type="text"
+                  id="kite_user_id_existing"
+                  className="form-control"
+                  value={kiteUserId}
+                  onChange={(event) => setKiteUserId(event.target.value)}
+                  placeholder="RD1234"
+                  required
+                />
+              </div>
+              <div>
+                <label htmlFor="kite_password_existing" className="form-label small mb-1">
+                  Kite Password
+                </label>
+                <input
+                  type="password"
+                  id="kite_password_existing"
+                  className="form-control"
+                  value={kitePassword}
+                  onChange={(event) => setKitePassword(event.target.value)}
+                  placeholder="Your Kite password"
+                  required
+                />
+              </div>
+              <div>
+                <label htmlFor="kite_totp_secret_existing" className="form-label small mb-1">
+                  TOTP Secret
+                </label>
+                <input
+                  type="password"
+                  id="kite_totp_secret_existing"
+                  className="form-control"
+                  value={kiteTotpSecret}
+                  onChange={(event) => setKiteTotpSecret(event.target.value)}
+                  placeholder="Base32 TOTP secret"
+                  required
+                />
+              </div>
+              <button type="submit" className="btn btn-outline-light" disabled={submitting}>
+                {submitting ? 'Saving auto-auth details...' : 'Save Auto Authentication Details'}
+              </button>
+            </form>
+          )}
+          {autoAuthState && autoAuthState.status !== 'idle' && (
+            <div className={`alert alert-${statusToAlertClass(autoAuthState.status)} mb-0 small`} role="alert">
+              <div>
+                Automation status: <strong>{statusLabel(autoAuthState)}</strong>
+                {typeof autoAuthState.attempts === 'number' ? ` • attempts: ${autoAuthState.attempts}` : ''}
+              </div>
+              {reasonMessage(autoAuthState.reason) && (
+                <div className="mt-2">{reasonMessage(autoAuthState.reason)}</div>
+              )}
+            </div>
+          )}
           <a href="/api/zerodha_login" className="btn btn-primary">
             Authenticate with Zerodha
           </a>
@@ -145,6 +334,48 @@ const WelcomeContent: React.FC<{ message: { type: string; text: string } | null;
                 value={appSecret}
                 onChange={(event) => setAppSecret(event.target.value)}
                 placeholder="kiteconnect_secret"
+                required
+              />
+            </div>
+            <div>
+              <label htmlFor="kite_user_id" className="form-label">
+                Kite User ID
+              </label>
+              <input
+                type="text"
+                id="kite_user_id"
+                className="form-control"
+                value={kiteUserId}
+                onChange={(event) => setKiteUserId(event.target.value)}
+                placeholder="RD1234"
+                required
+              />
+            </div>
+            <div>
+              <label htmlFor="kite_password" className="form-label">
+                Kite Password
+              </label>
+              <input
+                type="password"
+                id="kite_password"
+                className="form-control"
+                value={kitePassword}
+                onChange={(event) => setKitePassword(event.target.value)}
+                placeholder="Your Kite password"
+                required
+              />
+            </div>
+            <div>
+              <label htmlFor="kite_totp_secret" className="form-label">
+                Kite TOTP Secret
+              </label>
+              <input
+                type="password"
+                id="kite_totp_secret"
+                className="form-control"
+                value={kiteTotpSecret}
+                onChange={(event) => setKiteTotpSecret(event.target.value)}
+                placeholder="Base32 TOTP secret"
                 required
               />
             </div>
@@ -202,7 +433,12 @@ const WelcomeContent: React.FC<{ message: { type: string; text: string } | null;
 
 const Welcome: React.FC = () => {
   const [message, setMessage] = useState<{ type: string; text: string } | null>(null);
+  const [autoAuthState, setAutoAuthState] = useState<AutoAuthState | null>(null);
+  const [autoAuthEnabled, setAutoAuthEnabled] = useState(false);
   const navigate = useNavigate();
+  const redirectToLoginOnUnauthorized = () => {
+    navigate('/login?reason=session_expired', { replace: true });
+  };
 
   useEffect(() => {
     const checkZerodhaSession = async () => {
@@ -210,12 +446,19 @@ const Welcome: React.FC = () => {
         const response = await fetch(apiUrl('/api/user-data'), {
           credentials: 'include',
         });
+        if (response.status === 401) {
+          redirectToLoginOnUnauthorized();
+          return;
+        }
 
         if (!response.ok) {
           return;
         }
 
         const data = await response.json();
+        if (data?.auto_auth) {
+          setAutoAuthState(data.auto_auth as AutoAuthState);
+        }
 
         // Only auto-redirect if user has valid token AND credentials
         // If credentials are missing, let user stay on welcome page to add them or skip
@@ -241,6 +484,42 @@ const Welcome: React.FC = () => {
     };
 
     checkZerodhaSession();
+  }, [navigate]);
+
+  useEffect(() => {
+    let timer: ReturnType<typeof setInterval> | undefined;
+    const loadStatus = async () => {
+      try {
+        const response = await fetch(apiUrl('/api/zerodha/auto-auth-status'), { credentials: 'include' });
+        if (response.status === 401) {
+          redirectToLoginOnUnauthorized();
+          return;
+        }
+        if (!response.ok) return;
+        const data = await response.json();
+        setAutoAuthEnabled(Boolean(data?.configured));
+        if (data?.auto_auth) {
+          setAutoAuthState(data.auto_auth as AutoAuthState);
+          if (data.auto_auth.status === 'failed' || data.auto_auth.status === 'needs_manual') {
+            // #region agent log
+            fetch('http://127.0.0.1:7255/ingest/85086ee0-cdfe-4536-9e94-0e466df42afc',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'c3dc96'},body:JSON.stringify({sessionId:'c3dc96',runId:'pre-fix',hypothesisId:'H2',location:'Welcome.tsx:loadStatus',message:'auto-auth terminal state',data:{status:data.auto_auth.status,reason:data.auto_auth.reason,attempts:data.auto_auth.attempts},timestamp:Date.now()})}).catch(()=>{});
+            // #endregion
+          }
+          if (data.auto_auth.status === 'succeeded') {
+            navigate('/dashboard', { replace: true });
+          }
+        } else if (!data?.configured) {
+          setAutoAuthState({ status: 'not_configured' });
+        }
+      } catch (error) {
+        console.error('Unable to fetch auto-auth status:', error);
+      }
+    };
+    loadStatus();
+    timer = setInterval(loadStatus, 5000);
+    return () => {
+      if (timer) clearInterval(timer);
+    };
   }, [navigate]);
 
   useEffect(() => {
@@ -299,6 +578,34 @@ const Welcome: React.FC = () => {
     }
   };
 
+  const handleStartAutoAuth = async () => {
+    if (!autoAuthEnabled) {
+      setAutoAuthState({ status: 'not_configured' });
+      throw new Error('Auto Authentication is not configured yet.');
+    }
+    const response = await fetch(apiUrl('/api/zerodha/auto-auth/start'), {
+      method: 'POST',
+      credentials: 'include',
+    });
+    if (response.status === 401) {
+      redirectToLoginOnUnauthorized();
+      throw new Error('Session expired. Please log in again.');
+    }
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data?.message || 'Failed to start automated authentication');
+    }
+    if (data?.auto_auth) {
+      setAutoAuthState(data.auto_auth as AutoAuthState);
+      if (data.auto_auth.status === 'succeeded') {
+        navigate('/dashboard', { replace: true });
+      }
+    }
+    if (data?.message) {
+      setMessage({ type: 'info', text: data.message });
+    }
+  };
+
   return (
     <div className="auth-page">
       <div className="auth-overlay" />
@@ -353,7 +660,13 @@ const Welcome: React.FC = () => {
           </div>
           <div className="col-lg-5 offset-lg-1 col-xl-4">
             <div className="auth-card shadow-lg">
-              <WelcomeContent message={message} onLogout={handleLogout} />
+              <WelcomeContent
+                message={message}
+                onLogout={handleLogout}
+                autoAuthEnabled={autoAuthEnabled}
+                autoAuthState={autoAuthState}
+                onStartAutoAuth={handleStartAutoAuth}
+              />
             </div>
           </div>
         </div>

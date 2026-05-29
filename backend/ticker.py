@@ -2,6 +2,7 @@
 from kiteconnect import KiteTicker
 import logging
 import datetime
+import time
 from database import get_db_connection
 from utils import get_option_symbols
 
@@ -20,7 +21,38 @@ class Ticker:
         self.kws.on_error = self.on_error
         self.db_connection = get_db_connection() # Initialize DB connection here
 
+    def _tick_has_timestamp(self, tick):
+        return bool(
+            tick.get('timestamp')
+            or tick.get('last_trade_time')
+            or tick.get('exchange_timestamp')
+        )
+
     def on_ticks(self, ws, ticks):
+        # #region agent log
+        try:
+            missing = [t for t in ticks if not self._tick_has_timestamp(t)]
+            now = time.time()
+            last = getattr(self, '_dbg_tick_log_at', 0)
+            if missing and (now - last) >= 30:
+                from debug_agent_log import agent_log
+                sample = missing[0]
+                agent_log(
+                    "ticker.py:on_ticks",
+                    "Ticks missing timestamp fields",
+                    {
+                        "batch_size": len(ticks),
+                        "missing_count": len(missing),
+                        "sample_keys": sorted(sample.keys()),
+                        "sample_instrument_token": sample.get("instrument_token"),
+                        "mode": sample.get("mode"),
+                    },
+                    "H4",
+                )
+                self._dbg_tick_log_at = now
+        except Exception:
+            pass
+        # #endregion agent log
         try:
             with get_db_connection() as conn:
                 cursor = conn.cursor()
@@ -540,6 +572,18 @@ class Ticker:
         else:
             # Other errors - log at debug level to reduce noise
             logging.debug(f"Kite Ticker error: {code} - {reason}")
+            # #region agent log
+            try:
+                from debug_agent_log import agent_log
+                agent_log(
+                    "ticker.py:on_error",
+                    "Kite Ticker WebSocket error",
+                    {"code": code, "reason": str(reason)[:200]},
+                    "H3",
+                )
+            except Exception:
+                pass
+            # #endregion agent log
 
     def on_close(self, ws, code, reason):
         """Handle WebSocket connection close."""
@@ -580,6 +624,19 @@ class Ticker:
                 logging.debug(f"Kite Ticker connection closed uncleanly: {code} - {reason}")
             else:
                 logging.info(f"Kite Ticker connection closed: {code} - {reason}")
+            # #region agent log
+            if code == 1006:
+                try:
+                    from debug_agent_log import agent_log
+                    agent_log(
+                        "ticker.py:on_close",
+                        "Kite Ticker connection closed uncleanly",
+                        {"code": code, "reason": str(reason)[:200]},
+                        "H3",
+                    )
+                except Exception:
+                    pass
+            # #endregion agent log
 
     def start(self):
         try:

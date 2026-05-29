@@ -16,6 +16,8 @@ services:
       SERVER_PORT: "8003"
       SERVER_HOST: "0.0.0.0"
       DATABASE_PATH: /app/data/database.db
+      PLAYWRIGHT_IN_DOCKER: "1"
+    shm_size: "1gb"
     volumes:
       - ./data:/app/data
     # All interfaces :8003 — restrict with security group / firewall; prefer :5175 for browsers.

@@ -16,6 +16,19 @@ services:
       SERVER_HOST: "0.0.0.0"
       DATABASE_PATH: /app/data/database.db
       EVENTLET_NO_GREENDNS: "yes"
+      PLAYWRIGHT_IN_DOCKER: "1"
+      PLAYWRIGHT_DEBUG_DIR: /app/data
+      DEBUG_LOG_PATH: /app/data/debug-c3dc96.log
+      DISPLAY: ":99"
+      KITE_AUTOMATION_HEADED: "1"
+      # Kite redirect for Playwright must hit this container (set in backend/.env too):
+      # BACKEND_URL=http://localhost:8003
+      # Optional auto-auth (also read from backend/.env via env_file):
+      # KITE_AUTOMATION_USER_<app_user_id>_USER_ID=
+      # KITE_AUTOMATION_USER_<app_user_id>_PASSWORD=
+      # KITE_AUTOMATION_USER_<app_user_id>_TOTP_SECRET=
+    # Chromium needs extra shared memory in Docker.
+    shm_size: "1gb"
     dns:
       - 8.8.8.8
       - 8.8.4.4

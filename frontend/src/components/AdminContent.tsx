@@ -13,11 +13,36 @@ interface User {
   token_created_at: string | null;
 }
 
+interface LegacyKiteAccount {
+  id: number;
+  legacy_user_id: string;
+  name: string | null;
+  email: string | null;
+  api_key: string | null;
+  api_secret: string | null;
+  request_token: string | null;
+  access_token: string | null;
+  public_token: string | null;
+  totp_secret: string | null;
+  kite_password: string | null;
+  strategy: string | null;
+  allowed_exchanges: string | null;
+  paper_trade_strategies: string | null;
+  nfo_buy_and_sell: string | null;
+  account_status: string | null;
+  metadata_json: string | null;
+  imported_at: string | null;
+}
+
 const AdminContent: React.FC = () => {
   const [users, setUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'user-management' | 'strategy-approvals' | 'subscriptions' | 'plan-prices'>('user-management');
+  const [activeTab, setActiveTab] = useState<'user-management' | 'strategy-approvals' | 'subscriptions' | 'plan-prices' | 'legacy-kite-accounts'>('user-management');
+  const [legacyAccounts, setLegacyAccounts] = useState<LegacyKiteAccount[]>([]);
+  const [loadingLegacyAccounts, setLoadingLegacyAccounts] = useState(false);
+  const [legacySearch, setLegacySearch] = useState('');
+  const [selectedLegacyAccount, setSelectedLegacyAccount] = useState<LegacyKiteAccount | null>(null);
   
   interface PendingStrategy {
     id: number;
@@ -97,8 +122,56 @@ const AdminContent: React.FC = () => {
       loadSubscriptions();
     } else if (activeTab === 'plan-prices') {
       loadPlanPrices();
+    } else if (activeTab === 'legacy-kite-accounts') {
+      loadLegacyKiteAccounts();
     }
   }, [activeTab]);
+
+  const loadLegacyKiteAccounts = async (query = legacySearch) => {
+    try {
+      setLoadingLegacyAccounts(true);
+      const params = query ? `?q=${encodeURIComponent(query)}` : '';
+      const response = await fetch(apiUrl(`/api/admin/legacy-kite-accounts${params}`), {
+        credentials: 'include',
+      });
+      if (response.status === 403) {
+        setError('You do not have admin access');
+        return;
+      }
+      if (!response.ok) {
+        throw new Error('Failed to load legacy kite accounts');
+      }
+      const data = await response.json();
+      if (data.status === 'success') {
+        setLegacyAccounts(data.accounts || []);
+      } else {
+        setError(data.message || 'Failed to load legacy kite accounts');
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'An error occurred');
+    } finally {
+      setLoadingLegacyAccounts(false);
+    }
+  };
+
+  const openLegacyAccountDetail = async (accountId: number) => {
+    try {
+      const response = await fetch(apiUrl(`/api/admin/legacy-kite-accounts/${accountId}`), {
+        credentials: 'include',
+      });
+      if (!response.ok) {
+        throw new Error('Failed to load legacy account detail');
+      }
+      const data = await response.json();
+      if (data.status === 'success') {
+        setSelectedLegacyAccount(data.account as LegacyKiteAccount);
+      } else {
+        alert(data.message || 'Failed to load legacy account detail');
+      }
+    } catch (err) {
+      alert(`Error loading legacy account detail: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    }
+  };
   
   const loadPlanPrices = async () => {
     try {
@@ -440,6 +513,27 @@ const AdminContent: React.FC = () => {
     }
   };
 
+  const handleDisableZerodhaToken = async (userId: number, email: string) => {
+    if (!window.confirm('Disable current Zerodha session token for this user? API key/secret will remain saved.')) {
+      return;
+    }
+    try {
+      const response = await fetch(apiUrl(`/api/admin/users/${userId}/disable-zerodha-token`), {
+        method: 'POST',
+        credentials: 'include',
+      });
+      const data = await response.json();
+      if (data.status === 'success') {
+        alert(data.message || 'Zerodha token disabled successfully');
+        await loadUsers();
+      } else {
+        alert(`Error: ${data.message || 'Failed to disable token'}`);
+      }
+    } catch (err) {
+      alert(`Error disabling token for ${email}: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    }
+  };
+
   const maskSensitiveData = (value: string): string => {
     if (!value || value.length === 0) return 'Not set';
     if (value.length <= 4) return '****';
@@ -574,6 +668,18 @@ const AdminContent: React.FC = () => {
               >
                 <i className="bi bi-currency-rupee me-2"></i>
                 Plan Prices
+              </button>
+            </li>
+            <li className="nav-item">
+              <button
+                className={`nav-link ${activeTab === 'legacy-kite-accounts' ? 'active' : ''}`}
+                onClick={() => setActiveTab('legacy-kite-accounts')}
+              >
+                <i className="bi bi-key me-2"></i>
+                Legacy Kite Accounts
+                {legacyAccounts.length > 0 && (
+                  <span className="badge bg-danger ms-2">{legacyAccounts.length}</span>
+                )}
               </button>
             </li>
           </ul>
@@ -765,6 +871,13 @@ const AdminContent: React.FC = () => {
                                   title="Edit API credentials"
                                 >
                                   <i className="bi bi-key"></i>
+                                </button>
+                                <button
+                                  className="btn btn-sm btn-outline-secondary"
+                                  onClick={() => handleDisableZerodhaToken(user.id, user.email)}
+                                  title="Disable Zerodha token (keep API credentials)"
+                                >
+                                  <i className="bi bi-shield-x"></i>
                                 </button>
                                 <button
                                   className="btn btn-sm btn-outline-warning"
@@ -1215,6 +1328,97 @@ const AdminContent: React.FC = () => {
               </div>
             </div>
           )}
+          {activeTab === 'legacy-kite-accounts' && (
+            <div className="card">
+              <div className="card-header d-flex justify-content-between align-items-center">
+                <h5 className="mb-0">
+                  <i className="bi bi-key me-2"></i>
+                  Legacy Zerodha Credentials ({legacyAccounts.length})
+                </h5>
+                <div className="d-flex gap-2">
+                  <input
+                    type="text"
+                    className="form-control form-control-sm"
+                    style={{ width: '240px' }}
+                    placeholder="Search by user/email/key..."
+                    value={legacySearch}
+                    onChange={(e) => setLegacySearch(e.target.value)}
+                  />
+                  <button
+                    className="btn btn-sm btn-outline-primary"
+                    onClick={() => loadLegacyKiteAccounts()}
+                    disabled={loadingLegacyAccounts}
+                  >
+                    <i className="bi bi-search me-1"></i>
+                    Search
+                  </button>
+                </div>
+              </div>
+              <div className="card-body">
+                <div className="alert alert-danger">
+                  <i className="bi bi-exclamation-triangle-fill me-2"></i>
+                  Highly sensitive data. Do not share or screenshot these credentials.
+                </div>
+                {loadingLegacyAccounts ? (
+                  <div className="text-center py-4">
+                    <div className="spinner-border text-primary" role="status">
+                      <span className="visually-hidden">Loading...</span>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="table-responsive">
+                    <table className="table table-hover">
+                      <thead>
+                        <tr>
+                          <th>ID</th>
+                          <th>Legacy User</th>
+                          <th>Name</th>
+                          <th>Email</th>
+                          <th>API Key</th>
+                          <th>Access Token</th>
+                          <th>TOTP</th>
+                          <th>Password</th>
+                          <th>Imported At</th>
+                          <th>Action</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {legacyAccounts.length === 0 ? (
+                          <tr>
+                            <td colSpan={10} className="text-center text-muted">
+                              No legacy accounts imported yet
+                            </td>
+                          </tr>
+                        ) : (
+                          legacyAccounts.map((acc) => (
+                            <tr key={acc.id}>
+                              <td>{acc.id}</td>
+                              <td><code>{acc.legacy_user_id}</code></td>
+                              <td>{acc.name || 'N/A'}</td>
+                              <td>{acc.email || 'N/A'}</td>
+                              <td><code>{acc.api_key || 'N/A'}</code></td>
+                              <td><code>{acc.access_token || 'N/A'}</code></td>
+                              <td><code>{acc.totp_secret || 'N/A'}</code></td>
+                              <td><code>{acc.kite_password || 'N/A'}</code></td>
+                              <td>{acc.imported_at ? new Date(acc.imported_at).toLocaleString() : 'N/A'}</td>
+                              <td>
+                                <button
+                                  className="btn btn-sm btn-outline-dark"
+                                  onClick={() => openLegacyAccountDetail(acc.id)}
+                                >
+                                  View
+                                </button>
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
@@ -1320,6 +1524,43 @@ const AdminContent: React.FC = () => {
                   ) : (
                     'Save credentials'
                   )}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {selectedLegacyAccount && (
+        <div
+          className="modal show d-block"
+          tabIndex={-1}
+          role="dialog"
+          style={{ backgroundColor: 'rgba(0,0,0,0.5)' }}
+        >
+          <div className="modal-dialog modal-xl modal-dialog-scrollable">
+            <div className="modal-content">
+              <div className="modal-header">
+                <h5 className="modal-title">
+                  Legacy credentials detail — {selectedLegacyAccount.legacy_user_id}
+                </h5>
+                <button
+                  type="button"
+                  className="btn-close"
+                  aria-label="Close"
+                  onClick={() => setSelectedLegacyAccount(null)}
+                />
+              </div>
+              <div className="modal-body">
+                <div className="alert alert-danger">
+                  This record contains raw API secret, TOTP and password data.
+                </div>
+                <pre className="bg-light p-3 border rounded" style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                  {JSON.stringify(selectedLegacyAccount, null, 2)}
+                </pre>
+              </div>
+              <div className="modal-footer">
+                <button type="button" className="btn btn-secondary" onClick={() => setSelectedLegacyAccount(null)}>
+                  Close
                 </button>
               </div>
             </div>

@@ -3,19 +3,15 @@
 import os
 os.environ.setdefault('EVENTLET_NO_GREENDNS', 'yes')
 
-# Try eventlet first, fallback to gevent, then threading
+# Prefer gevent for better Playwright compatibility; fallback to threading.
+# Avoid eventlet monkey patching because it can interfere with Playwright flows.
 try:
-    import eventlet
-    eventlet.monkey_patch()
-    ASYNC_MODE = 'eventlet'
+    import gevent
+    from gevent import monkey
+    monkey.patch_all()
+    ASYNC_MODE = 'gevent'
 except ImportError:
-    try:
-        import gevent
-        from gevent import monkey
-        monkey.patch_all()
-        ASYNC_MODE = 'gevent'
-    except ImportError:
-        ASYNC_MODE = 'threading'
+    ASYNC_MODE = 'threading'
 
 from flask import Flask, request, redirect, render_template, jsonify, session, flash, has_request_context
 import os
@@ -73,6 +69,7 @@ from live_trade import (
     STATUS_STOPPED,
     STATUS_ERROR,
 )
+from kite_auth.orchestrator import AuthJobInput, ZerodhaPlaywrightAuthOrchestrator
 
 # Constants for market instruments
 BANKNIFTY_SPOT_SYMBOL = 'NSE:NIFTY BANK'
@@ -161,9 +158,45 @@ def execute_with_retries(description: str, func: Callable[[], Any], *, max_attem
             last_exc = exc
             if not _is_retryable_exception(exc) or attempt == max_attempts:
                 logging.error(f"{description} failed on attempt {attempt}/{max_attempts}: {exc}")
+                # #region agent log
+                try:
+                    from debug_agent_log import agent_log
+                    agent_log(
+                        "app.py:execute_with_retries",
+                        "Kite API call failed",
+                        {
+                            "description": description,
+                            "attempt": attempt,
+                            "max_attempts": max_attempts,
+                            "error_type": type(exc).__name__,
+                            "error_msg": str(exc)[:300],
+                            "retryable": _is_retryable_exception(exc),
+                        },
+                        "H1,H2",
+                    )
+                except Exception:
+                    pass
+                # #endregion agent log
                 raise
             delay = base_delay * attempt
             logging.warning(f"{description} transient error (attempt {attempt}/{max_attempts}): {exc}. Retrying in {delay:.1f}s")
+            # #region agent log
+            try:
+                from debug_agent_log import agent_log
+                agent_log(
+                    "app.py:execute_with_retries",
+                    "Kite API transient error, retrying",
+                    {
+                        "description": description,
+                        "attempt": attempt,
+                        "error_type": type(exc).__name__,
+                        "error_msg": str(exc)[:300],
+                    },
+                    "H1,H2",
+                )
+            except Exception:
+                pass
+            # #endregion agent log
             time.sleep(delay)
     if last_exc:
         raise last_exc
@@ -1506,6 +1539,9 @@ except Exception as e:
 # Ensure live trade tables exist on startup
 ensure_live_trade_tables()
 
+AUTO_AUTH_ENV_PREFIX = "KITE_AUTOMATION_USER_"
+_auto_auth_orchestrator: Optional[ZerodhaPlaywrightAuthOrchestrator] = None
+
 # Run admin migration on startup
 try:
     from migrate_admin import migrate_admin_field
@@ -1678,6 +1714,26 @@ def _require_admin():
         conn.close()
 
 
+def _audit_legacy_kite_access(action: str, legacy_account_id: Optional[int], legacy_user_id: Optional[str]) -> None:
+    admin_user_id = session.get('user_id')
+    if not admin_user_id:
+        return
+    conn = get_db_connection()
+    try:
+        conn.execute(
+            '''
+            INSERT INTO legacy_kite_access_audit (admin_user_id, action, legacy_account_id, legacy_user_id)
+            VALUES (?, ?, ?, ?)
+            ''',
+            (admin_user_id, action, legacy_account_id, legacy_user_id),
+        )
+        conn.commit()
+    except Exception as exc:
+        logging.warning("Failed to write legacy kite audit log: %s", exc)
+    finally:
+        conn.close()
+
+
 def _update_user_access_token(user_id: int, token: Optional[str]) -> None:
     conn = get_db_connection()
     try:
@@ -1747,6 +1803,168 @@ def _validate_kite_token(app_key: str, token: str) -> Tuple[Dict[str, Any], Dict
         lambda: kite_client.margins()
     )
     return profile, margins
+
+
+def _store_user_name(user_id: int, user_name: Optional[str], source: str) -> None:
+    if not user_name or user_name == "Guest":
+        return
+    conn = get_db_connection()
+    try:
+        existing = conn.execute('SELECT user_name FROM users WHERE id = ?', (user_id,)).fetchone()
+        if not existing or not existing['user_name'] or existing['user_name'] != user_name:
+            conn.execute('UPDATE users SET user_name = ? WHERE id = ?', (user_name, user_id))
+            conn.commit()
+            logging.info("Stored user name '%s' for user %s (%s)", user_name, user_id, source)
+    except Exception as exc:
+        logging.warning("Could not store user name for user %s: %s", user_id, exc)
+    finally:
+        conn.close()
+
+
+def _exchange_request_token_for_user(
+    user_id: int,
+    request_token: str,
+    source: str = "manual_callback",
+    update_session: bool = True,
+) -> Dict[str, Any]:
+    user_row = _get_user_record(user_id)
+    if not user_row:
+        raise RuntimeError("User not found")
+    user = dict(user_row)
+    if not user.get('app_key') or not user.get('app_secret'):
+        raise RuntimeError("Zerodha credentials missing")
+
+    kite_client = KiteConnect(api_key=user['app_key'])
+    session_data = execute_with_retries(
+        f"generating Zerodha session ({source})",
+        lambda: kite_client.generate_session(request_token, api_secret=user['app_secret']),
+    )
+    access_token = session_data["access_token"]
+    kite_client.set_access_token(access_token)
+    _update_user_access_token(user_id, access_token)
+
+    if update_session and has_request_context():
+        try:
+            session['access_token'] = access_token
+        except Exception:
+            pass
+
+    profile = execute_with_retries(
+        f"fetching Kite profile after token exchange ({source})",
+        lambda: kite_client.profile(),
+    )
+    margins = execute_with_retries(
+        f"fetching Kite margins after token exchange ({source})",
+        lambda: kite_client.margins(),
+    )
+    _store_user_name(user_id, profile.get("user_name"), source)
+    return {
+        "access_token": access_token,
+        "profile": profile,
+        "margins": margins,
+    }
+
+
+def _get_auto_auth_env_value(user_id: int, field: str) -> Optional[str]:
+    keyed = os.getenv(f"{AUTO_AUTH_ENV_PREFIX}{user_id}_{field}")
+    if keyed:
+        return keyed
+    return os.getenv(f"KITE_AUTOMATION_{field}")
+
+
+def _get_user_auto_auth_details(user_id: int) -> Dict[str, Optional[str]]:
+    user_row = _get_user_record(user_id)
+    if not user_row:
+        return {
+            "kite_user_id": None,
+            "kite_password": None,
+            "kite_totp_secret": None,
+        }
+    user = dict(user_row)
+    return {
+        "kite_user_id": (user.get("kite_user_id") or "").strip() or None,
+        "kite_password": (user.get("kite_password") or "").strip() or None,
+        "kite_totp_secret": (user.get("kite_totp_secret") or "").strip() or None,
+    }
+
+
+def _update_user_auto_auth_details(
+    user_id: int,
+    kite_user_id: Optional[str] = None,
+    kite_password: Optional[str] = None,
+    kite_totp_secret: Optional[str] = None,
+) -> None:
+    conn = get_db_connection()
+    try:
+        update_parts: List[str] = []
+        values: List[Any] = []
+        if kite_user_id is not None:
+            update_parts.append("kite_user_id = ?")
+            values.append((kite_user_id or "").strip())
+        if kite_password is not None:
+            update_parts.append("kite_password = ?")
+            values.append((kite_password or "").strip())
+        if kite_totp_secret is not None:
+            update_parts.append("kite_totp_secret = ?")
+            values.append((kite_totp_secret or "").strip())
+        if not update_parts:
+            return
+        update_parts.append("auto_auth_configured_at = ?")
+        values.append(datetime.datetime.now().isoformat())
+        values.append(user_id)
+        conn.execute(f"UPDATE users SET {', '.join(update_parts)} WHERE id = ?", tuple(values))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _resolve_auto_auth_job(user_id: int) -> Optional[AuthJobInput]:
+    user_row = _get_user_record(user_id)
+    if not user_row:
+        return None
+    user = dict(user_row)
+    if not user.get("app_key") or not user.get("app_secret"):
+        return None
+
+    user_auto_auth = _get_user_auto_auth_details(user_id)
+    kite_user_id = user_auto_auth.get("kite_user_id") or _get_auto_auth_env_value(user_id, "USER_ID")
+    kite_password = user_auto_auth.get("kite_password") or _get_auto_auth_env_value(user_id, "PASSWORD")
+    kite_totp_secret = user_auto_auth.get("kite_totp_secret") or _get_auto_auth_env_value(user_id, "TOTP_SECRET")
+    if not kite_user_id or not kite_password or not kite_totp_secret:
+        return None
+
+    callback_base = _get_zerodha_callback_base_url()
+    redirect_uri = f"{callback_base}/callback"
+    return AuthJobInput(
+        app_user_id=user_id,
+        app_key=user["app_key"],
+        api_secret=user["app_secret"],
+        kite_user_id=kite_user_id,
+        kite_password=kite_password,
+        kite_totp_secret=kite_totp_secret,
+        redirect_uri=redirect_uri,
+    )
+
+
+def _get_auto_auth_orchestrator() -> ZerodhaPlaywrightAuthOrchestrator:
+    global _auto_auth_orchestrator
+    if _auto_auth_orchestrator is None:
+        _auto_auth_orchestrator = ZerodhaPlaywrightAuthOrchestrator(
+            exchange_request_token=lambda uid, req, source: _exchange_request_token_for_user(
+                uid, req, source=source, update_session=False
+            ),
+            validate_login_state=lambda _uid: True,
+            max_attempts=2,
+        )
+    return _auto_auth_orchestrator
+
+
+def _maybe_start_auto_auth(user_id: int) -> str:
+    job = _resolve_auto_auth_job(user_id)
+    if not job:
+        return "not_configured"
+    started = _get_auto_auth_orchestrator().start(job)
+    return "started" if started else "already_running"
 
 
 def _collect_candidate_tokens(
@@ -4570,12 +4788,20 @@ def zerodha_login():
 
 @app.route("/callback")
 def callback():
+    request_token = request.args.get("request_token")
     if 'user_id' not in session:
-        # Use helper function that works in both local and production
+        # Headless auto-auth has no Flask session cookie; keep the callback URL stable
+        # so Playwright can read request_token before any redirect strips the query string.
+        if request_token:
+            return (
+                "<!DOCTYPE html><html><body>"
+                "<p>Zerodha login complete. You can close this window and return to the app.</p>"
+                "</body></html>",
+                200,
+                {"Content-Type": "text/html; charset=utf-8"},
+            )
         frontend_url = _get_frontend_url()
         return redirect(f"{frontend_url}/")
-
-    request_token = request.args.get("request_token")
     if not request_token:
         return "Request token not found", 400
 
@@ -4587,37 +4813,13 @@ def callback():
         frontend_url = _get_frontend_url()
         return redirect(f"{frontend_url}/welcome?credentials=missing&error=api_key_missing")
 
-    kite.api_key = user['app_key']
-
     try:
-        data = kite.generate_session(request_token, api_secret=user['app_secret'])
-        access_token = data["access_token"]
-        session['access_token'] = access_token
-        kite.set_access_token(access_token)
-        
-        # Update stored token in database
-        _update_user_access_token(session['user_id'], access_token)
-        
-        # Fetch and store user name from Zerodha profile
-        try:
-            profile = execute_with_retries("fetching Kite profile for user name", lambda: kite.profile())
-            user_name = profile.get("user_name")
-            if user_name:
-                conn = get_db_connection()
-                try:
-                    conn.execute(
-                        'UPDATE users SET user_name = ? WHERE id = ?',
-                        (user_name, session['user_id'])
-                    )
-                    conn.commit()
-                    logging.info(f"Stored user name '{user_name}' for user {session['user_id']}")
-                except Exception as e:
-                    logging.error(f"Error storing user name: {e}", exc_info=True)
-                finally:
-                    conn.close()
-        except Exception as e:
-            logging.warning(f"Could not fetch user name from Zerodha profile: {e}")
-            # Continue even if we can't fetch the name
+        _exchange_request_token_for_user(
+            session['user_id'],
+            request_token,
+            source="manual_callback",
+            update_session=True,
+        )
         
         # Use helper function that works in both local and production
         frontend_url = _get_frontend_url()
@@ -4862,6 +5064,7 @@ def api_google_callback():
                     if token_valid:
                         return redirect(f"{frontend_url}/dashboard")
                     else:
+                        _maybe_start_auto_auth(user['id'])
                         return redirect(f"{frontend_url}/welcome")
                 else:
                     # User needs to configure Zerodha credentials, redirect to welcome page
@@ -5298,6 +5501,71 @@ def api_admin_get_users():
         logging.error(f"Error fetching users: {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
+
+@app.route("/api/admin/legacy-kite-accounts", methods=['GET'])
+def api_admin_get_legacy_kite_accounts():
+    if not _require_admin():
+        return jsonify({'status': 'error', 'message': 'Admin access required'}), 403
+
+    try:
+        q = (request.args.get('q') or '').strip().lower()
+        conn = get_db_connection()
+        try:
+            rows = conn.execute(
+                '''
+                SELECT *
+                FROM legacy_kite_accounts
+                ORDER BY imported_at DESC, id DESC
+                '''
+            ).fetchall()
+            result = []
+            for row in rows:
+                rec = dict(row)
+                if q:
+                    searchable = " ".join(
+                        [
+                            str(rec.get('legacy_user_id', '') or ''),
+                            str(rec.get('name', '') or ''),
+                            str(rec.get('email', '') or ''),
+                            str(rec.get('api_key', '') or ''),
+                            str(rec.get('account_status', '') or ''),
+                        ]
+                    ).lower()
+                    if q not in searchable:
+                        continue
+                result.append(rec)
+            _audit_legacy_kite_access('list', None, None)
+            return jsonify({'status': 'success', 'accounts': result}), 200
+        finally:
+            conn.close()
+    except Exception as exc:
+        logging.error("Error fetching legacy kite accounts: %s", exc, exc_info=True)
+        return jsonify({'status': 'error', 'message': str(exc)}), 500
+
+
+@app.route("/api/admin/legacy-kite-accounts/<int:account_id>", methods=['GET'])
+def api_admin_get_legacy_kite_account(account_id: int):
+    if not _require_admin():
+        return jsonify({'status': 'error', 'message': 'Admin access required'}), 403
+
+    try:
+        conn = get_db_connection()
+        try:
+            row = conn.execute(
+                'SELECT * FROM legacy_kite_accounts WHERE id = ?',
+                (account_id,),
+            ).fetchone()
+            if not row:
+                return jsonify({'status': 'error', 'message': 'Legacy account not found'}), 404
+            rec = dict(row)
+            _audit_legacy_kite_access('detail', rec.get('id'), rec.get('legacy_user_id'))
+            return jsonify({'status': 'success', 'account': rec}), 200
+        finally:
+            conn.close()
+    except Exception as exc:
+        logging.error("Error fetching legacy kite account detail: %s", exc, exc_info=True)
+        return jsonify({'status': 'error', 'message': str(exc)}), 500
+
 @app.route("/api/admin/users/<int:user_id>", methods=['PUT', 'DELETE', 'OPTIONS'])
 def api_admin_manage_user(user_id):
     """Update or delete a user (admin only)"""
@@ -5416,6 +5684,57 @@ def api_admin_manage_user(user_id):
         except Exception as e:
             logging.error(f"Error updating user: {e}")
             return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route("/api/admin/users/<int:user_id>/disable-zerodha-token", methods=['POST'])
+def api_admin_disable_zerodha_token(user_id: int):
+    """Disable only Zerodha token/session for a user (admin only)."""
+    if not _require_admin():
+        return jsonify({'status': 'error', 'message': 'Admin access required'}), 403
+
+    try:
+        conn = get_db_connection()
+        try:
+            user = conn.execute(
+                'SELECT id, app_key, app_secret, zerodha_access_token FROM users WHERE id = ?',
+                (user_id,),
+            ).fetchone()
+            if not user:
+                return jsonify({'status': 'error', 'message': 'User not found'}), 404
+
+            had_token = bool(user['zerodha_access_token'])
+            conn.execute(
+                '''
+                UPDATE users
+                SET zerodha_access_token = NULL,
+                    zerodha_token_created_at = NULL
+                WHERE id = ?
+                ''',
+                (user_id,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # If admin is disabling their own token, clear current session token immediately.
+        if session.get('user_id') == user_id:
+            session.pop('access_token', None)
+
+        logging.info(
+            "Admin %s disabled Zerodha token for user %s (had_token=%s)",
+            session.get('user_id'),
+            user_id,
+            had_token,
+        )
+        return jsonify({
+            'status': 'success',
+            'message': 'Zerodha token disabled. User must re-authenticate with Zerodha.',
+            'token_disabled': True,
+            'had_token': had_token,
+        }), 200
+    except Exception as exc:
+        logging.error("Error disabling Zerodha token for user %s: %s", user_id, exc, exc_info=True)
+        return jsonify({'status': 'error', 'message': str(exc)}), 500
 
 @app.route("/api/admin/strategies/pending", methods=['GET'])
 def api_admin_get_pending_strategies():
@@ -5571,6 +5890,7 @@ def api_user_data():
         app_key = user.get('app_key')
         stored_token = user.get('zerodha_access_token')
         session_token = session.get('access_token')
+        auto_auth_state = _get_auto_auth_orchestrator().get_state(user_id)
         stored_user_name = user.get('user_name')  # Get stored user name from database
         user_email = user.get('email', '')  # Get email as fallback
 
@@ -5586,7 +5906,8 @@ def api_user_data():
             'access_token_present': False,
             'token_valid': False,
             'zerodha_credentials_present': bool(app_key),
-            'kite_client_id': None  # Will be populated if token is valid
+            'kite_client_id': None,  # Will be populated if token is valid
+            'auto_auth': auto_auth_state,
         }
 
         tokens_to_try: List[str] = []
@@ -5612,31 +5933,7 @@ def api_user_data():
                     # Get Zerodha Kite Client ID (user_id from profile, e.g., "RD2033")
                     kite_client_id = profile.get("user_id") or profile.get("client_id") or None
                     
-                    # Store user name in database if we got it from Zerodha
-                    if user_name and user_name != "Guest":
-                        try:
-                            conn = get_db_connection()
-                            try:
-                                # Check if user_name is already stored
-                                existing = conn.execute(
-                                    'SELECT user_name FROM users WHERE id = ?',
-                                    (user_id,)
-                                ).fetchone()
-                                
-                                # Only update if not already stored or different
-                                if not existing or not existing['user_name'] or existing['user_name'] != user_name:
-                                    conn.execute(
-                                        'UPDATE users SET user_name = ? WHERE id = ?',
-                                        (user_name, user_id)
-                                    )
-                                    conn.commit()
-                                    logging.info(f"Stored user name '{user_name}' for user {user_id} from /api/user-data")
-                            except Exception as e:
-                                logging.warning(f"Could not store user name in database: {e}")
-                            finally:
-                                conn.close()
-                        except Exception as e:
-                            logging.warning(f"Error storing user name: {e}")
+                    _store_user_name(user_id, user_name, "api_user_data")
                     
                     default_response.update({
                         'user_name': user_name,
@@ -5681,8 +5978,14 @@ def api_user_data():
 
         if stored_token:
             _update_user_access_token(user_id, None)
-
-        default_response['message'] = 'Zerodha session expired'
+        auto_auth_result = _maybe_start_auto_auth(user_id)
+        default_response['auto_auth'] = _get_auto_auth_orchestrator().get_state(user_id)
+        if auto_auth_result == "started":
+            default_response['message'] = 'Zerodha session expired. Automated authentication started.'
+        elif auto_auth_result == "already_running":
+            default_response['message'] = 'Zerodha session expired. Automated authentication is in progress.'
+        else:
+            default_response['message'] = 'Zerodha session expired'
         return jsonify(default_response)
     except Exception as e:
         logging.error(f"Error fetching user data: {e}")
@@ -5696,6 +5999,50 @@ def api_user_data():
             'token_valid': False,
             'message': 'Unexpected error while retrieving user data'
         }), 500
+
+
+@app.route("/api/zerodha/auto-auth-status", methods=['GET'])
+def api_zerodha_auto_auth_status():
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+    user_id = session['user_id']
+    state = _get_auto_auth_orchestrator().get_state(user_id)
+    configured = _resolve_auto_auth_job(user_id) is not None
+    return jsonify({'status': 'success', 'configured': configured, 'auto_auth': state})
+
+
+@app.route("/api/zerodha/auto-auth/start", methods=['POST'])
+def api_zerodha_auto_auth_start():
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+    user_id = session['user_id']
+    result = _maybe_start_auto_auth(user_id)
+    state = _get_auto_auth_orchestrator().get_state(user_id)
+    configured = _resolve_auto_auth_job(user_id) is not None
+    if result == "started":
+        return jsonify({
+            'status': 'success',
+            'message': 'Automated Zerodha authentication started.',
+            'configured': configured,
+            'auto_auth': state,
+        })
+    if result == "already_running":
+        return jsonify({
+            'status': 'success',
+            'message': 'Automated Zerodha authentication is already running.',
+            'configured': configured,
+            'auto_auth': state,
+        })
+    return jsonify({
+        'status': 'error',
+        'message': (
+            'Automated authentication is not configured. '
+            'Set KITE_AUTOMATION_USER_<id>_USER_ID, KITE_AUTOMATION_USER_<id>_PASSWORD, '
+            'and KITE_AUTOMATION_USER_<id>_TOTP_SECRET.'
+        ),
+        'configured': configured,
+        'auto_auth': state,
+    }), 400
 
 def _insert_contact_message(name: str, email: str, mobile: str, message: str, user_id: Optional[int] = None) -> None:
     conn = get_db_connection()
@@ -5776,12 +6123,31 @@ def api_user_credentials():
     if request.method == 'GET':
         try:
             row = conn.execute(
-                'SELECT app_key, app_secret FROM users WHERE id = ?',
+                'SELECT app_key, app_secret, kite_user_id, kite_password, kite_totp_secret FROM users WHERE id = ?',
                 (user_id,)
             ).fetchone()
             conn.close()
             has_credentials = bool(row and row['app_key'] and row['app_secret'])
-            return jsonify({'status': 'success', 'has_credentials': has_credentials})
+            has_auto_auth_details = bool(
+                row and row['kite_user_id'] and row['kite_password'] and row['kite_totp_secret']
+            )
+            missing_fields: List[str] = []
+            if not row or not row['app_key']:
+                missing_fields.append('app_key')
+            if not row or not row['app_secret']:
+                missing_fields.append('app_secret')
+            if not row or not row['kite_user_id']:
+                missing_fields.append('kite_user_id')
+            if not row or not row['kite_password']:
+                missing_fields.append('kite_password')
+            if not row or not row['kite_totp_secret']:
+                missing_fields.append('kite_totp_secret')
+            return jsonify({
+                'status': 'success',
+                'has_credentials': has_credentials,
+                'auto_auth_details_present': has_auto_auth_details,
+                'missing_fields': missing_fields,
+            })
         except Exception as exc:
             conn.close()
             logging.error("Failed to fetch user credentials state: %s", exc, exc_info=True)
@@ -5791,22 +6157,61 @@ def api_user_credentials():
         payload = request.get_json(silent=True) or {}
         app_key = (payload.get('app_key') or '').strip()
         app_secret = (payload.get('app_secret') or '').strip()
-        if not app_key or not app_secret:
+        kite_user_id = (payload.get('kite_user_id') or '').strip()
+        kite_password = (payload.get('kite_password') or '').strip()
+        kite_totp_secret = (payload.get('kite_totp_secret') or '').strip()
+
+        row = conn.execute(
+            'SELECT app_key, app_secret, kite_user_id, kite_password, kite_totp_secret FROM users WHERE id = ?',
+            (user_id,),
+        ).fetchone()
+        existing = dict(row) if row else {}
+        final_app_key = app_key or (existing.get('app_key') or '')
+        final_app_secret = app_secret or (existing.get('app_secret') or '')
+        final_kite_user_id = kite_user_id or (existing.get('kite_user_id') or '')
+        final_kite_password = kite_password or (existing.get('kite_password') or '')
+        final_kite_totp_secret = kite_totp_secret or (existing.get('kite_totp_secret') or '')
+
+        missing_fields: List[str] = []
+        if not final_app_key:
+            missing_fields.append('app_key')
+        if not final_app_secret:
+            missing_fields.append('app_secret')
+        if not final_kite_user_id:
+            missing_fields.append('kite_user_id')
+        if not final_kite_password:
+            missing_fields.append('kite_password')
+        if not final_kite_totp_secret:
+            missing_fields.append('kite_totp_secret')
+        if missing_fields:
             conn.close()
-            if not app_key and not app_secret:
-                return jsonify({'status': 'error', 'message': 'Please provide both Zerodha API Key and API Secret to enable live trading features.'}), 400
-            elif not app_key:
-                return jsonify({'status': 'error', 'message': 'Please provide your Zerodha API Key to enable live trading features.'}), 400
-            else:
-                return jsonify({'status': 'error', 'message': 'Please provide your Zerodha API Secret to enable live trading features.'}), 400
+            return jsonify({
+                'status': 'error',
+                'message': 'Please provide all required API and auto-auth details.',
+                'missing_fields': missing_fields,
+            }), 400
 
         conn.execute(
-            'UPDATE users SET app_key = ?, app_secret = ? WHERE id = ?',
-            (app_key, app_secret, user_id)
+            'UPDATE users SET app_key = ?, app_secret = ?, kite_user_id = ?, kite_password = ?, kite_totp_secret = ?, auto_auth_configured_at = ? WHERE id = ?',
+            (
+                final_app_key,
+                final_app_secret,
+                final_kite_user_id,
+                final_kite_password,
+                final_kite_totp_secret,
+                datetime.datetime.now().isoformat(),
+                user_id,
+            )
         )
         conn.commit()
         conn.close()
-        return jsonify({'status': 'success', 'message': 'Zerodha credentials saved successfully.'})
+        return jsonify({
+            'status': 'success',
+            'message': 'Zerodha and auto-auth details saved successfully.',
+            'has_credentials': True,
+            'auto_auth_details_present': True,
+            'missing_fields': [],
+        })
     except sqlite3.IntegrityError as db_err:
         conn.rollback()
         conn.close()

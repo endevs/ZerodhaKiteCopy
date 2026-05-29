@@ -17,6 +17,7 @@
     "@types/recharts": "^1.8.29",
     "apexcharts": "^4.7.0",
     "bootstrap": "^5.3.8",
+    "bootstrap-icons": "^1.13.1",
     "http-proxy-middleware": "^3.0.5",
     "lightweight-charts": "^4.2.0",
     "plotly.js-finance-dist-min": "^2.35.3",

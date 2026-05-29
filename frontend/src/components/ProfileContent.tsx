@@ -180,6 +180,13 @@ const ProfileContent: React.FC<ProfileContentProps> = ({ onSubscribeClick }) => 
   const [subscription, setSubscription] = useState<SubscriptionInfo | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
+  const [appKey, setAppKey] = useState('');
+  const [appSecret, setAppSecret] = useState('');
+  const [kiteUserId, setKiteUserId] = useState('');
+  const [kitePassword, setKitePassword] = useState('');
+  const [kiteTotpSecret, setKiteTotpSecret] = useState('');
+  const [credentialMessage, setCredentialMessage] = useState<{ type: 'success' | 'danger' | 'warning'; text: string } | null>(null);
+  const [savingCredentials, setSavingCredentials] = useState(false);
 
   useEffect(() => {
     fetchProfile();
@@ -270,6 +277,23 @@ const ProfileContent: React.FC<ProfileContentProps> = ({ onSubscribeClick }) => 
         const errorMsg = userData?.message || userDetails?.message || 'Failed to load profile';
         setError(errorMsg);
       }
+
+      try {
+        const credentialsResponse = await fetch(apiUrl('/api/user-credentials'), {
+          credentials: 'include'
+        });
+        if (credentialsResponse.ok) {
+          const credentialsData = await parseJsonResponse(credentialsResponse);
+          if (Array.isArray(credentialsData?.missing_fields) && credentialsData.missing_fields.length > 0) {
+            setCredentialMessage({
+              type: 'warning',
+              text: `Missing fields: ${credentialsData.missing_fields.join(', ')}`
+            });
+          }
+        }
+      } catch (credentialsErr) {
+        console.error('Error fetching credential flags:', credentialsErr);
+      }
     } catch (err) {
       console.error('Error fetching profile:', err);
       setError('Failed to load profile. Please try again.');
@@ -284,6 +308,46 @@ const ProfileContent: React.FC<ProfileContentProps> = ({ onSubscribeClick }) => 
       currency: 'INR',
       minimumFractionDigits: 2
     }).format(amount);
+  };
+
+  const handleSaveCredentials = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setCredentialMessage(null);
+    setSavingCredentials(true);
+    try {
+      const response = await fetch(apiUrl('/api/user-credentials'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          app_key: appKey.trim(),
+          app_secret: appSecret.trim(),
+          kite_user_id: kiteUserId.trim(),
+          kite_password: kitePassword.trim(),
+          kite_totp_secret: kiteTotpSecret.trim(),
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data?.message || 'Failed to update details.');
+      }
+      setCredentialMessage({
+        type: 'success',
+        text: data?.message || 'Details updated successfully.',
+      });
+      setAppKey('');
+      setAppSecret('');
+      setKiteUserId('');
+      setKitePassword('');
+      setKiteTotpSecret('');
+    } catch (saveErr: any) {
+      setCredentialMessage({
+        type: 'danger',
+        text: saveErr?.message || 'Failed to update details.',
+      });
+    } finally {
+      setSavingCredentials(false);
+    }
   };
 
   if (loading) {
@@ -600,9 +664,87 @@ const ProfileContent: React.FC<ProfileContentProps> = ({ onSubscribeClick }) => 
                 </div>
               )}
 
+              <hr />
+              <div className="mb-4">
+                <h5 className="mb-3">
+                  <i className="bi bi-shield-lock me-2"></i>
+                  Update Zerodha & Auto Authentication Details
+                </h5>
+                <p className="text-muted small mb-3">
+                  Update your API and auto-authentication details here anytime. Leave fields blank to keep existing saved values.
+                </p>
+                {credentialMessage && (
+                  <div className={`alert alert-${credentialMessage.type} py-2`} role="alert">
+                    {credentialMessage.text}
+                  </div>
+                )}
+                <form onSubmit={handleSaveCredentials} className="row g-3">
+                  <div className="col-md-6">
+                    <label htmlFor="profile_app_key" className="form-label">Zerodha API Key</label>
+                    <input
+                      id="profile_app_key"
+                      type="text"
+                      className="form-control"
+                      value={appKey}
+                      onChange={(e) => setAppKey(e.target.value)}
+                      placeholder="Update API key"
+                    />
+                  </div>
+                  <div className="col-md-6">
+                    <label htmlFor="profile_app_secret" className="form-label">Zerodha API Secret</label>
+                    <input
+                      id="profile_app_secret"
+                      type="password"
+                      className="form-control"
+                      value={appSecret}
+                      onChange={(e) => setAppSecret(e.target.value)}
+                      placeholder="Update API secret"
+                    />
+                  </div>
+                  <div className="col-md-4">
+                    <label htmlFor="profile_kite_user_id" className="form-label">Kite User ID</label>
+                    <input
+                      id="profile_kite_user_id"
+                      type="text"
+                      className="form-control"
+                      value={kiteUserId}
+                      onChange={(e) => setKiteUserId(e.target.value)}
+                      placeholder="Update Kite user ID"
+                    />
+                  </div>
+                  <div className="col-md-4">
+                    <label htmlFor="profile_kite_password" className="form-label">Kite Password</label>
+                    <input
+                      id="profile_kite_password"
+                      type="password"
+                      className="form-control"
+                      value={kitePassword}
+                      onChange={(e) => setKitePassword(e.target.value)}
+                      placeholder="Update Kite password"
+                    />
+                  </div>
+                  <div className="col-md-4">
+                    <label htmlFor="profile_kite_totp" className="form-label">Kite TOTP Secret</label>
+                    <input
+                      id="profile_kite_totp"
+                      type="password"
+                      className="form-control"
+                      value={kiteTotpSecret}
+                      onChange={(e) => setKiteTotpSecret(e.target.value)}
+                      placeholder="Update TOTP secret"
+                    />
+                  </div>
+                  <div className="col-12">
+                    <button type="submit" className="btn btn-primary" disabled={savingCredentials}>
+                      {savingCredentials ? 'Saving...' : 'Save Details'}
+                    </button>
+                  </div>
+                </form>
+              </div>
+
               <div className="alert alert-info mt-4 mb-0">
                 <i className="bi bi-info-circle me-2"></i>
-                <small>All fields are read-only. Contact support to update your information.</small>
+                <small>Profile identity fields are read-only. Zerodha and auto-auth details can be updated above.</small>
               </div>
             </div>
           </div>

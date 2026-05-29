@@ -1,11 +1,12 @@
-# Gunicorn + eventlet for Flask-SocketIO (single worker).
+# Gunicorn + gthread for Flask-SocketIO compatibility.
 # Run: gunicorn -c gunicorn_conf.py app:app
 
-worker_class = "eventlet"
+worker_class = "gthread"
 workers = 1
+threads = 4
 bind = "0.0.0.0:8003"
-timeout = 120
-graceful_timeout = 120
+timeout = 180
+graceful_timeout = 180
 accesslog = "-"
 errorlog = "-"
 

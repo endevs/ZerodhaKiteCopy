@@ -15,5 +15,4 @@ models/
 .mypy_cache
 .ruff_cache
 *.md
-tests
 timesfm_model/
