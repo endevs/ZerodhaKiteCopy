@@ -1842,6 +1842,24 @@ def _exchange_request_token_for_user(
     access_token = session_data["access_token"]
     kite_client.set_access_token(access_token)
     _update_user_access_token(user_id, access_token)
+    # #region agent log
+    try:
+        from debug_agent_log import agent_log
+        agent_log(
+            "app.py:_exchange_request_token_for_user",
+            "token exchanged and stored",
+            {
+                "user_id": user_id,
+                "source": source,
+                "update_session": update_session,
+                "has_request_context": has_request_context(),
+            },
+            "H2",
+            "post-fix",
+        )
+    except Exception:
+        pass
+    # #endregion
 
     if update_session and has_request_context():
         try:
@@ -1863,6 +1881,15 @@ def _exchange_request_token_for_user(
         "profile": profile,
         "margins": margins,
     }
+
+
+def _mask_app_key(app_key: Optional[str]) -> str:
+    if not app_key:
+        return ""
+    key = str(app_key).strip()
+    if len(key) <= 8:
+        return "****"
+    return f"{key[:4]}****{key[-4:]}"
 
 
 def _get_auto_auth_env_value(user_id: int, field: str) -> Optional[str]:
@@ -1955,8 +1982,93 @@ def _get_auto_auth_orchestrator() -> ZerodhaPlaywrightAuthOrchestrator:
             ),
             validate_login_state=lambda _uid: True,
             max_attempts=2,
+            on_finished=_on_auto_auth_finished,
         )
     return _auto_auth_orchestrator
+
+
+def _on_auto_auth_finished(user_id: int, status: str, reason: Optional[str]) -> None:
+    from kite_auth.post_schedule_pipeline import PostScheduleContext, run_post_schedule_pipeline
+    from kite_auth.schedule_runs import finalize_latest_pending_run
+    from kite_auth.schedule_utils import now_ist, slot_iso
+
+    slot = finalize_latest_pending_run(user_id, status=status, reason=reason)
+    if status not in {"succeeded", "failed", "needs_manual"}:
+        return
+    if not slot:
+        slot = slot_iso(now_ist())
+    outcome_map = {
+        "succeeded": "succeeded",
+        "failed": "failed",
+        "needs_manual": "needs_manual",
+    }
+    run_post_schedule_pipeline(
+        PostScheduleContext(
+            user_id=user_id,
+            slot_iso=slot,
+            auth_outcome=outcome_map[status],
+        )
+    )
+
+
+def _user_has_valid_kite_token(user_id: int) -> bool:
+    user_row = _get_user_record(user_id)
+    if not user_row:
+        return False
+    user = dict(user_row)
+    token = user.get("zerodha_access_token")
+    app_key = user.get("app_key")
+    if not token or not app_key:
+        return False
+    try:
+        _validate_kite_token(app_key, token)
+        return True
+    except Exception:
+        return False
+
+
+def _process_scheduled_auto_auth_slot() -> None:
+    from auto_auth_scheduler import (
+        list_auto_auth_configured_user_ids,
+        mark_scheduled_run_started,
+        record_pending_run,
+        record_skipped_run,
+    )
+    from kite_auth.post_schedule_pipeline import PostScheduleContext, run_post_schedule_pipeline
+    from kite_auth.schedule_runs import already_ran_for_slot
+    from kite_auth.schedule_utils import now_ist, slot_iso
+
+    slot = slot_iso(now_ist())
+    for user_id in list_auto_auth_configured_user_ids():
+        if _resolve_auto_auth_job(user_id) is None:
+            continue
+        if already_ran_for_slot(user_id, slot):
+            continue
+        if _user_has_valid_kite_token(user_id):
+            record_skipped_run(user_id, slot, "token_valid")
+            run_post_schedule_pipeline(
+                PostScheduleContext(
+                    user_id=user_id,
+                    slot_iso=slot,
+                    auth_outcome="skipped_token_valid",
+                )
+            )
+            continue
+        orch_state = _get_auto_auth_orchestrator().get_state(user_id)
+        if orch_state.get("status") == "running":
+            record_skipped_run(user_id, slot, "already_running")
+            continue
+        record_pending_run(user_id, slot)
+        result = _maybe_start_auto_auth(user_id)
+        if result in {"started", "already_running"}:
+            mark_scheduled_run_started(user_id, slot)
+
+
+def _register_auto_auth_scheduler() -> None:
+    from auto_auth_scheduler import register_process_hook, start_scheduler
+
+    register_process_hook(_process_scheduled_auto_auth_slot)
+    start_scheduler()
 
 
 def _maybe_start_auto_auth(user_id: int) -> str:
@@ -2044,9 +2156,6 @@ def _with_valid_kite_client(
                     except Exception:
                         pass
                 session_token = None
-            if token == stored_token:
-                _update_user_access_token(user_id, None)
-                stored_token = None
             continue
         except Exception as exc:
             message = str(exc)
@@ -2060,9 +2169,6 @@ def _with_valid_kite_client(
                         except Exception:
                             pass
                     session_token = None
-                if token == stored_token:
-                    _update_user_access_token(user_id, None)
-                    stored_token = None
                 continue
             raise
 
@@ -4876,12 +4982,18 @@ def dashboard():
 
 @app.route("/logout")
 def logout():
+    user_id = session.get('user_id')
+    if user_id:
+        _get_auto_auth_orchestrator().reset_terminal_state(user_id)
     session.pop('access_token', None)
     session.pop('user_id', None)
     return redirect("/")
 
 @app.route("/api/logout", methods=['POST'])
 def api_logout():
+    user_id = session.get('user_id')
+    if user_id:
+        _get_auto_auth_orchestrator().reset_terminal_state(user_id)
     session.pop('access_token', None)
     session.pop('user_id', None)
     return jsonify({'status': 'success', 'message': 'Logged out successfully'})
@@ -5062,9 +5174,10 @@ def api_google_callback():
                         except Exception:
                             token_valid = False
                     if token_valid:
+                        session['access_token'] = stored_token
                         return redirect(f"{frontend_url}/dashboard")
                     else:
-                        _maybe_start_auto_auth(user['id'])
+                        _get_auto_auth_orchestrator().reset_terminal_state(user['id'])
                         return redirect(f"{frontend_url}/welcome")
                 else:
                     # User needs to configure Zerodha credentials, redirect to welcome page
@@ -5423,6 +5536,58 @@ def api_admin_update_plan_prices():
     except Exception as e:
         logging.error(f"Error updating plan prices: {e}", exc_info=True)
         return jsonify({'status': 'error', 'message': 'Failed to update plan prices'}), 500
+
+
+@app.route("/api/admin/auto-auth-schedule", methods=['GET', 'PUT'])
+def api_admin_auto_auth_schedule():
+    """Get or update global auto-auth schedule (admin only)."""
+    if not _require_admin():
+        return jsonify({'status': 'error', 'message': 'Admin access required'}), 403
+
+    from kite_auth.schedule_settings import get_schedule_settings, update_schedule_settings
+
+    if request.method == 'GET':
+        try:
+            settings = get_schedule_settings(force_refresh=True)
+            payload = settings.to_dict()
+            updated_by_email = None
+            if settings.updated_by:
+                user_row = _get_user_record(settings.updated_by)
+                if user_row:
+                    updated_by_email = dict(user_row).get('email')
+            payload['updated_by_email'] = updated_by_email
+            return jsonify({'status': 'success', 'schedule': payload})
+        except Exception as exc:
+            logging.error("Failed to fetch auto-auth schedule settings: %s", exc, exc_info=True)
+            return jsonify({'status': 'error', 'message': 'Failed to fetch schedule settings'}), 500
+
+    try:
+        data = request.get_json(silent=True) or {}
+        hour = int(data.get('hour'))
+        minute = int(data.get('minute'))
+        weekdays_raw = data.get('weekdays')
+        if not isinstance(weekdays_raw, list):
+            return jsonify({'status': 'error', 'message': 'weekdays must be a list of integers'}), 400
+        weekdays = [int(d) for d in weekdays_raw]
+        settings = update_schedule_settings(
+            hour=hour,
+            minute=minute,
+            weekdays=weekdays,
+            updated_by=session.get('user_id'),
+        )
+        payload = settings.to_dict()
+        payload['updated_by_email'] = session.get('email')
+        return jsonify({
+            'status': 'success',
+            'message': 'Auto-auth schedule updated successfully.',
+            'schedule': payload,
+        })
+    except ValueError as exc:
+        return jsonify({'status': 'error', 'message': str(exc)}), 400
+    except Exception as exc:
+        logging.error("Failed to update auto-auth schedule settings: %s", exc, exc_info=True)
+        return jsonify({'status': 'error', 'message': 'Failed to update schedule settings'}), 500
+
 
 @app.route("/api/plan-prices", methods=['GET'])
 def api_get_plan_prices():
@@ -5934,6 +6099,7 @@ def api_user_data():
                     kite_client_id = profile.get("user_id") or profile.get("client_id") or None
                     
                     _store_user_name(user_id, user_name, "api_user_data")
+                    _get_auto_auth_orchestrator().reset_terminal_state(user_id)
                     
                     default_response.update({
                         'user_name': user_name,
@@ -5943,15 +6109,30 @@ def api_user_data():
                         'kite_client_id': kite_client_id,
                         'message': 'Zerodha session active'
                     })
+                    # #region agent log
+                    try:
+                        from debug_agent_log import agent_log
+                        agent_log(
+                            "app.py:api_user_data",
+                            "user-data valid token",
+                            {
+                                "branch": "token_valid",
+                                "session_token_present": bool(session_token),
+                                "stored_token_present": bool(stored_token),
+                                "auto_auth_status": auto_auth_state.get("status"),
+                            },
+                            "H2,H3",
+                            "post-fix",
+                        )
+                    except Exception:
+                        pass
+                    # #endregion
                     return jsonify(default_response)
                 except kite_exceptions.TokenException as exc:
                     logging.warning("Zerodha token invalid for user %s: %s", user_id, exc)
                     if token == session_token:
                         session.pop('access_token', None)
                         session_token = None
-                    if token == stored_token:
-                        _update_user_access_token(user_id, None)
-                        stored_token = None
                     continue
                 except Exception as exc:
                     logging.error("Error validating Zerodha token for user %s: %s", user_id, exc)
@@ -5959,9 +6140,6 @@ def api_user_data():
                         if token == session_token:
                             session.pop('access_token', None)
                             session_token = None
-                        if token == stored_token:
-                            _update_user_access_token(user_id, None)
-                            stored_token = None
                         continue
                     if _is_transient_kite_network_error(exc):
                         default_response.update({
@@ -5976,16 +6154,30 @@ def api_user_data():
             default_response['message'] = 'Zerodha credentials not configured'
             return jsonify(default_response)
 
-        if stored_token:
-            _update_user_access_token(user_id, None)
-        auto_auth_result = _maybe_start_auto_auth(user_id)
-        default_response['auto_auth'] = _get_auto_auth_orchestrator().get_state(user_id)
-        if auto_auth_result == "started":
-            default_response['message'] = 'Zerodha session expired. Automated authentication started.'
-        elif auto_auth_result == "already_running":
-            default_response['message'] = 'Zerodha session expired. Automated authentication is in progress.'
-        else:
-            default_response['message'] = 'Zerodha session expired'
+        orchestrator = _get_auto_auth_orchestrator()
+        if orchestrator.get_state(user_id).get("status") in {"succeeded", "failed", "needs_manual"}:
+            orchestrator.reset_terminal_state(user_id)
+        default_response['auto_auth'] = orchestrator.get_state(user_id)
+        default_response['message'] = (
+            'Zerodha session expired. Click Auto Authentication on Welcome to sign in again.'
+        )
+        # #region agent log
+        try:
+            from debug_agent_log import agent_log
+            agent_log(
+                "app.py:api_user_data",
+                "user-data no valid token",
+                {
+                    "branch": "token_invalid",
+                    "session_token_present": bool(session_token),
+                    "stored_token_present": bool(stored_token),
+                    "auto_auth_status": default_response["auto_auth"].get("status"),
+                },
+                "H2,H3",
+            )
+        except Exception:
+            pass
+        # #endregion
         return jsonify(default_response)
     except Exception as e:
         logging.error(f"Error fetching user data: {e}")
@@ -6009,6 +6201,49 @@ def api_zerodha_auto_auth_status():
     state = _get_auto_auth_orchestrator().get_state(user_id)
     configured = _resolve_auto_auth_job(user_id) is not None
     return jsonify({'status': 'success', 'configured': configured, 'auto_auth': state})
+
+
+@app.route("/api/zerodha/sync-session", methods=['POST'])
+def api_zerodha_sync_session():
+    """Copy a valid stored Zerodha token into the Flask session (e.g. after background auto-auth)."""
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+    user_id = session['user_id']
+    user_row = _get_user_record(user_id)
+    if not user_row:
+        return jsonify({'status': 'error', 'message': 'User record not found'}), 400
+    user = dict(user_row)
+    app_key = user.get('app_key')
+    stored_token = user.get('zerodha_access_token')
+    if not app_key or not stored_token:
+        return jsonify({
+            'status': 'success',
+            'token_valid': False,
+            'message': 'No Zerodha token stored yet.',
+        })
+    try:
+        _validate_kite_token(app_key, stored_token)
+        session['access_token'] = stored_token
+        # #region agent log
+        try:
+            from debug_agent_log import agent_log
+            agent_log(
+                "app.py:api_zerodha_sync_session",
+                "session hydrated from stored token",
+                {"user_id": user_id, "stored_token_present": True},
+                "H2",
+                "post-fix",
+            )
+        except Exception:
+            pass
+        # #endregion
+        return jsonify({'status': 'success', 'token_valid': True})
+    except kite_exceptions.TokenException as exc:
+        logging.warning("sync-session: invalid stored token for user %s: %s", user_id, exc)
+        return jsonify({'status': 'success', 'token_valid': False})
+    except Exception as exc:
+        logging.error("sync-session failed for user %s: %s", user_id, exc)
+        return jsonify({'status': 'error', 'message': 'Unable to sync Zerodha session'}), 500
 
 
 @app.route("/api/zerodha/auto-auth/start", methods=['POST'])
@@ -6043,6 +6278,28 @@ def api_zerodha_auto_auth_start():
         'configured': configured,
         'auto_auth': state,
     }), 400
+
+
+@app.route("/api/zerodha/auto-auth/schedule-activity", methods=['GET'])
+def api_zerodha_auto_auth_schedule_activity():
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+    user_id = session['user_id']
+    try:
+        from kite_auth.schedule_runs import build_upcoming_runs, get_past_runs
+        from kite_auth.schedule_utils import next_weekday_slots, schedule_info
+
+        past_runs = get_past_runs(user_id, limit=5)
+        upcoming_runs = build_upcoming_runs(user_id, next_weekday_slots(5))
+        return jsonify({
+            'status': 'success',
+            'schedule': schedule_info(),
+            'past_runs': past_runs,
+            'upcoming_runs': upcoming_runs,
+        })
+    except Exception as exc:
+        logging.error("Failed to fetch auto-auth schedule activity: %s", exc, exc_info=True)
+        return jsonify({'status': 'error', 'message': 'Unable to fetch schedule activity'}), 500
 
 def _insert_contact_message(name: str, email: str, mobile: str, message: str, user_id: Optional[int] = None) -> None:
     conn = get_db_connection()
@@ -6123,7 +6380,7 @@ def api_user_credentials():
     if request.method == 'GET':
         try:
             row = conn.execute(
-                'SELECT app_key, app_secret, kite_user_id, kite_password, kite_totp_secret FROM users WHERE id = ?',
+                'SELECT app_key, app_secret, kite_user_id, kite_password, kite_totp_secret, auto_auth_configured_at FROM users WHERE id = ?',
                 (user_id,)
             ).fetchone()
             conn.close()
@@ -6147,6 +6404,12 @@ def api_user_credentials():
                 'has_credentials': has_credentials,
                 'auto_auth_details_present': has_auto_auth_details,
                 'missing_fields': missing_fields,
+                'kite_user_id': (row['kite_user_id'] or '').strip() if row else None,
+                'app_key_masked': _mask_app_key(row['app_key'] if row else None),
+                'has_app_secret': bool(row and row['app_secret']),
+                'has_kite_password': bool(row and row['kite_password']),
+                'has_kite_totp_secret': bool(row and row['kite_totp_secret']),
+                'auto_auth_configured_at': row['auto_auth_configured_at'] if row else None,
             })
         except Exception as exc:
             conn.close()
@@ -8743,6 +9006,13 @@ def api_start_ticker():
 def api_market_snapshot():
     """Return current snapshot prices for NIFTY and BANKNIFTY to avoid UI 'Loading...' before websocket ticks."""
     if 'user_id' not in session:
+        # #region agent log
+        try:
+            from debug_agent_log import agent_log
+            agent_log("app.py:api_market_snapshot", "market_snapshot 401", {"branch": "no_user_id"}, "H4")
+        except Exception:
+            pass
+        # #endregion
         return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
 
     try:
@@ -8761,6 +9031,23 @@ def api_market_snapshot():
                 )
             )
         except kite_exceptions.TokenException:
+            # #region agent log
+            try:
+                from debug_agent_log import agent_log
+                user_row = _get_user_record(session['user_id'])
+                agent_log(
+                    "app.py:api_market_snapshot",
+                    "market_snapshot 401",
+                    {
+                        "branch": "token_exception",
+                        "session_token_present": bool(session.get("access_token")),
+                        "stored_token_present": bool(user_row and dict(user_row).get("zerodha_access_token")),
+                    },
+                    "H4",
+                )
+            except Exception:
+                pass
+            # #endregion
             return jsonify({'status': 'error', 'message': 'Zerodha session expired', 'authExpired': True}), 401
         except RuntimeError as err:
             return jsonify({'status': 'error', 'message': str(err)}), 400
@@ -12112,6 +12399,11 @@ if __name__ == "__main__":
             logging.info("Options data collection scheduler initialized")
         except Exception as e:
             logging.warning(f"Could not start options scheduler: {e}")
+        try:
+            _register_auto_auth_scheduler()
+            logging.info("Auto-auth schedule scheduler initialized")
+        except Exception as e:
+            logging.warning(f"Could not start auto-auth scheduler: {e}")
         
         # Use socketio.run() which properly handles Socket.IO paths
         # This is critical - don't use app.run() when using Socket.IO

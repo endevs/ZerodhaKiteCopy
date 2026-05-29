@@ -43,10 +43,12 @@ class ZerodhaPlaywrightAuthOrchestrator:
         exchange_request_token: Callable[[int, str, str], Dict[str, object]],
         validate_login_state: Callable[[int], bool],
         max_attempts: int = 2,
+        on_finished: Optional[Callable[[int, str, Optional[str]], None]] = None,
     ) -> None:
         self._exchange_request_token = exchange_request_token
         self._validate_login_state = validate_login_state
         self._max_attempts = max_attempts
+        self._on_finished = on_finished
         self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="kite-auth")
         self._attempt_timeout_seconds = int(os.getenv("KITE_AUTOMATION_ATTEMPT_TIMEOUT_SECONDS", "120"))
         self._state: Dict[int, AuthState] = {}
@@ -82,6 +84,21 @@ class ZerodhaPlaywrightAuthOrchestrator:
         self._executor.submit(self._run, payload)
         return True
 
+    def reset_terminal_state(self, app_user_id: int) -> None:
+        """Clear succeeded/failed state so stale auto-auth status cannot re-trigger redirects."""
+        with self._lock:
+            current = self._state.get(app_user_id)
+            if not current or current.get("status") not in {"succeeded", "failed", "needs_manual"}:
+                return
+            self._state[app_user_id] = {
+                "status": "idle",
+                "reason": None,
+                "attempts": 0,
+                "started_at": None,
+                "updated_at": _utc_now(),
+                "finished_at": None,
+            }
+
     def _set_state(
         self,
         app_user_id: int,
@@ -111,6 +128,11 @@ class ZerodhaPlaywrightAuthOrchestrator:
             if status in {"succeeded", "failed", "needs_manual"}:
                 current["finished_at"] = now
             self._state[app_user_id] = current
+        if status in {"succeeded", "failed", "needs_manual"} and self._on_finished:
+            try:
+                self._on_finished(app_user_id, status, reason)
+            except Exception as exc:
+                logger.warning("Auto-auth on_finished hook failed for user %s: %s", app_user_id, exc)
 
     def _run(self, payload: AuthJobInput) -> None:
         logger.info("Automated Zerodha auth run started for app_user_id=%s", payload.app_user_id)

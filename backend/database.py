@@ -185,6 +185,40 @@ def ensure_core_schema():
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS user_auto_auth_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                scheduled_for TEXT NOT NULL,
+                started_at TEXT,
+                finished_at TEXT,
+                status TEXT NOT NULL,
+                reason TEXT,
+                trigger TEXT NOT NULL DEFAULT 'schedule',
+                UNIQUE(user_id, scheduled_for),
+                FOREIGN KEY (user_id) REFERENCES users (id)
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS auto_auth_schedule_settings (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                hour INTEGER NOT NULL DEFAULT 8,
+                minute INTEGER NOT NULL DEFAULT 45,
+                weekdays TEXT NOT NULL DEFAULT '0,1,2,3,4',
+                timezone TEXT NOT NULL DEFAULT 'Asia/Kolkata',
+                updated_at TEXT,
+                updated_by INTEGER,
+                FOREIGN KEY (updated_by) REFERENCES users (id)
+            )
+        """)
+        cur.execute("SELECT id FROM auto_auth_schedule_settings WHERE id = 1")
+        if cur.fetchone() is None:
+            cur.execute(
+                """
+                INSERT INTO auto_auth_schedule_settings (id, hour, minute, weekdays, timezone)
+                VALUES (1, 8, 45, '0,1,2,3,4', 'Asia/Kolkata')
+                """
+            )
 
         conn.commit()
         logging.info("Core database schema ensured (tables present or created).")

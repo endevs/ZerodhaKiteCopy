@@ -171,9 +171,83 @@ interface SubscriptionInfo {
   auto_renew?: boolean;
 }
 
+interface CredentialMetadata {
+  has_credentials: boolean;
+  auto_auth_details_present: boolean;
+  missing_fields: string[];
+  kite_user_id?: string | null;
+  app_key_masked?: string;
+  has_app_secret?: boolean;
+  has_kite_password?: boolean;
+  has_kite_totp_secret?: boolean;
+  auto_auth_configured_at?: string | null;
+}
+
+interface ScheduleRunRow {
+  scheduled_for: string;
+  day: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  status: string;
+  reason?: string | null;
+  trigger?: string;
+  details?: string;
+}
+
+interface ScheduleActivity {
+  schedule: {
+    description: string;
+    timezone: string;
+    weekdays: string[];
+    time: string;
+  };
+  past_runs: ScheduleRunRow[];
+  upcoming_runs: ScheduleRunRow[];
+}
+
 interface ProfileContentProps {
   onSubscribeClick?: () => void;
 }
+
+const configuredBadge = (configured: boolean) => (
+  <span className={`badge ${configured ? 'bg-success' : 'bg-secondary'}`}>
+    {configured ? 'Configured' : 'Not set'}
+  </span>
+);
+
+const scheduleStatusBadgeClass = (status: string): string => {
+  switch (status) {
+    case 'succeeded':
+      return 'bg-success';
+    case 'failed':
+      return 'bg-danger';
+    case 'needs_manual':
+      return 'bg-warning text-dark';
+    case 'running':
+    case 'pending':
+      return 'bg-info text-dark';
+    case 'skipped':
+      return 'bg-secondary';
+    default:
+      return 'bg-light text-dark border';
+  }
+};
+
+const formatScheduleDateTime = (iso: string): string => {
+  try {
+    return new Date(iso).toLocaleString('en-IN', {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      hour12: true,
+      timeZone: 'Asia/Kolkata',
+    });
+  } catch {
+    return iso;
+  }
+};
 
 const ProfileContent: React.FC<ProfileContentProps> = ({ onSubscribeClick }) => {
   const [profile, setProfile] = useState<UserProfile | null>(null);
@@ -187,10 +261,52 @@ const ProfileContent: React.FC<ProfileContentProps> = ({ onSubscribeClick }) => 
   const [kiteTotpSecret, setKiteTotpSecret] = useState('');
   const [credentialMessage, setCredentialMessage] = useState<{ type: 'success' | 'danger' | 'warning'; text: string } | null>(null);
   const [savingCredentials, setSavingCredentials] = useState(false);
+  const [credentialMeta, setCredentialMeta] = useState<CredentialMetadata | null>(null);
+  const [editingCredentials, setEditingCredentials] = useState(false);
+  const [scheduleActivity, setScheduleActivity] = useState<ScheduleActivity | null>(null);
+  const [loadingSchedule, setLoadingSchedule] = useState(false);
+  const [startingAutoAuth, setStartingAutoAuth] = useState(false);
 
   useEffect(() => {
     fetchProfile();
   }, []);
+
+  const fetchCredentialMetadata = async () => {
+    try {
+      const response = await fetch(apiUrl('/api/user-credentials'), { credentials: 'include' });
+      if (!response.ok) return;
+      const data = await response.json();
+      if (data.status === 'success') {
+        setCredentialMeta(data);
+        if (Array.isArray(data.missing_fields) && data.missing_fields.length > 0) {
+          setCredentialMessage({
+            type: 'warning',
+            text: `Missing fields: ${data.missing_fields.join(', ')}`,
+          });
+        }
+      }
+    } catch (credentialsErr) {
+      console.error('Error fetching credential metadata:', credentialsErr);
+    }
+  };
+
+  const fetchScheduleActivity = async () => {
+    try {
+      setLoadingSchedule(true);
+      const response = await fetch(apiUrl('/api/zerodha/auto-auth/schedule-activity'), {
+        credentials: 'include',
+      });
+      if (!response.ok) return;
+      const data = await response.json();
+      if (data.status === 'success') {
+        setScheduleActivity(data);
+      }
+    } catch (scheduleErr) {
+      console.error('Error fetching schedule activity:', scheduleErr);
+    } finally {
+      setLoadingSchedule(false);
+    }
+  };
 
   const fetchProfile = async () => {
     try {
@@ -279,18 +395,8 @@ const ProfileContent: React.FC<ProfileContentProps> = ({ onSubscribeClick }) => 
       }
 
       try {
-        const credentialsResponse = await fetch(apiUrl('/api/user-credentials'), {
-          credentials: 'include'
-        });
-        if (credentialsResponse.ok) {
-          const credentialsData = await parseJsonResponse(credentialsResponse);
-          if (Array.isArray(credentialsData?.missing_fields) && credentialsData.missing_fields.length > 0) {
-            setCredentialMessage({
-              type: 'warning',
-              text: `Missing fields: ${credentialsData.missing_fields.join(', ')}`
-            });
-          }
-        }
+        await fetchCredentialMetadata();
+        await fetchScheduleActivity();
       } catch (credentialsErr) {
         console.error('Error fetching credential flags:', credentialsErr);
       }
@@ -340,6 +446,8 @@ const ProfileContent: React.FC<ProfileContentProps> = ({ onSubscribeClick }) => 
       setKiteUserId('');
       setKitePassword('');
       setKiteTotpSecret('');
+      setEditingCredentials(false);
+      await fetchCredentialMetadata();
     } catch (saveErr: any) {
       setCredentialMessage({
         type: 'danger',
@@ -347,6 +455,52 @@ const ProfileContent: React.FC<ProfileContentProps> = ({ onSubscribeClick }) => 
       });
     } finally {
       setSavingCredentials(false);
+    }
+  };
+
+  const handleCancelCredentialEdit = () => {
+    setEditingCredentials(false);
+    setAppKey('');
+    setAppSecret('');
+    setKiteUserId('');
+    setKitePassword('');
+    setKiteTotpSecret('');
+    setCredentialMessage(null);
+  };
+
+  const handleStartCredentialEdit = () => {
+    setEditingCredentials(true);
+    setKiteUserId(credentialMeta?.kite_user_id || '');
+    setAppKey('');
+    setAppSecret('');
+    setKitePassword('');
+    setKiteTotpSecret('');
+    setCredentialMessage(null);
+  };
+
+  const handleRunAutoAuthNow = async () => {
+    setStartingAutoAuth(true);
+    try {
+      const response = await fetch(apiUrl('/api/zerodha/auto-auth/start'), {
+        method: 'POST',
+        credentials: 'include',
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data?.message || 'Failed to start auto authentication.');
+      }
+      setCredentialMessage({
+        type: 'success',
+        text: data?.message || 'Automated authentication started.',
+      });
+      await fetchScheduleActivity();
+    } catch (runErr: any) {
+      setCredentialMessage({
+        type: 'danger',
+        text: runErr?.message || 'Failed to start auto authentication.',
+      });
+    } finally {
+      setStartingAutoAuth(false);
     }
   };
 
@@ -666,80 +820,229 @@ const ProfileContent: React.FC<ProfileContentProps> = ({ onSubscribeClick }) => 
 
               <hr />
               <div className="mb-4">
-                <h5 className="mb-3">
-                  <i className="bi bi-shield-lock me-2"></i>
-                  Update Zerodha & Auto Authentication Details
-                </h5>
-                <p className="text-muted small mb-3">
-                  Update your API and auto-authentication details here anytime. Leave fields blank to keep existing saved values.
-                </p>
+                <div className="d-flex justify-content-between align-items-center mb-3">
+                  <h5 className="mb-0">
+                    <i className="bi bi-shield-lock me-2"></i>
+                    Update Zerodha & Auto Authentication Details
+                  </h5>
+                  {!editingCredentials && (
+                    <button type="button" className="btn btn-outline-primary btn-sm" onClick={handleStartCredentialEdit}>
+                      <i className="bi bi-pencil me-1"></i>
+                      Edit
+                    </button>
+                  )}
+                </div>
+
+                {credentialMeta && (
+                  <div className="mb-3">
+                    {credentialMeta.missing_fields.length === 0 ? (
+                      <span className="badge bg-success">Credentials complete</span>
+                    ) : (
+                      <span className="badge bg-warning text-dark">
+                        Missing: {credentialMeta.missing_fields.join(', ')}
+                      </span>
+                    )}
+                    {credentialMeta.auto_auth_configured_at && (
+                      <small className="text-muted ms-2">
+                        Last updated: {new Date(credentialMeta.auto_auth_configured_at).toLocaleString('en-IN')}
+                      </small>
+                    )}
+                  </div>
+                )}
+
                 {credentialMessage && (
                   <div className={`alert alert-${credentialMessage.type} py-2`} role="alert">
                     {credentialMessage.text}
                   </div>
                 )}
-                <form onSubmit={handleSaveCredentials} className="row g-3">
-                  <div className="col-md-6">
-                    <label htmlFor="profile_app_key" className="form-label">Zerodha API Key</label>
-                    <input
-                      id="profile_app_key"
-                      type="text"
-                      className="form-control"
-                      value={appKey}
-                      onChange={(e) => setAppKey(e.target.value)}
-                      placeholder="Update API key"
-                    />
+
+                {!editingCredentials ? (
+                  <div className="row g-3">
+                    <div className="col-md-6">
+                      <label className="form-label text-muted">Zerodha API Key</label>
+                      <div className="form-control bg-light">
+                        {credentialMeta?.app_key_masked || 'Not set'}
+                      </div>
+                    </div>
+                    <div className="col-md-6">
+                      <label className="form-label text-muted">Zerodha API Secret</label>
+                      <div>{configuredBadge(Boolean(credentialMeta?.has_app_secret))}</div>
+                    </div>
+                    <div className="col-md-4">
+                      <label className="form-label text-muted">Kite User ID</label>
+                      <div className="form-control bg-light">
+                        {credentialMeta?.kite_user_id || 'Not set'}
+                      </div>
+                    </div>
+                    <div className="col-md-4">
+                      <label className="form-label text-muted">Kite Password</label>
+                      <div>{configuredBadge(Boolean(credentialMeta?.has_kite_password))}</div>
+                    </div>
+                    <div className="col-md-4">
+                      <label className="form-label text-muted">Kite TOTP Secret</label>
+                      <div>{configuredBadge(Boolean(credentialMeta?.has_kite_totp_secret))}</div>
+                    </div>
                   </div>
-                  <div className="col-md-6">
-                    <label htmlFor="profile_app_secret" className="form-label">Zerodha API Secret</label>
-                    <input
-                      id="profile_app_secret"
-                      type="password"
-                      className="form-control"
-                      value={appSecret}
-                      onChange={(e) => setAppSecret(e.target.value)}
-                      placeholder="Update API secret"
-                    />
+                ) : (
+                  <>
+                    <p className="text-muted small mb-3">
+                      Leave secret fields blank to keep existing saved values.
+                    </p>
+                    <form onSubmit={handleSaveCredentials} className="row g-3">
+                      <div className="col-md-6">
+                        <label htmlFor="profile_app_key" className="form-label">Zerodha API Key</label>
+                        <input
+                          id="profile_app_key"
+                          type="text"
+                          className="form-control"
+                          value={appKey}
+                          onChange={(e) => setAppKey(e.target.value)}
+                          placeholder={credentialMeta?.app_key_masked || 'Enter API key'}
+                        />
+                      </div>
+                      <div className="col-md-6">
+                        <label htmlFor="profile_app_secret" className="form-label">Zerodha API Secret</label>
+                        <input
+                          id="profile_app_secret"
+                          type="password"
+                          className="form-control"
+                          value={appSecret}
+                          onChange={(e) => setAppSecret(e.target.value)}
+                          placeholder="Leave blank to keep current"
+                        />
+                      </div>
+                      <div className="col-md-4">
+                        <label htmlFor="profile_kite_user_id" className="form-label">Kite User ID</label>
+                        <input
+                          id="profile_kite_user_id"
+                          type="text"
+                          className="form-control"
+                          value={kiteUserId}
+                          onChange={(e) => setKiteUserId(e.target.value)}
+                          placeholder="Kite user ID"
+                        />
+                      </div>
+                      <div className="col-md-4">
+                        <label htmlFor="profile_kite_password" className="form-label">Kite Password</label>
+                        <input
+                          id="profile_kite_password"
+                          type="password"
+                          className="form-control"
+                          value={kitePassword}
+                          onChange={(e) => setKitePassword(e.target.value)}
+                          placeholder="Leave blank to keep current"
+                        />
+                      </div>
+                      <div className="col-md-4">
+                        <label htmlFor="profile_kite_totp" className="form-label">Kite TOTP Secret</label>
+                        <input
+                          id="profile_kite_totp"
+                          type="password"
+                          className="form-control"
+                          value={kiteTotpSecret}
+                          onChange={(e) => setKiteTotpSecret(e.target.value)}
+                          placeholder="Leave blank to keep current"
+                        />
+                      </div>
+                      <div className="col-12 d-flex gap-2">
+                        <button type="submit" className="btn btn-primary" disabled={savingCredentials}>
+                          {savingCredentials ? 'Saving...' : 'Save Details'}
+                        </button>
+                        <button type="button" className="btn btn-outline-secondary" onClick={handleCancelCredentialEdit}>
+                          Cancel
+                        </button>
+                      </div>
+                    </form>
+                  </>
+                )}
+              </div>
+
+              <hr />
+              <div className="mb-4">
+                <h5 className="mb-3">
+                  <i className="bi bi-clock-history me-2"></i>
+                  Auto Authentication Schedule
+                </h5>
+                <div className="alert alert-info mb-3">
+                  <i className="bi bi-info-circle me-2"></i>
+                  Runs automatically {scheduleActivity?.schedule.description || 'Mon–Fri 8:45 AM IST'} for your account when credentials are configured.
+                </div>
+                <button
+                  type="button"
+                  className="btn btn-outline-success btn-sm mb-3"
+                  onClick={handleRunAutoAuthNow}
+                  disabled={startingAutoAuth || !credentialMeta?.auto_auth_details_present}
+                >
+                  {startingAutoAuth ? 'Starting...' : 'Run Auto Authentication Now'}
+                </button>
+
+                <h6 className="mb-2 d-flex justify-content-between align-items-center">
+                  <span>Schedule Activity</span>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-outline-secondary"
+                    onClick={fetchScheduleActivity}
+                    disabled={loadingSchedule}
+                  >
+                    Refresh
+                  </button>
+                </h6>
+                {loadingSchedule ? (
+                  <div className="text-center py-3">
+                    <div className="spinner-border spinner-border-sm" role="status">
+                      <span className="visually-hidden">Loading...</span>
+                    </div>
                   </div>
-                  <div className="col-md-4">
-                    <label htmlFor="profile_kite_user_id" className="form-label">Kite User ID</label>
-                    <input
-                      id="profile_kite_user_id"
-                      type="text"
-                      className="form-control"
-                      value={kiteUserId}
-                      onChange={(e) => setKiteUserId(e.target.value)}
-                      placeholder="Update Kite user ID"
-                    />
+                ) : (
+                  <div className="table-responsive">
+                    <table className="table table-sm table-hover align-middle">
+                      <thead>
+                        <tr>
+                          <th>When (IST)</th>
+                          <th>Day</th>
+                          <th>Status</th>
+                          <th>Details</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(scheduleActivity?.upcoming_runs || []).map((run) => (
+                          <tr key={`upcoming-${run.scheduled_for}`}>
+                            <td>{formatScheduleDateTime(run.scheduled_for)}</td>
+                            <td>{run.day}</td>
+                            <td>
+                              <span className={`badge ${scheduleStatusBadgeClass(run.status)}`}>
+                                {run.status}
+                              </span>
+                            </td>
+                            <td className="small text-muted">{run.details || '—'}</td>
+                          </tr>
+                        ))}
+                        {(scheduleActivity?.past_runs || []).map((run) => (
+                          <tr key={`past-${run.scheduled_for}`}>
+                            <td>{formatScheduleDateTime(run.scheduled_for)}</td>
+                            <td>{run.day}</td>
+                            <td>
+                              <span className={`badge ${scheduleStatusBadgeClass(run.status)}`}>
+                                {run.status}
+                              </span>
+                            </td>
+                            <td className="small text-muted">{run.details || '—'}</td>
+                          </tr>
+                        ))}
+                        {!scheduleActivity?.past_runs?.length && !scheduleActivity?.upcoming_runs?.length && (
+                          <tr>
+                            <td colSpan={4} className="text-muted text-center">
+                              No schedule activity yet. Upcoming Mon–Fri runs will appear here.
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                    <small className="text-muted">
+                      Showing next {scheduleActivity?.upcoming_runs?.length || 0} upcoming and last {scheduleActivity?.past_runs?.length || 0} completed runs.
+                    </small>
                   </div>
-                  <div className="col-md-4">
-                    <label htmlFor="profile_kite_password" className="form-label">Kite Password</label>
-                    <input
-                      id="profile_kite_password"
-                      type="password"
-                      className="form-control"
-                      value={kitePassword}
-                      onChange={(e) => setKitePassword(e.target.value)}
-                      placeholder="Update Kite password"
-                    />
-                  </div>
-                  <div className="col-md-4">
-                    <label htmlFor="profile_kite_totp" className="form-label">Kite TOTP Secret</label>
-                    <input
-                      id="profile_kite_totp"
-                      type="password"
-                      className="form-control"
-                      value={kiteTotpSecret}
-                      onChange={(e) => setKiteTotpSecret(e.target.value)}
-                      placeholder="Update TOTP secret"
-                    />
-                  </div>
-                  <div className="col-12">
-                    <button type="submit" className="btn btn-primary" disabled={savingCredentials}>
-                      {savingCredentials ? 'Saving...' : 'Save Details'}
-                    </button>
-                  </div>
-                </form>
+                )}
               </div>
 
               <div className="alert alert-info mt-4 mb-0">

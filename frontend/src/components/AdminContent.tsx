@@ -38,7 +38,7 @@ const AdminContent: React.FC = () => {
   const [users, setUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'user-management' | 'strategy-approvals' | 'subscriptions' | 'plan-prices' | 'legacy-kite-accounts'>('user-management');
+  const [activeTab, setActiveTab] = useState<'user-management' | 'strategy-approvals' | 'subscriptions' | 'plan-prices' | 'auto-auth-schedule' | 'legacy-kite-accounts'>('user-management');
   const [legacyAccounts, setLegacyAccounts] = useState<LegacyKiteAccount[]>([]);
   const [loadingLegacyAccounts, setLoadingLegacyAccounts] = useState(false);
   const [legacySearch, setLegacySearch] = useState('');
@@ -108,6 +108,34 @@ const AdminContent: React.FC = () => {
   const [editingPrices, setEditingPrices] = useState<{[key: string]: number}>({});
   const [savingPrices, setSavingPrices] = useState(false);
 
+  interface AutoAuthScheduleSettings {
+    hour: number;
+    minute: number;
+    weekdays: number[];
+    weekday_labels: string[];
+    time: string;
+    timezone: string;
+    description: string;
+    updated_at?: string | null;
+    updated_by_email?: string | null;
+  }
+
+  const WEEKDAY_OPTIONS = [
+    { value: 0, label: 'Mon' },
+    { value: 1, label: 'Tue' },
+    { value: 2, label: 'Wed' },
+    { value: 3, label: 'Thu' },
+    { value: 4, label: 'Fri' },
+    { value: 5, label: 'Sat' },
+    { value: 6, label: 'Sun' },
+  ];
+
+  const [autoAuthSchedule, setAutoAuthSchedule] = useState<AutoAuthScheduleSettings | null>(null);
+  const [scheduleTime, setScheduleTime] = useState('08:45');
+  const [scheduleWeekdays, setScheduleWeekdays] = useState<number[]>([0, 1, 2, 3, 4]);
+  const [loadingAutoAuthSchedule, setLoadingAutoAuthSchedule] = useState(false);
+  const [savingAutoAuthSchedule, setSavingAutoAuthSchedule] = useState(false);
+
   const [editingUser, setEditingUser] = useState<User | null>(null);
   const [editAppKey, setEditAppKey] = useState('');
   const [editAppSecret, setEditAppSecret] = useState('');
@@ -122,6 +150,8 @@ const AdminContent: React.FC = () => {
       loadSubscriptions();
     } else if (activeTab === 'plan-prices') {
       loadPlanPrices();
+    } else if (activeTab === 'auto-auth-schedule') {
+      loadAutoAuthSchedule();
     } else if (activeTab === 'legacy-kite-accounts') {
       loadLegacyKiteAccounts();
     }
@@ -192,7 +222,6 @@ const AdminContent: React.FC = () => {
       const data = await response.json();
       if (data.status === 'success') {
         setPlanPrices(data.prices || {});
-        // Initialize editing prices with current values
         const editState: {[key: string]: number} = {};
         Object.keys(data.prices || {}).forEach(key => {
           editState[key] = data.prices[key].price;
@@ -205,6 +234,86 @@ const AdminContent: React.FC = () => {
       setError(err instanceof Error ? err.message : 'An error occurred');
     } finally {
       setLoadingPrices(false);
+    }
+  };
+
+  const loadAutoAuthSchedule = async () => {
+    try {
+      setLoadingAutoAuthSchedule(true);
+      const response = await fetch(apiUrl('/api/admin/auto-auth-schedule'), {
+        credentials: 'include',
+      });
+
+      if (response.status === 403) {
+        setError('You do not have admin access');
+        return;
+      }
+
+      if (!response.ok) {
+        throw new Error('Failed to load auto-auth schedule');
+      }
+
+      const data = await response.json();
+      if (data.status === 'success' && data.schedule) {
+        const schedule = data.schedule as AutoAuthScheduleSettings;
+        setAutoAuthSchedule(schedule);
+        setScheduleTime(schedule.time || `${String(schedule.hour).padStart(2, '0')}:${String(schedule.minute).padStart(2, '0')}`);
+        setScheduleWeekdays(Array.isArray(schedule.weekdays) ? schedule.weekdays : [0, 1, 2, 3, 4]);
+      } else {
+        setError(data.message || 'Failed to load auto-auth schedule');
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'An error occurred');
+    } finally {
+      setLoadingAutoAuthSchedule(false);
+    }
+  };
+
+  const handleScheduleTimeChange = (value: string) => {
+    setScheduleTime(value);
+  };
+
+  const toggleScheduleWeekday = (day: number) => {
+    setScheduleWeekdays((prev) => {
+      if (prev.includes(day)) {
+        const next = prev.filter((d) => d !== day);
+        return next.length > 0 ? next : prev;
+      }
+      return [...prev, day].sort((a, b) => a - b);
+    });
+  };
+
+  const handleSaveAutoAuthSchedule = async () => {
+    const [hourPart, minutePart] = scheduleTime.split(':');
+    const hour = parseInt(hourPart, 10);
+    const minute = parseInt(minutePart, 10);
+    if (Number.isNaN(hour) || Number.isNaN(minute)) {
+      alert('Please select a valid time.');
+      return;
+    }
+    if (scheduleWeekdays.length === 0) {
+      alert('Select at least one weekday.');
+      return;
+    }
+
+    try {
+      setSavingAutoAuthSchedule(true);
+      const response = await fetch(apiUrl('/api/admin/auto-auth-schedule'), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ hour, minute, weekdays: scheduleWeekdays }),
+      });
+      const data = await response.json();
+      if (!response.ok || data.status !== 'success') {
+        throw new Error(data.message || 'Failed to update auto-auth schedule');
+      }
+      setAutoAuthSchedule(data.schedule);
+      alert(data.message || 'Auto-auth schedule updated successfully.');
+    } catch (err) {
+      alert(`Error saving schedule: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    } finally {
+      setSavingAutoAuthSchedule(false);
     }
   };
   
@@ -668,6 +777,15 @@ const AdminContent: React.FC = () => {
               >
                 <i className="bi bi-currency-rupee me-2"></i>
                 Plan Prices
+              </button>
+            </li>
+            <li className="nav-item">
+              <button
+                className={`nav-link ${activeTab === 'auto-auth-schedule' ? 'active' : ''}`}
+                onClick={() => setActiveTab('auto-auth-schedule')}
+              >
+                <i className="bi bi-clock-history me-2"></i>
+                Auto Auth Schedule
               </button>
             </li>
             <li className="nav-item">
@@ -1328,6 +1446,94 @@ const AdminContent: React.FC = () => {
               </div>
             </div>
           )}
+
+          {activeTab === 'auto-auth-schedule' && (
+            <div className="card">
+              <div className="card-header d-flex justify-content-between align-items-center">
+                <h5 className="mb-0">
+                  <i className="bi bi-clock-history me-2"></i>
+                  Global Auto Authentication Schedule
+                </h5>
+                <button
+                  className="btn btn-sm btn-outline-primary"
+                  onClick={loadAutoAuthSchedule}
+                  disabled={loadingAutoAuthSchedule}
+                >
+                  <i className="bi bi-arrow-clockwise me-1"></i>
+                  Refresh
+                </button>
+              </div>
+              <div className="card-body">
+                {loadingAutoAuthSchedule ? (
+                  <div className="text-center py-4">
+                    <div className="spinner-border text-primary" role="status">
+                      <span className="visually-hidden">Loading...</span>
+                    </div>
+                  </div>
+                ) : (
+                  <div>
+                    <div className="alert alert-info">
+                      <i className="bi bi-info-circle me-2"></i>
+                      This schedule applies to all users with auto-auth credentials configured.
+                      Timezone: <strong>{autoAuthSchedule?.timezone || 'Asia/Kolkata'}</strong>.
+                    </div>
+                    {autoAuthSchedule?.description && (
+                      <p className="mb-3">
+                        Current schedule: <strong>{autoAuthSchedule.description}</strong>
+                      </p>
+                    )}
+                    <div className="row g-3 mb-3">
+                      <div className="col-md-4">
+                        <label htmlFor="admin_auto_auth_time" className="form-label">Time (IST)</label>
+                        <input
+                          id="admin_auto_auth_time"
+                          type="time"
+                          className="form-control"
+                          value={scheduleTime}
+                          onChange={(e) => handleScheduleTimeChange(e.target.value)}
+                        />
+                      </div>
+                      <div className="col-md-8">
+                        <label className="form-label d-block">Weekdays</label>
+                        <div className="d-flex flex-wrap gap-3">
+                          {WEEKDAY_OPTIONS.map((day) => (
+                            <div className="form-check" key={day.value}>
+                              <input
+                                className="form-check-input"
+                                type="checkbox"
+                                id={`schedule-day-${day.value}`}
+                                checked={scheduleWeekdays.includes(day.value)}
+                                onChange={() => toggleScheduleWeekday(day.value)}
+                              />
+                              <label className="form-check-label" htmlFor={`schedule-day-${day.value}`}>
+                                {day.label}
+                              </label>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                    {autoAuthSchedule?.updated_at && (
+                      <p className="text-muted small">
+                        Last updated: {new Date(autoAuthSchedule.updated_at).toLocaleString('en-IN')}
+                        {autoAuthSchedule.updated_by_email ? ` by ${autoAuthSchedule.updated_by_email}` : ''}
+                      </p>
+                    )}
+                    <div className="d-flex justify-content-end">
+                      <button
+                        className="btn btn-primary"
+                        onClick={handleSaveAutoAuthSchedule}
+                        disabled={savingAutoAuthSchedule}
+                      >
+                        {savingAutoAuthSchedule ? 'Saving...' : 'Save Schedule'}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
           {activeTab === 'legacy-kite-accounts' && (
             <div className="card">
               <div className="card-header d-flex justify-content-between align-items-center">

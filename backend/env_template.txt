@@ -72,5 +72,10 @@ RAZORPAY_WEBHOOK_SECRET=
 # Note: DB secrets are plaintext in this phase (temporary).
 #       Planned next phase will migrate to encrypted-at-rest storage.
 #
+# AUTO_AUTH_SCHEDULE_HOUR=8
+# AUTO_AUTH_SCHEDULE_MINUTE=45
+# Primary control: Admin panel → Auto Auth Schedule (DB-backed global time + weekdays)
+# Env vars above are fallback only when DB row is missing
+#
 # After editing .env: docker compose up -d --build
 # Smoke test: .\docker-test.ps1

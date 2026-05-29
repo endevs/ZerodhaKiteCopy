@@ -16,6 +16,7 @@ import AdvancedChartsContent from './AdvancedChartsContent';
 import RiskDisclosureModal from './RiskDisclosureModal';
 import { apiUrl } from '../config/api';
 import { useSocket } from '../hooks/useSocket';
+import { tryAcquireAuthNavigationLock } from '../utils/authNavigation';
 
 const Dashboard: React.FC = () => {
   const navigate = useNavigate();
@@ -32,6 +33,7 @@ const Dashboard: React.FC = () => {
   const [liveStrategyId, setLiveStrategyId] = useState<string | null>(null);
   const [showRiskDisclosure, setShowRiskDisclosure] = useState<boolean>(false);
   const warningShownRef = useRef<boolean>(false);
+  const redirectedToWelcomeRef = useRef<boolean>(false);
   const socket = useSocket();
 
   const handleViewChart = useCallback((instrumentToken: string) => {
@@ -62,35 +64,41 @@ const Dashboard: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    const fetchUserData = async () => {
+    let cancelled = false;
+    let retryMarketSnapshot: ReturnType<typeof setTimeout> | undefined;
+    let marketSnapshotInterval: ReturnType<typeof setInterval> | undefined;
+    let checkAccessTokenInterval: ReturnType<typeof setInterval> | undefined;
+
+    const fetchUserData = async (): Promise<{ tokenValid: boolean; hasCredentials: boolean }> => {
       try {
         const response = await fetch(apiUrl('/api/user-data'), { credentials: 'include' });
         const data = await response.json();
         if (response.ok) {
-          // If Zerodha API credentials are saved but the access token is not valid,
-          // the user must re-authenticate with Zerodha before using the dashboard.
-          // Freemium users (no credentials) are not affected.
           if (data.zerodha_credentials_present && !data.token_valid) {
-            navigate('/welcome', { replace: true });
-            return;
+            // #region agent log
+            fetch('http://127.0.0.1:7255/ingest/85086ee0-cdfe-4536-9e94-0e466df42afc',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'c3dc96'},body:JSON.stringify({sessionId:'c3dc96',runId:'post-fix',hypothesisId:'H1,H3',location:'Dashboard.tsx:fetchUserData',message:'redirect welcome',data:{token_valid:data.token_valid,access_token_present:data.access_token_present,auto_auth_status:data?.auto_auth?.status},timestamp:Date.now()})}).catch(()=>{});
+            // #endregion
+            if (!redirectedToWelcomeRef.current && tryAcquireAuthNavigationLock()) {
+              redirectedToWelcomeRef.current = true;
+              navigate('/welcome', { replace: true });
+            }
+            return { tokenValid: false, hasCredentials: true };
           }
 
-          // Use user_name from backend (which falls back to email if name not set)
+          redirectedToWelcomeRef.current = false;
           setUserName(data.user_name || data.email || 'User');
           setKiteClientId(data.kite_client_id || null);
-          
-          // Show risk disclosure modal after successful login (once per session)
+
           const riskDisclosureShown = sessionStorage.getItem('riskDisclosureShown');
           if (!riskDisclosureShown) {
-            // Small delay to ensure page is fully loaded
             setTimeout(() => {
               setShowRiskDisclosure(true);
             }, 1000);
           }
-          
+
           const hasAccessToken = data.access_token_present || false;
-          
-          // Check admin status
+          const isTokenValid = data.token_valid === true;
+
           try {
             const adminResponse = await fetch(apiUrl('/api/admin/check'), { credentials: 'include' });
             const adminData = await adminResponse.json();
@@ -99,11 +107,7 @@ const Dashboard: React.FC = () => {
             console.error('Error checking admin status:', err);
             setIsAdmin(false);
           }
-          
-          // If access token was just set (user just logged in), request ticker startup via HTTP
-          // Only try if token is valid (not just present)
-          // token_valid may not be present in older API responses, so default to false
-          const isTokenValid = data.token_valid !== undefined ? data.token_valid : false;
+
           if (hasAccessToken && isTokenValid) {
             fetch(apiUrl('/api/ticker/start'), {
               method: 'POST',
@@ -111,42 +115,50 @@ const Dashboard: React.FC = () => {
             })
               .then(response => {
                 if (!response.ok) {
-                  // Don't log 401 errors as they're expected if token is invalid
                   if (response.status !== 401) {
                     return response.json().then(result => {
                       console.warn('Failed to start ticker:', result.message);
                     });
                   }
-                  return Promise.resolve(); // Silently handle 401
+                  return Promise.resolve();
                 }
                 return response.json();
               })
               .then(result => {
                 if (result && result.status !== 'success') {
-                  // Only log non-authentication errors
-                  if (!result.message?.includes('Invalid access token') && 
+                  if (!result.message?.includes('Invalid access token') &&
                       !result.message?.includes('not connected')) {
                     console.warn('Failed to start ticker:', result.message);
                   }
                 }
               })
               .catch(err => {
-                // Only log unexpected errors
                 if (!err.message?.includes('401')) {
                   console.warn('Error starting ticker:', err);
                 }
               });
           }
+
+          return {
+            tokenValid: isTokenValid,
+            hasCredentials: Boolean(data.zerodha_credentials_present),
+          };
         }
       } catch (error) {
         console.error('Error fetching user data:', error);
       }
+      return { tokenValid: false, hasCredentials: false };
     };
 
     const fetchInitialMarketData = async () => {
       try {
         const resp = await fetch(apiUrl('/api/market_snapshot'), { credentials: 'include' });
         const data = await resp.json();
+        if (!resp.ok) {
+          // #region agent log
+          fetch('http://127.0.0.1:7255/ingest/85086ee0-cdfe-4536-9e94-0e466df42afc',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'c3dc96'},body:JSON.stringify({sessionId:'c3dc96',runId:'post-fix',hypothesisId:'H4',location:'Dashboard.tsx:fetchInitialMarketData',message:'market_snapshot failed',data:{status:resp.status,message:data?.message,authExpired:data?.authExpired},timestamp:Date.now()})}).catch(()=>{});
+          // #endregion
+        }
         if (resp.ok && data.status === 'success') {
           setNiftyPrice(typeof data.nifty === 'number' ? data.nifty.toFixed(2) : '—');
           setBankNiftyPrice(typeof data.banknifty === 'number' ? data.banknifty.toFixed(2) : '—');
@@ -164,30 +176,80 @@ const Dashboard: React.FC = () => {
       }
     };
 
-    fetchUserData();
-    fetchInitialMarketData();
-    // Retry market snapshot once after 3s so banner updates if first request was before session/ticker ready
-    const retryMarketSnapshot = setTimeout(fetchInitialMarketData, 3000);
+    const init = async () => {
+      try {
+        await fetch(apiUrl('/api/zerodha/sync-session'), {
+          method: 'POST',
+          credentials: 'include',
+        });
+      } catch {
+        // Best-effort: auto-auth may have stored token without updating the session cookie.
+      }
 
-    // Periodically refresh Nifty/Bank Nifty in the banner so they stay in sync (fallback when socket ticks are missing)
-    const MARKET_SNAPSHOT_INTERVAL_MS = 30 * 1000; // 30 seconds
-    const marketSnapshotInterval = setInterval(() => {
-      fetch(apiUrl('/api/market_snapshot'), { credentials: 'include' })
-        .then(async (resp) => {
-          const data = await resp.json();
-          if (resp.ok && data.status === 'success') {
-            setNiftyPrice(typeof data.nifty === 'number' ? data.nifty.toFixed(2) : '—');
-            setBankNiftyPrice(typeof data.banknifty === 'number' ? data.banknifty.toFixed(2) : '—');
-          }
-        })
-        .catch(() => {});
-    }, MARKET_SNAPSHOT_INTERVAL_MS);
+      const { tokenValid, hasCredentials } = await fetchUserData();
+      if (cancelled || redirectedToWelcomeRef.current) {
+        return;
+      }
 
-    // Periodically re-check user data (e.g. after Zerodha login redirect)
-    const checkAccessTokenInterval = setInterval(() => {
-      fetchUserData();
-    }, 30_000);
+      if (tokenValid) {
+        fetchInitialMarketData();
+        retryMarketSnapshot = setTimeout(fetchInitialMarketData, 3000);
+        const MARKET_SNAPSHOT_INTERVAL_MS = 30 * 1000;
+        marketSnapshotInterval = setInterval(() => {
+          fetch(apiUrl('/api/market_snapshot'), { credentials: 'include' })
+            .then(async (resp) => {
+              const data = await resp.json();
+              if (resp.ok && data.status === 'success') {
+                setNiftyPrice(typeof data.nifty === 'number' ? data.nifty.toFixed(2) : '—');
+                setBankNiftyPrice(typeof data.banknifty === 'number' ? data.banknifty.toFixed(2) : '—');
+              }
+            })
+            .catch(() => {});
+        }, MARKET_SNAPSHOT_INTERVAL_MS);
+      } else if (!hasCredentials) {
+        setNiftyPrice('Not Connected');
+        setBankNiftyPrice('Not Connected');
+      }
 
+      checkAccessTokenInterval = setInterval(async () => {
+        const status = await fetchUserData();
+        if (!cancelled && status.tokenValid && !marketSnapshotInterval) {
+          fetchInitialMarketData();
+          const MARKET_SNAPSHOT_INTERVAL_MS = 30 * 1000;
+          marketSnapshotInterval = setInterval(() => {
+            fetch(apiUrl('/api/market_snapshot'), { credentials: 'include' })
+              .then(async (resp) => {
+                const data = await resp.json();
+                if (resp.ok && data.status === 'success') {
+                  setNiftyPrice(typeof data.nifty === 'number' ? data.nifty.toFixed(2) : '—');
+                  setBankNiftyPrice(typeof data.banknifty === 'number' ? data.banknifty.toFixed(2) : '—');
+                }
+              })
+              .catch(() => {});
+          }, MARKET_SNAPSHOT_INTERVAL_MS);
+        }
+      }, 30_000);
+    };
+
+    init();
+
+    const timeoutId = setTimeout(() => {
+      if (!warningShownRef.current && (niftyPrice === 'Loading...' || bankNiftyPrice === 'Loading...')) {
+        console.warn('Market data not received yet. Make sure Zerodha is connected and market is open.');
+        warningShownRef.current = true;
+      }
+    }, 10000);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timeoutId);
+      clearTimeout(retryMarketSnapshot);
+      clearInterval(checkAccessTokenInterval);
+      clearInterval(marketSnapshotInterval);
+    };
+  }, [navigate]);
+
+  useEffect(() => {
     const onConnect = () => {
       console.log('Connected to WebSocket');
       socket.emit('my_event', { data: 'I\'m connected!' });
@@ -244,18 +306,7 @@ const Dashboard: React.FC = () => {
     socket.on('error', onError);
     socket.on('warning', onWarning);
 
-    const timeoutId = setTimeout(() => {
-      if (!warningShownRef.current && (niftyPrice === 'Loading...' || bankNiftyPrice === 'Loading...')) {
-        console.warn('Market data not received yet. Make sure Zerodha is connected and market is open.');
-        warningShownRef.current = true;
-      }
-    }, 10000);
-
     return () => {
-      clearTimeout(timeoutId);
-      clearTimeout(retryMarketSnapshot);
-      clearInterval(checkAccessTokenInterval);
-      clearInterval(marketSnapshotInterval);
       socket.off('connect', onConnect);
       socket.off('disconnect', onDisconnect);
       socket.off('reconnect_failed', onReconnectFailed);

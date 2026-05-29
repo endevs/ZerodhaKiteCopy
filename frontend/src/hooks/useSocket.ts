@@ -37,9 +37,9 @@ export function useSocket(): Socket {
 
     return () => {
       refCount--;
-      if (refCount <= 0 && sharedSocket) {
-        sharedSocket.disconnect();
-        sharedSocket = null;
+      // Keep the shared socket connected across route changes (Dashboard ↔ Welcome).
+      // Disconnecting here caused connect/disconnect loops and UI flicker.
+      if (refCount < 0) {
         refCount = 0;
       }
     };

@@ -1,5 +1,6 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { apiUrl } from '../config/api';
+import { tryAcquireAuthNavigationLock } from '../utils/authNavigation';
 import { useNavigate } from 'react-router-dom';
 import LoaderOverlay from './LoaderOverlay';
 import SupportChat from './SupportChat';
@@ -239,6 +240,11 @@ const WelcomeContent: React.FC<{
               Auto Authentication is not configured yet. Please ask admin to set automation credentials.
             </div>
           )}
+          {hasAutoAuthDetails && autoAuthEnabled && (
+            <p className="text-white-50 small mb-0">
+              Scheduled auto-authentication runs on the server at the admin-configured IST time. You do not need to stay signed in with Google for it to run.
+            </p>
+          )}
           {!hasAutoAuthDetails && (
             <form onSubmit={handleSaveAutoAuthDetails} className="d-flex flex-column gap-2">
               <div>
@@ -436,8 +442,54 @@ const Welcome: React.FC = () => {
   const [autoAuthState, setAutoAuthState] = useState<AutoAuthState | null>(null);
   const [autoAuthEnabled, setAutoAuthEnabled] = useState(false);
   const navigate = useNavigate();
+  const prevAutoAuthStatusRef = useRef<string | null>(null);
   const redirectToLoginOnUnauthorized = () => {
     navigate('/login?reason=session_expired', { replace: true });
+  };
+
+  const syncZerodhaSession = async (): Promise<boolean> => {
+    try {
+      const response = await fetch(apiUrl('/api/zerodha/sync-session'), {
+        method: 'POST',
+        credentials: 'include',
+      });
+      if (!response.ok) {
+        return false;
+      }
+      const data = await response.json();
+      return data?.token_valid === true;
+    } catch {
+      return false;
+    }
+  };
+
+  const redirectIfTokenValid = async (source: string) => {
+    if (!tryAcquireAuthNavigationLock()) {
+      return;
+    }
+    try {
+      await syncZerodhaSession();
+      const response = await fetch(apiUrl('/api/user-data'), { credentials: 'include' });
+      if (response.status === 401) {
+        redirectToLoginOnUnauthorized();
+        return;
+      }
+      if (!response.ok) {
+        return;
+      }
+      const data = await response.json();
+      if (data?.auto_auth) {
+        setAutoAuthState(data.auto_auth as AutoAuthState);
+      }
+      if (data?.token_valid && data?.zerodha_credentials_present) {
+        // #region agent log
+        fetch('http://127.0.0.1:7255/ingest/85086ee0-cdfe-4536-9e94-0e466df42afc',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'c3dc96'},body:JSON.stringify({sessionId:'c3dc96',runId:'post-fix',hypothesisId:'H1',location:'Welcome.tsx:redirectIfTokenValid',message:'redirect dashboard',data:{source,token_valid:data?.token_valid,auto_auth_status:data?.auto_auth?.status},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
+        navigate('/dashboard', { replace: true });
+      }
+    } catch (error) {
+      console.error('Unable to verify Zerodha token before redirect:', error);
+    }
   };
 
   useEffect(() => {
@@ -463,7 +515,12 @@ const Welcome: React.FC = () => {
         // Only auto-redirect if user has valid token AND credentials
         // If credentials are missing, let user stay on welcome page to add them or skip
         if (data?.token_valid && data?.zerodha_credentials_present) {
-          navigate('/dashboard', { replace: true });
+          if (tryAcquireAuthNavigationLock()) {
+            // #region agent log
+            fetch('http://127.0.0.1:7255/ingest/85086ee0-cdfe-4536-9e94-0e466df42afc',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'c3dc96'},body:JSON.stringify({sessionId:'c3dc96',runId:'post-fix',hypothesisId:'H1',location:'Welcome.tsx:checkZerodhaSession',message:'redirect dashboard',data:{source:'token_valid',token_valid:data?.token_valid,auto_auth_status:data?.auto_auth?.status},timestamp:Date.now()})}).catch(()=>{});
+            // #endregion
+            navigate('/dashboard', { replace: true });
+          }
           return;
         }
 
@@ -471,6 +528,13 @@ const Welcome: React.FC = () => {
           setMessage({
             type: 'info',
             text: 'Add your Zerodha API key and secret to enable live trading, or skip for now to use the platform as a freemium user.',
+          });
+        } else if (!data?.token_valid && data?.zerodha_credentials_present) {
+          setMessage({
+            type: 'warning',
+            text:
+              data?.message ||
+              'Your Zerodha session has expired. Click Auto Authentication below when you are ready.',
           });
         } else if (data?.message) {
           setMessage({
@@ -505,9 +569,12 @@ const Welcome: React.FC = () => {
             fetch('http://127.0.0.1:7255/ingest/85086ee0-cdfe-4536-9e94-0e466df42afc',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'c3dc96'},body:JSON.stringify({sessionId:'c3dc96',runId:'pre-fix',hypothesisId:'H2',location:'Welcome.tsx:loadStatus',message:'auto-auth terminal state',data:{status:data.auto_auth.status,reason:data.auto_auth.reason,attempts:data.auto_auth.attempts},timestamp:Date.now()})}).catch(()=>{});
             // #endregion
           }
-          if (data.auto_auth.status === 'succeeded') {
-            navigate('/dashboard', { replace: true });
+          const prevStatus = prevAutoAuthStatusRef.current;
+          const nextStatus = data.auto_auth.status;
+          if (nextStatus === 'succeeded' && prevStatus !== 'succeeded') {
+            await redirectIfTokenValid('auto_auth_succeeded_transition');
           }
+          prevAutoAuthStatusRef.current = nextStatus;
         } else if (!data?.configured) {
           setAutoAuthState({ status: 'not_configured' });
         }
@@ -598,7 +665,7 @@ const Welcome: React.FC = () => {
     if (data?.auto_auth) {
       setAutoAuthState(data.auto_auth as AutoAuthState);
       if (data.auto_auth.status === 'succeeded') {
-        navigate('/dashboard', { replace: true });
+        await redirectIfTokenValid('auto_auth_succeeded_start');
       }
     }
     if (data?.message) {
@@ -616,9 +683,13 @@ const Welcome: React.FC = () => {
           className="auth-logo"
         />
         <div className="d-flex align-items-center gap-2">
-          <a href="/dashboard" className="btn btn-outline-light btn-sm px-3">
+          <button
+            type="button"
+            onClick={() => redirectIfTokenValid('nav_go_dashboard')}
+            className="btn btn-outline-light btn-sm px-3"
+          >
             Go to Dashboard
-          </a>
+          </button>
           <button onClick={handleLogout} className="btn btn-light btn-sm px-3 text-primary">
             Sign out
           </button>

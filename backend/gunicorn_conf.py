@@ -22,3 +22,10 @@ def post_worker_init(worker):
             log.info("options_scheduler: started")
     except Exception as e:
         log.warning("options_scheduler: %s", e)
+    try:
+        from app import _register_auto_auth_scheduler
+
+        _register_auto_auth_scheduler()
+        log.info("auto_auth_scheduler: started")
+    except Exception as e:
+        log.warning("auto_auth_scheduler: %s", e)

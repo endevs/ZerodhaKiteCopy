@@ -77,15 +77,16 @@ const Login: React.FC = () => {
             authenticated?: boolean;
             user_id?: number | null;
             zerodha_credentials_present?: boolean;
+            token_valid?: boolean;
           };
           const isAuthenticated = data.authenticated === true || (data.user_id !== undefined && data.user_id !== null);
           if (isAuthenticated) {
-            // Check if user has API credentials
-            // If not, redirect to welcome page; otherwise go to dashboard
             if (!data.zerodha_credentials_present) {
               navigate('/welcome', { replace: true });
-            } else {
+            } else if (data.token_valid) {
               navigate('/dashboard', { replace: true });
+            } else {
+              navigate('/welcome', { replace: true });
             }
             return;
           }
