@@ -59,6 +59,13 @@ const plotTimeMs = (t: Date | string): number => {
   return Number.isNaN(ms) ? 0 : ms;
 };
 
+const candleDayKey = (t: Date | string): string => toPlotTime(t).slice(0, 10);
+
+const spansMultipleDays = (points: PlotlyCandlePoint[]): boolean => {
+  if (points.length < 2) return false;
+  return candleDayKey(points[0].time) !== candleDayKey(points[points.length - 1].time);
+};
+
 class ChartErrorBoundary extends React.Component<
   { children: React.ReactNode; height: number },
   ChartErrorBoundaryState
@@ -125,9 +132,14 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
   const hasAdx = showRsi && adxData && adxData.some((v) => v != null);
   const hasVolume = showVolume && (data?.some((d) => (d.volume ?? 0) > 0) ?? false);
   const hasY4Overlay = predictionOverlays?.some((o) => o.yaxis === 'y4') ?? false;
+  const multiDay = useMemo(() => spansMultipleDays(data ?? []), [data]);
 
   const traces = useMemo(() => {
     if (!data || data.length === 0) return [];
+    const xHoverFormat = multiDay ? '%d %b %Y, %H:%M' : '%H:%M';
+    const candleHoverTemplate =
+      `<b>%{x|${xHoverFormat}}</b><br>` +
+      'Open: %{open:.2f}<br>High: %{high:.2f}<br>Low: %{low:.2f}<br>Close: %{close:.2f}<extra></extra>';
     const times = data.map((d) => toPlotTime(d.time));
     const opens = data.map((d) => d.open);
     const highs = data.map((d) => d.high);
@@ -149,6 +161,7 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
         type: 'candlestick',
         name: 'Price',
         yaxis: 'y',
+        hovertemplate: candleHoverTemplate,
       },
     ];
 
@@ -356,7 +369,7 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
     }
 
     return out;
-  }, [data, showEma, showVolume, showRsi, showIndexLine, rsiData, rsiOverbought, rsiOversold, adxData, indexLabel, markers, predictionOverlays, hasRsi, hasAdx]);
+  }, [data, multiDay, showEma, showVolume, showRsi, showIndexLine, rsiData, rsiOverbought, rsiOversold, adxData, indexLabel, markers, predictionOverlays, hasRsi, hasAdx]);
 
   const chartHeight = hasRsi ? Math.max(height, 620) : height;
 
@@ -402,7 +415,8 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
         rangeslider: { visible: false },
         type: 'date',
         range: xRange,
-        tickformat: '%H:%M',
+        tickformat: multiDay ? '%d %b\n%H:%M' : '%H:%M',
+        hoverformat: multiDay ? '%d %b %Y, %H:%M' : '%H:%M',
         showgrid: true,
         gridcolor: '#e9ecef',
       },
@@ -449,7 +463,7 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
       dragmode: 'zoom',
       showlegend: true,
     };
-  }, [data.length, hasRsi, hasAdx, hasVolume, hasY4Overlay, height, title, chartHeight, xRange]);
+  }, [data.length, multiDay, hasRsi, hasAdx, hasVolume, hasY4Overlay, height, title, chartHeight, xRange]);
 
   if (!data || data.length === 0) {
     return (

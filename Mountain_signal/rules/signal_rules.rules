@@ -28,12 +28,13 @@ RULE "Reset PE Signal"
     set pe_signal_price_above_low to false
     log "PE signal reset to newer candle {signal.time}"
 
-RULE "Clear PE Signal"
-  WHEN
-    signal.type is PE
-    AND no_active_trade exists
-    AND candle.low falls below ema(5)
-    AND rsi(14) is 70 or below
-  THEN
-    clear signal
-    log "PE signal cleared because criteria no longer met"
+# Temporarily disabled – keep signal after identify for testing
+# RULE "Clear PE Signal"
+#   WHEN
+#     signal.type is PE
+#     AND no_active_trade exists
+#     AND candle.low falls below ema(5)
+#     AND rsi(14) is 70 or below
+#   THEN
+#     clear signal
+#     log "PE signal cleared because criteria no longer met"

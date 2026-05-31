@@ -28,14 +28,15 @@ RULE "Reset PE Signal"
     replace signal.time with candle.start_time
     log "PE signal reset to newer candle {signal.time}"
 
-RULE "Clear PE Signal"
-  WHEN
-    signal.type is PE
-    AND candle.low falls below ema(5)
-    AND rsi(14) is 70 or below
-  THEN
-    clear signal
-    log "PE signal cleared because criteria no longer met"
+# Temporarily disabled – keep signal after identify for testing
+# RULE "Clear PE Signal"
+#   WHEN
+#     signal.type is PE
+#     AND candle.low falls below ema(5)
+#     AND rsi(14) is 70 or below
+#   THEN
+#     clear signal
+#     log "PE signal cleared because criteria no longer met"
 
 ENTRY "PE Breakout Entry"
   FOR signal.type == PE

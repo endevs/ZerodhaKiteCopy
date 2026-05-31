@@ -378,12 +378,13 @@ class NiftyTradingEnv(gym.Env):
                 self.mountain_signal['index'] = self.current_index
                 logger.debug(f"[SIGNAL] PE signal reset to newer candle {timestamp}")
         
-        # Rule 3: Clear PE Signal (candle.low < EMA5 OR RSI <= 70)
-        elif self.mountain_signal['type'] == 'PE':
-            if candle_low < ema5 or rsi <= 70:
-                logger.debug(f"[SIGNAL] PE signal cleared (low < EMA5 or RSI <= 70)")
-                self.mountain_signal = {'type': None, 'low': None, 'high': None, 'time': None, 'index': None}
-                self.signal_entry_allowed = True  # Reset entry flag
+        # Temporarily disabled – keep signal after identify for testing
+        # Rule 3: Clear PE Signal (candle.low < EMA5 AND RSI <= 70)
+        # elif self.mountain_signal['type'] == 'PE':
+        #     if candle_low < ema5 and rsi <= 70:
+        #         logger.debug(f"[SIGNAL] PE signal cleared (low < EMA5 and RSI <= 70)")
+        #         self.mountain_signal = {'type': None, 'low': None, 'high': None, 'time': None, 'index': None}
+        #         self.signal_entry_allowed = True  # Reset entry flag
     
     def _check_index_target_pattern(self) -> bool:
         """Check if Index Target pattern is met (first candle.high < EMA5, next 2 closes > EMA5)."""

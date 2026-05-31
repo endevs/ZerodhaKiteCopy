@@ -74,6 +74,10 @@ class RuleHandler:
         results = {}
         
         for rule in self.signal_rules:
+            # Temporarily disabled – keep signal after identify for testing
+            if rule.rule_name == "Clear PE Signal":
+                continue
+
             # Skip "Identify PE Signal" if signal already exists
             # This prevents overwriting existing signals and ensures proper signal lifecycle
             if rule.rule_name == "Identify PE Signal" and context.signal is not None:
