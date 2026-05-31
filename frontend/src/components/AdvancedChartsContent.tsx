@@ -546,7 +546,7 @@ const AdvancedChartsContent: React.FC = () => {
             time: ev.timestamp,
             price: (ev.details.high as number) ?? 0,
             direction: 'short',
-            action: 'signal',
+            action: ev.type === MountainEventType.SIGNAL_IDENTIFIED ? 'signal_identified' : 'signal_reset',
             label: `RSI: ${ev.details.rsi14 != null ? (ev.details.rsi14 as number).toFixed(1) : '–'}`,
           });
         }
@@ -779,7 +779,7 @@ const AdvancedChartsContent: React.FC = () => {
               time: ev.timestamp,
               price: (ev.details.high as number) ?? 0,
               direction: 'short',
-              action: 'signal',
+              action: ev.type === MountainEventType.SIGNAL_IDENTIFIED ? 'signal_identified' : 'signal_reset',
               label: `RSI: ${ev.details.rsi14 != null ? (ev.details.rsi14 as number).toFixed(1) : '–'}`,
             });
           }

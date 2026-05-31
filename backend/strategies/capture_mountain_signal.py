@@ -1894,19 +1894,21 @@ class CaptureMountainSignal(BaseStrategy):
                 pass
             
         elif self.pe_signal_candle is not None:
+            # Temporarily disabled – keep signal after identify for testing
             # RULE "Clear PE Signal": If signal exists but conditions no longer met, clear it
-            if not low_above_ema or not rsi_above_70:
-                evaluation_record['result'] = 'cleared'
-                if not low_above_ema:
-                    evaluation_record['reason'] = f"PE Signal cleared: LOW ({current_candle['low']:.2f}) <= EMA ({current_ema:.2f})"
-                else:
-                    evaluation_record['reason'] = f"PE Signal cleared: RSI ({current_rsi:.2f}) <= 70 (required > 70)"
-                logging.info(f"[SIGNAL EVAL] ✗ PE Signal CLEARED: {evaluation_record['reason']}")
-                self.pe_signal_candle = None
-                self.status['signal_status'] = 'No active signal - Waiting for next signal'
-                self.status['signal_candle_time'] = 'N/A'
-                self.status['signal_candle_high'] = 0
-                self.status['signal_candle_low'] = 0
+            # if not low_above_ema or not rsi_above_70:
+            #     evaluation_record['result'] = 'cleared'
+            #     if not low_above_ema:
+            #         evaluation_record['reason'] = f"PE Signal cleared: LOW ({current_candle['low']:.2f}) <= EMA ({current_ema:.2f})"
+            #     else:
+            #         evaluation_record['reason'] = f"PE Signal cleared: RSI ({current_rsi:.2f}) <= 70 (required > 70)"
+            #     logging.info(f"[SIGNAL EVAL] ✗ PE Signal CLEARED: {evaluation_record['reason']}")
+            #     self.pe_signal_candle = None
+            #     self.status['signal_status'] = 'No active signal - Waiting for next signal'
+            #     self.status['signal_candle_time'] = 'N/A'
+            #     self.status['signal_candle_high'] = 0
+            #     self.status['signal_candle_low'] = 0
+            pass
         else:
             # No signal exists and conditions not met - log as ignored
             evaluation_record['result'] = 'ignored'

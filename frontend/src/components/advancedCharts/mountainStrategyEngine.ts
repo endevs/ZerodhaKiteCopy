@@ -265,16 +265,18 @@ export function runMountainBacktest(
             `PE signal reset – old H:${oldHigh.toFixed(2)} L:${oldLow.toFixed(2)} → new H:${c.high.toFixed(2)} L:${c.low.toFixed(2)}`,
             { signalHigh: c.high, signalLow: c.low, signalTime: timeStr(c.time), ema5: e5, rsi14: r14,
               oldSignalHigh: oldHigh, oldSignalLow: oldLow });
-        } else if (!lowAboveEma && !rsiOverbought) {
-          // Entry evaluation BEFORE signal clearing – when both overlap, entry takes priority
-          tryEntry(S, c, i, e5, r14, events);
-          if (!S.trade) {
-            pushEvent(events, i, c, MountainEventType.SIGNAL_CLEARED,
-              `PE signal cleared – low ${c.low.toFixed(2)} < EMA5 ${e5.toFixed(2)} & RSI ${r14.toFixed(1)} <= ${rsiOverboughtThreshold}`,
-              { signalHigh: S.signal!.high, signalLow: S.signal!.low, ema5: e5, rsi14: r14 });
-            S.signal = null;
-          }
         }
+        // Temporarily disabled – keep signal after identify for testing
+        // } else if (!lowAboveEma && !rsiOverbought) {
+        //   // Entry evaluation BEFORE signal clearing – when both overlap, entry takes priority
+        //   tryEntry(S, c, i, e5, r14, events);
+        //   if (!S.trade) {
+        //     pushEvent(events, i, c, MountainEventType.SIGNAL_CLEARED,
+        //       `PE signal cleared – low ${c.low.toFixed(2)} < EMA5 ${e5.toFixed(2)} & RSI ${r14.toFixed(1)} <= ${rsiOverboughtThreshold}`,
+        //       { signalHigh: S.signal!.high, signalLow: S.signal!.low, ema5: e5, rsi14: r14 });
+        //     S.signal = null;
+        //   }
+        // }
       }
     }
 

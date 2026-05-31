@@ -292,10 +292,11 @@ class MountainSignalLiveAutoTrader:
         else:
             if low_above_ema and rsi_overbought:
                 self._signal = {"high": c["high"], "low": c["low"], "time": sig_key, "candle_key": sig_key}
-            elif not low_above_ema and not rsi_overbought:
-                self._try_entry(c, all_candles, e5, r14)
-                if not self._trade:
-                    self._signal = None
+            # Temporarily disabled – keep signal after identify for testing
+            # elif not low_above_ema and not rsi_overbought:
+            #     self._try_entry(c, all_candles, e5, r14)
+            #     if not self._trade:
+            #         self._signal = None
 
         # Entry evaluation
         if not self._trade and self._signal is not None:

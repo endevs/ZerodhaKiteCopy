@@ -16,7 +16,7 @@ export interface TradeMarker {
   time: string;
   price: number;
   direction: 'long' | 'short';
-  action: 'entry' | 'exit' | 'signal';
+  action: 'entry' | 'exit' | 'signal_identified' | 'signal_reset';
   label?: string;
 }
 
@@ -266,7 +266,8 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
     if (markers && markers.length > 0) {
       const buyMarkers = markers.filter((m) => m.action === 'entry');
       const sellMarkers = markers.filter((m) => m.action === 'exit');
-      const signalMarkers = markers.filter((m) => m.action === 'signal');
+      const signalIdentifiedMarkers = markers.filter((m) => m.action === 'signal_identified');
+      const signalResetMarkers = markers.filter((m) => m.action === 'signal_reset');
 
       if (buyMarkers.length > 0) {
         out.push({
@@ -311,21 +312,42 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
         });
       }
 
-      if (signalMarkers.length > 0) {
+      if (signalIdentifiedMarkers.length > 0) {
         out.push({
-          x: signalMarkers.map((m) => m.time),
-          y: signalMarkers.map((m) => m.price),
+          x: signalIdentifiedMarkers.map((m) => m.time),
+          y: signalIdentifiedMarkers.map((m) => m.price),
           type: 'scatter',
           mode: 'markers',
-          name: 'Signal',
+          name: 'Signal Identified',
           marker: {
             symbol: 'star',
             size: 14,
-            color: '#ff69b4',
-            line: { width: 1, color: '#c71585' },
+            color: '#0d6efd',
+            line: { width: 1, color: '#fff' },
           },
-          text: signalMarkers.map(
-            (m) => `PE Signal @ ${m.price.toFixed(2)}${m.label ? ' | ' + m.label : ''}`,
+          text: signalIdentifiedMarkers.map(
+            (m) => `PE Signal Identified @ ${m.price.toFixed(2)}${m.label ? ' | ' + m.label : ''}`,
+          ),
+          hoverinfo: 'text+x',
+          yaxis: 'y',
+        });
+      }
+
+      if (signalResetMarkers.length > 0) {
+        out.push({
+          x: signalResetMarkers.map((m) => m.time),
+          y: signalResetMarkers.map((m) => m.price),
+          type: 'scatter',
+          mode: 'markers',
+          name: 'Signal Reset',
+          marker: {
+            symbol: 'star',
+            size: 14,
+            color: '#ffc107',
+            line: { width: 1, color: '#856404' },
+          },
+          text: signalResetMarkers.map(
+            (m) => `PE Signal Reset @ ${m.price.toFixed(2)}${m.label ? ' | ' + m.label : ''}`,
           ),
           hoverinfo: 'text+x',
           yaxis: 'y',
