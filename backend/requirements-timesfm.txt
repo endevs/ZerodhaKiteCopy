@@ -1,0 +1,4 @@
+# TimesFM optional extras (installed with timesfm package from source in Docker).
+# First inference downloads google/timesfm-2.5-200m-pytorch (~925MB) unless prefetched.
+huggingface_hub
+safetensors

@@ -137,6 +137,17 @@ def run_forecast(
     """
     import numpy as np
 
+    from prediction_providers import (
+        build_warnings,
+        compute_ensemble,
+        has_any_prediction,
+        pick_best_model,
+        provider_map,
+        run_lstm_provider,
+        run_moirai_provider,
+        run_timesfm_provider,
+    )
+
     result: Dict[str, Any] = {
         "actual": [],
         "timesfm": [],
@@ -148,6 +159,9 @@ def run_forecast(
         "best_model": "TimesFM",
         "mae": 0.0,
         "error": None,
+        "providers": {},
+        "warning": None,
+        "warnings": [],
     }
 
     instrument_token = TOKEN_MAP.get(symbol.upper(), TOKEN_MAP["NIFTY"])
@@ -210,96 +224,34 @@ def run_forecast(
         context = context[-CONTEXT_LEN:] if len(context) > CONTEXT_LEN else context
         actual = actual[:horizon] if len(actual) > horizon else actual
 
-    # LSTM
-    lstm_forecast = None
-    model_dir = os.path.join(_backend_dir, "models")
-    if candles_for_lstm is not None and len(candles_for_lstm) >= 300:
-        try:
-            from ai_ml import train_lstm_on_candles, load_model_and_predict
-            lstm_lookback = 120 if len(candles_for_lstm) < 450 else 200
-            train_lstm_on_candles(
-                candles=candles_for_lstm,
-                model_dir=model_dir,
-                symbol=symbol,
-                lookback=lstm_lookback,
-                horizon=1,
-                epochs=30,
-                batch_size=64,
-            )
-            lstm_result = load_model_and_predict(
-                model_dir=model_dir,
-                symbol=symbol,
-                candles=candles_for_lstm,
-                horizon=1,
-                lookback=lstm_lookback,
-                steps_ahead=horizon,
-            )
-            lstm_forecast = np.array(lstm_result["predictions"], dtype=np.float32)
-        except Exception as e:
-            logger.warning("LSTM training or prediction failed: %s", e)
-            lstm_forecast = None
+    lstm_res = run_lstm_provider(symbol, candles_for_lstm, horizon)
+    timesfm_res = run_timesfm_provider(context, horizon)
+    moirai_res = run_moirai_provider(candles, horizon, segment, predict_future)
+    ensemble_res = compute_ensemble(timesfm_res.values, lstm_res.values, horizon)
 
-    # TimesFM
-    try:
-        import timesfm
-        import torch
+    provider_results = [lstm_res, timesfm_res, moirai_res, ensemble_res]
+    result["providers"] = provider_map(provider_results)
+    result["warnings"] = build_warnings(result["providers"])
+    if result["warnings"]:
+        result["warning"] = "; ".join(result["warnings"])
 
-        torch.set_float32_matmul_precision("high")
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        local_model_path = os.path.join(script_dir, "timesfm_model")
-        if os.path.isdir(local_model_path) and os.path.exists(os.path.join(local_model_path, "model.safetensors")):
-            model = timesfm.TimesFM_2p5_200M_torch.from_pretrained(local_model_path)
-        else:
-            model = timesfm.TimesFM_2p5_200M_torch.from_pretrained("google/timesfm-2.5-200m-pytorch")
-        model.compile(
-            timesfm.ForecastConfig(
-                max_context=512,
-                max_horizon=max(24, horizon),
-                normalize_inputs=True,
-                use_continuous_quantile_head=True,
-                force_flip_invariance=True,
-                infer_is_positive=True,
-                fix_quantile_crossing=True,
-            )
-        )
-        point_forecast, quantile_forecast = model.forecast(horizon=horizon, inputs=[context])
-        point_forecast = np.array(point_forecast)
-        quantile_forecast = np.array(quantile_forecast) if quantile_forecast is not None else None
-        if quantile_forecast is not None and quantile_forecast.shape[-1] >= 5:
-            median_idx = quantile_forecast.shape[-1] // 2
-            timesfm_forecast = np.array(quantile_forecast[0, :, median_idx], dtype=np.float32)
-        else:
-            timesfm_forecast = point_forecast[0]
-    except ImportError as e:
-        result["error"] = f"TimesFM not installed: {e}"
+    lstm_forecast = lstm_res.values
+    timesfm_forecast = timesfm_res.values or []
+    ensemble_forecast = ensemble_res.values
+    moirai_forecast = moirai_res.values
+    result["moirai_error"] = moirai_res.error
+
+    if not has_any_prediction(
+        {
+            "timesfm": timesfm_forecast,
+            "lstm": lstm_forecast,
+            "ensemble": ensemble_forecast,
+            "moirai": moirai_forecast,
+        }
+    ):
+        errors = [r.error for r in provider_results if r.error and r.name != "ensemble"]
+        result["error"] = "; ".join(errors) if errors else "All prediction providers failed"
         return result
-    except Exception as e:
-        result["error"] = str(e)
-        return result
-
-    ensemble_forecast = None
-    if lstm_forecast is not None and len(lstm_forecast) == horizon:
-        ensemble_forecast = (timesfm_forecast + lstm_forecast) / 2.0
-
-    # Moirai 2.0 (constituent-based index prediction)
-    moirai_forecast = None
-    try:
-        from moirai_service import run_moirai_on_candles
-        moirai_arr = run_moirai_on_candles(
-            candles, horizon=horizon, segment=segment, predict_future=predict_future
-        )
-        if moirai_arr is not None and len(moirai_arr) == horizon:
-            moirai_forecast = moirai_arr
-        elif moirai_arr is not None:
-            result["moirai_error"] = f"Moirai forecast length mismatch (got {len(moirai_arr)}, expected {horizon})"
-        else:
-            result["moirai_error"] = "Moirai forecast unavailable (insufficient data or internal failure)"
-    except ImportError as e:
-        result["moirai_error"] = f"uni2ts not installed: {e}"
-        logger.warning("Moirai forecast skipped: %s", e)
-    except Exception as e:
-        result["moirai_error"] = str(e)
-        logger.warning("Moirai forecast skipped: %s", e)
 
     if not predict_future:
         actual_timestamps = (
@@ -310,41 +262,23 @@ def run_forecast(
         result["timestamps"] = actual_timestamps
         result["actual"] = [float(x) for x in actual]
 
-        # Best model by MAE
-        errors_tf = [abs(float(timesfm_forecast[i]) - float(actual[i])) for i in range(horizon)]
-        mae_tf = float(np.mean(errors_tf))
-        best_model = "TimesFM"
-        best_mae = mae_tf
-
-        if lstm_forecast is not None and ensemble_forecast is not None:
-            errors_lstm = [abs(float(lstm_forecast[i]) - float(actual[i])) for i in range(horizon)]
-            errors_ens = [abs(float(ensemble_forecast[i]) - float(actual[i])) for i in range(horizon)]
-            mae_lstm = float(np.mean(errors_lstm))
-            mae_ens = float(np.mean(errors_ens))
-            if mae_lstm < best_mae:
-                best_mae = mae_lstm
-                best_model = "LSTM"
-            if mae_ens < best_mae:
-                best_mae = mae_ens
-                best_model = "Ensemble"
-
-        if moirai_forecast is not None:
-            errors_moirai = [abs(float(moirai_forecast[i]) - float(actual[i])) for i in range(horizon)]
-            mae_moirai = float(np.mean(errors_moirai))
-            if mae_moirai < best_mae:
-                best_mae = mae_moirai
-                best_model = "Moirai 2.0"
-
+        best_model, best_mae = pick_best_model(
+            result["actual"],
+            timesfm_forecast if timesfm_forecast else None,
+            lstm_forecast,
+            ensemble_forecast,
+            moirai_forecast,
+        )
         result["best_model"] = best_model
         result["mae"] = best_mae
     else:
         result["best_model"] = "TimesFM"  # Default when no actual to compare
         result["mae"] = 0.0
 
-    result["timesfm"] = [float(x) for x in timesfm_forecast]
-    result["lstm"] = [float(x) for x in lstm_forecast] if lstm_forecast is not None else None
-    result["ensemble"] = [float(x) for x in ensemble_forecast] if ensemble_forecast is not None else None
-    result["moirai"] = [float(x) for x in moirai_forecast] if moirai_forecast is not None else None
+    result["timesfm"] = timesfm_forecast if timesfm_forecast else []
+    result["lstm"] = lstm_forecast
+    result["ensemble"] = ensemble_forecast
+    result["moirai"] = moirai_forecast
 
     return result
 
@@ -354,86 +288,21 @@ def _predict_single_chunk(
     context: "np.ndarray",
     candles_for_lstm: list,
     horizon: int,
-) -> Tuple["np.ndarray", Optional["np.ndarray"], Optional["np.ndarray"], Optional["np.ndarray"], Optional[str]]:
-    """Predict one chunk: returns (timesfm, lstm, ensemble, moirai, moirai_error). LSTM/ensemble/moirai may be None."""
+) -> Tuple[Optional["np.ndarray"], Optional["np.ndarray"], Optional["np.ndarray"], Optional["np.ndarray"], Optional[str]]:
+    """Predict one chunk: returns (timesfm, lstm, ensemble, moirai, moirai_error). Any may be None."""
     import numpy as np
+    from prediction_providers import compute_ensemble, run_lstm_provider, run_moirai_provider, run_timesfm_provider
 
-    lstm_forecast = None
-    model_dir = os.path.join(_backend_dir, "models")
-    if candles_for_lstm and len(candles_for_lstm) >= 300:
-        try:
-            from ai_ml import train_lstm_on_candles, load_model_and_predict
-            lstm_lookback = 120 if len(candles_for_lstm) < 450 else 200
-            train_lstm_on_candles(
-                candles=candles_for_lstm,
-                model_dir=model_dir,
-                symbol=symbol,
-                lookback=lstm_lookback,
-                horizon=1,
-                epochs=30,
-                batch_size=64,
-            )
-            lstm_result = load_model_and_predict(
-                model_dir=model_dir,
-                symbol=symbol,
-                candles=candles_for_lstm,
-                horizon=1,
-                lookback=lstm_lookback,
-                steps_ahead=horizon,
-            )
-            lstm_forecast = np.array(lstm_result["predictions"], dtype=np.float32)
-        except Exception as e:
-            logger.warning("LSTM training or prediction failed in chunk: %s", e)
+    lstm_res = run_lstm_provider(symbol, candles_for_lstm, horizon)
+    timesfm_res = run_timesfm_provider(context, horizon)
+    moirai_res = run_moirai_provider([], horizon, "last", False, context=context)
+    ensemble_res = compute_ensemble(timesfm_res.values, lstm_res.values, horizon)
 
-    try:
-        import timesfm
-        import torch
-
-        torch.set_float32_matmul_precision("high")
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        local_model_path = os.path.join(script_dir, "timesfm_model")
-        if os.path.isdir(local_model_path) and os.path.exists(os.path.join(local_model_path, "model.safetensors")):
-            model = timesfm.TimesFM_2p5_200M_torch.from_pretrained(local_model_path)
-        else:
-            model = timesfm.TimesFM_2p5_200M_torch.from_pretrained("google/timesfm-2.5-200m-pytorch")
-        model.compile(
-            timesfm.ForecastConfig(
-                max_context=512,
-                max_horizon=max(24, horizon),
-                normalize_inputs=True,
-                use_continuous_quantile_head=True,
-                force_flip_invariance=True,
-                infer_is_positive=True,
-                fix_quantile_crossing=True,
-            )
-        )
-        point_forecast, quantile_forecast = model.forecast(horizon=horizon, inputs=[context])
-        point_forecast = np.array(point_forecast)
-        quantile_forecast = np.array(quantile_forecast) if quantile_forecast is not None else None
-        if quantile_forecast is not None and quantile_forecast.shape[-1] >= 5:
-            median_idx = quantile_forecast.shape[-1] // 2
-            timesfm_forecast = np.array(quantile_forecast[0, :, median_idx], dtype=np.float32)
-        else:
-            timesfm_forecast = point_forecast[0]
-    except Exception as e:
-        logger.warning("TimesFM forecast failed in chunk: %s", e)
-        raise
-
-    ensemble_forecast = None
-    if lstm_forecast is not None and len(lstm_forecast) == horizon:
-        ensemble_forecast = (timesfm_forecast + lstm_forecast) / 2.0
-
-    moirai_forecast = None
-    moirai_error = None
-    try:
-        from moirai_service import _moirai_forecast_univariate
-        moirai_forecast = _moirai_forecast_univariate(context, horizon)
-    except ImportError as e:
-        moirai_error = f"uni2ts not installed: {e}"
-        logger.warning("Moirai chunk failed: %s", e)
-    except Exception as e:
-        moirai_error = str(e)
-        logger.warning("Moirai chunk failed: %s", e)
+    lstm_forecast = np.array(lstm_res.values, dtype=np.float32) if lstm_res.values else None
+    timesfm_forecast = np.array(timesfm_res.values, dtype=np.float32) if timesfm_res.values else None
+    ensemble_forecast = np.array(ensemble_res.values, dtype=np.float32) if ensemble_res.values else None
+    moirai_forecast = np.array(moirai_res.values, dtype=np.float32) if moirai_res.values else None
+    moirai_error = moirai_res.error
 
     return timesfm_forecast, lstm_forecast, ensemble_forecast, moirai_forecast, moirai_error
 
@@ -450,6 +319,14 @@ def run_forecast_full_day(
     """
     import numpy as np
 
+    from prediction_providers import (
+        ProviderResult,
+        build_warnings,
+        has_any_prediction,
+        pick_best_model,
+        provider_map,
+    )
+
     result: Dict[str, Any] = {
         "candles": [],
         "actual": [],
@@ -462,6 +339,9 @@ def run_forecast_full_day(
         "best_model": "TimesFM",
         "mae": 0.0,
         "error": None,
+        "providers": {},
+        "warning": None,
+        "warnings": [],
     }
 
     instrument_token = TOKEN_MAP.get(symbol.upper(), TOKEN_MAP["NIFTY"])
@@ -516,6 +396,8 @@ def run_forecast_full_day(
     lstm_available = True
     ensemble_available = True
     moirai_available = True
+    timesfm_available = True
+    chunk_warnings: List[str] = []
 
     i = 0
     while i < len(day_candles):
@@ -528,28 +410,29 @@ def run_forecast_full_day(
         close_series = candles_to_close_series(context_candles)
         context = close_series[-CONTEXT_LEN:] if len(close_series) > CONTEXT_LEN else close_series
 
-        try:
-            tf_pred, lstm_pred, ens_pred, moirai_pred, moirai_err = _predict_single_chunk(
-                symbol, context, context_candles, chunk_size
-            )
+        tf_pred, lstm_pred, ens_pred, moirai_pred, moirai_err = _predict_single_chunk(
+            symbol, context, context_candles, chunk_size
+        )
+        if tf_pred is not None and timesfm_available:
             timesfm_all.extend([float(x) for x in tf_pred])
-            if lstm_pred is not None and lstm_available:
-                lstm_all.extend([float(x) for x in lstm_pred])
-            else:
-                lstm_available = False
-            if ens_pred is not None and ensemble_available:
-                ensemble_all.extend([float(x) for x in ens_pred])
-            else:
-                ensemble_available = False
-            if moirai_pred is not None and moirai_available:
-                moirai_all.extend([float(x) for x in moirai_pred])
-            else:
-                if moirai_available and result["moirai_error"] is None and moirai_err:
-                    result["moirai_error"] = moirai_err
-                moirai_available = False
-        except Exception as e:
-            result["error"] = f"Chunk prediction failed at index {i}: {e}"
-            return result
+        else:
+            timesfm_available = False
+            if tf_pred is None:
+                chunk_warnings.append(f"TimesFM chunk failed at index {i}")
+        if lstm_pred is not None and lstm_available:
+            lstm_all.extend([float(x) for x in lstm_pred])
+        else:
+            lstm_available = False
+        if ens_pred is not None and ensemble_available:
+            ensemble_all.extend([float(x) for x in ens_pred])
+        else:
+            ensemble_available = False
+        if moirai_pred is not None and moirai_available:
+            moirai_all.extend([float(x) for x in moirai_pred])
+        else:
+            if moirai_available and result["moirai_error"] is None and moirai_err:
+                result["moirai_error"] = moirai_err
+            moirai_available = False
 
         i += chunk_size
 
@@ -558,29 +441,33 @@ def run_forecast_full_day(
     result["ensemble"] = ensemble_all if ensemble_all else None
     result["moirai"] = moirai_all if moirai_all else None
 
-    if len(timesfm_all) == len(result["actual"]):
-        errors_tf = [abs(timesfm_all[j] - result["actual"][j]) for j in range(len(timesfm_all))]
-        mae_tf = float(np.mean(errors_tf))
-        best_model = "TimesFM"
-        best_mae = mae_tf
-        if lstm_all and len(lstm_all) == len(result["actual"]):
-            errors_lstm = [abs(lstm_all[j] - result["actual"][j]) for j in range(len(lstm_all))]
-            mae_lstm = float(np.mean(errors_lstm))
-            if mae_lstm < best_mae:
-                best_mae = mae_lstm
-                best_model = "LSTM"
-        if ensemble_all and len(ensemble_all) == len(result["actual"]):
-            errors_ens = [abs(ensemble_all[j] - result["actual"][j]) for j in range(len(ensemble_all))]
-            mae_ens = float(np.mean(errors_ens))
-            if mae_ens < best_mae:
-                best_mae = mae_ens
-                best_model = "Ensemble"
-        if moirai_all and len(moirai_all) == len(result["actual"]):
-            errors_moirai = [abs(moirai_all[j] - result["actual"][j]) for j in range(len(moirai_all))]
-            mae_moirai = float(np.mean(errors_moirai))
-            if mae_moirai < best_mae:
-                best_mae = mae_moirai
-                best_model = "Moirai 2.0"
+    result["providers"] = provider_map(
+        [
+            ProviderResult("timesfm", timesfm_all or None, None if timesfm_all else "unavailable"),
+            ProviderResult("lstm", lstm_all or None, None if lstm_all else "unavailable"),
+            ProviderResult("ensemble", ensemble_all or None, None if ensemble_all else "unavailable"),
+            ProviderResult("moirai", moirai_all or None, result.get("moirai_error")),
+        ]
+    )
+    result["warnings"] = chunk_warnings + build_warnings(result["providers"])
+    if result["warnings"]:
+        result["warning"] = "; ".join(result["warnings"])
+
+    if not has_any_prediction(result):
+        result["error"] = "All prediction providers failed for full-day forecast"
+        return result
+
+    n = len(result["actual"])
+    if n > 0 and any(
+        len(series) == n for series in (timesfm_all, lstm_all, ensemble_all, moirai_all) if series
+    ):
+        best_model, best_mae = pick_best_model(
+            result["actual"],
+            timesfm_all if len(timesfm_all) == n else None,
+            lstm_all if lstm_all and len(lstm_all) == n else None,
+            ensemble_all if ensemble_all and len(ensemble_all) == n else None,
+            moirai_all if moirai_all and len(moirai_all) == n else None,
+        )
         result["best_model"] = best_model
         result["mae"] = best_mae
 

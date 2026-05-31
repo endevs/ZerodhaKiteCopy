@@ -54,6 +54,11 @@ interface ChartErrorBoundaryState {
 const toPlotTime = (t: Date | string): string =>
   t instanceof Date ? t.toISOString() : t;
 
+const plotTimeMs = (t: Date | string): number => {
+  const ms = new Date(toPlotTime(t)).getTime();
+  return Number.isNaN(ms) ? 0 : ms;
+};
+
 class ChartErrorBoundary extends React.Component<
   { children: React.ReactNode; height: number },
   ChartErrorBoundaryState
@@ -335,10 +340,26 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
 
   const xRange = useMemo(() => {
     if (!data || data.length === 0) return undefined;
-    const first = toPlotTime(data[0].time);
-    const last = toPlotTime(data[data.length - 1].time);
-    return [first, last] as [string, string];
-  }, [data]);
+    // Keep axis bounds in the same string format as candle times (naive IST).
+    // Do NOT use Date.toISOString() — Plotly treats naive strings as UTC wall-clock;
+    // mixing UTC Z bounds with naive candle x values hides most of the session.
+    const minTime = toPlotTime(data[0].time);
+    let maxTime = toPlotTime(data[data.length - 1].time);
+    let maxMs = plotTimeMs(maxTime);
+
+    if (predictionOverlays?.length) {
+      for (const overlay of predictionOverlays) {
+        for (const x of overlay.x) {
+          const ms = plotTimeMs(x);
+          if (ms > maxMs) {
+            maxMs = ms;
+            maxTime = toPlotTime(x);
+          }
+        }
+      }
+    }
+    return [minTime, maxTime] as [string, string];
+  }, [data, predictionOverlays]);
 
   const layout = useMemo(() => {
     let priceDomainBottom = 0;

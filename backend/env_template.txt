@@ -29,10 +29,19 @@ GOOGLE_CLIENT_SECRET=
 # Production: https://your-domain.com/api/auth/google/callback
 GOOGLE_REDIRECT_URI=http://localhost:8003/api/auth/google/callback
 
-# Optional AI
+# Optional AI / Prediction (HTTPS egress required for first model download)
 GROQ_API_KEY=
 GROQ_MODEL=llama-3.1-8b-instant
 LOG_LEVEL=INFO
+# Prediction providers (Docker: paths set in docker-compose)
+# PREDICTION_ENABLE_TIMESFM=1
+# PREDICTION_ENABLE_LSTM=1
+# PREDICTION_ENABLE_MOIRAI=0
+# TIMESFM_MODEL_PATH=/app/timesfm_model
+# MOIRAI_MODEL_PATH=/app/moirai_model
+# LSTM_MODEL_DIR=/app/models
+# Outbound HTTPS (firewall): api.kite.trade, huggingface.co, cdn-lfs.huggingface.co
+# Prefetch on prod: ./scripts/prefetch_ai_models.sh  (writes to ./data/timesfm_model)
 
 # SMTP
 SMTP_SERVER=smtp.gmail.com

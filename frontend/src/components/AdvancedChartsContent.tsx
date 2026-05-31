@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import PlotlyCandlestickChart, { PlotlyCandlePoint, TradeMarker, PredictionOverlay } from './PlotlyCandlestickChart';
 import { Plot } from '../lib/plotly-finance';
-import { apiUrl } from '../config/api';
+import { apiUrl, parseResponseJson } from '../config/api';
 import { useSocket } from '../hooks/useSocket';
 import { runMountainBacktest } from './advancedCharts/mountainStrategyEngine';
 import { computeRSI, computeADX } from './advancedCharts/mountainIndicators';
@@ -206,10 +206,6 @@ const AdvancedChartsContent: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
   const [isLiveStreaming, setIsLiveStreaming] = useState<boolean>(false);
-  const [constituentOverlays, setConstituentOverlays] = useState<{
-    timestamps: string[];
-    overlays: Record<string, number[]>;
-  } | null>(null);
 
   // Backtest state
   const [btStrategy, setBtStrategy] = useState<BtStrategy>('mountain');
@@ -252,8 +248,12 @@ const AdvancedChartsContent: React.FC = () => {
     best_model: string;
     mae: number;
     is_live: boolean;
+    warning?: string | null;
+    warnings?: string[];
+    providers?: Record<string, { ok?: boolean; error?: string | null }>;
     candles?: Array<{ timestamp: string; open: number; high: number; low: number; close: number; volume?: number }>;
   } | null>(null);
+  const [predictionWarning, setPredictionWarning] = useState<string | null>(null);
   const [predictionError, setPredictionError] = useState<string | null>(null);
   const [predictionRsiOverbought, setPredictionRsiOverbought] = useState<number>(70);
   const [predictionRsiOversold, setPredictionRsiOversold] = useState<number>(30);
@@ -454,43 +454,6 @@ const AdvancedChartsContent: React.FC = () => {
     const id = setInterval(() => { fetchCandles(); }, 60_000);
     return () => clearInterval(id);
   }, [activeTab, isToday, fetchCandles]);
-
-  // ---------- Constituent overlays (HDFCBANK, ICICIBANK, KOTAKBANK, SBIN) for main chart ----------
-  const fetchConstituentOverlays = useCallback(async () => {
-    if (!selectedDate || rawCandles.length === 0) {
-      setConstituentOverlays(null);
-      return;
-    }
-    try {
-      const url = apiUrl(
-        `/api/plotly/constituent-overlays?date=${selectedDate}&interval=${kiteInterval}`,
-      );
-      const resp = await fetch(url, { credentials: 'include' });
-      const data = await resp.json();
-      if (!resp.ok) {
-        setConstituentOverlays(null);
-        return;
-      }
-      if (data.timestamps?.length && Object.keys(data.overlays || {}).length > 0) {
-        setConstituentOverlays({
-          timestamps: data.timestamps,
-          overlays: data.overlays,
-        });
-      } else {
-        setConstituentOverlays(null);
-      }
-    } catch {
-      setConstituentOverlays(null);
-    }
-  }, [selectedDate, kiteInterval, rawCandles.length]);
-
-  useEffect(() => {
-    if (activeTab === 'live' && rawCandles.length > 0) {
-      fetchConstituentOverlays();
-    } else {
-      setConstituentOverlays(null);
-    }
-  }, [activeTab, rawCandles.length, fetchConstituentOverlays]);
 
   // ---------- saveToArchive ----------
   const saveToArchive = useCallback(async (payload: {
@@ -897,6 +860,7 @@ const AdvancedChartsContent: React.FC = () => {
   const fetchPrediction = useCallback(async () => {
     setPredictionLoading(true);
     setPredictionError(null);
+    setPredictionWarning(null);
     setPredictionData(null);
     setPredictionWarmupCandles([]);
     const isLive = predictionDate === todayStr();
@@ -921,7 +885,11 @@ const AdvancedChartsContent: React.FC = () => {
           ema_slow: 20,
         }),
       });
-      const btData = await btRes.json();
+      const btData = await parseResponseJson<{
+        candles?: Array<{
+          timestamp: string; open: number; high: number; low: number; close: number; volume?: number;
+        }>;
+      }>(btRes);
       const allCandles = (btData.candles || []) as Array<{
         timestamp: string; open: number; high: number; low: number; close: number; volume?: number;
       }>;
@@ -942,22 +910,73 @@ const AdvancedChartsContent: React.FC = () => {
       let url = apiUrl(`/api/prediction/forecast?index=${predictionIndex}&date=${predictionDate}`);
       if (fullDay) url += '&full_day=true';
       let res = await fetch(url, { credentials: 'include' });
-      let data = await res.json();
+      let data = await parseResponseJson<{
+        error?: string;
+        authExpired?: boolean;
+        actual?: number[];
+        timesfm?: number[];
+        lstm?: number[] | null;
+        ensemble?: number[] | null;
+        moirai?: number[] | null;
+        moirai_error?: string | null;
+        timestamps?: string[];
+        best_model?: string;
+        mae?: number;
+        is_live?: boolean;
+        warning?: string | null;
+        warnings?: string[];
+        providers?: Record<string, { ok?: boolean; error?: string | null }>;
+        candles?: Array<{ timestamp: string; open: number; high: number; low: number; close: number; volume?: number }>;
+      }>(res);
 
       // Fallback to last-12 if full_day fails
       if (fullDay && !res.ok && data.error) {
         url = apiUrl(`/api/prediction/forecast?index=${predictionIndex}&date=${predictionDate}`);
         res = await fetch(url, { credentials: 'include' });
-        data = await res.json();
+        data = await parseResponseJson(res);
       }
 
-      if (!res.ok) {
+      const hasSeries = (payload: {
+        timesfm?: number[];
+        lstm?: number[] | null;
+        ensemble?: number[] | null;
+        moirai?: number[] | null;
+      }) =>
+        Boolean(
+          (payload.timesfm && payload.timesfm.length > 0) ||
+            (payload.lstm && payload.lstm.length > 0) ||
+            (payload.ensemble && payload.ensemble.length > 0) ||
+            (payload.moirai && payload.moirai.length > 0)
+        );
+
+      if (!res.ok && !hasSeries(data)) {
         setPredictionError(data.error || 'Failed to run prediction');
         return;
       }
       if (data.authExpired) {
         setPredictionError('Zerodha session expired. Please log in again.');
         return;
+      }
+      if (!hasSeries(data)) {
+        setPredictionError(data.error || 'No prediction series available');
+        return;
+      }
+      const warningParts: string[] = [];
+      if (data.warning) warningParts.push(data.warning);
+      if (Array.isArray(data.warnings)) warningParts.push(...data.warnings);
+      if (data.moirai_error) warningParts.push(`Moirai 2.0: ${data.moirai_error}`);
+      if (data.providers) {
+        Object.entries(data.providers as Record<string, { ok?: boolean; error?: string | null }>).forEach(
+          ([name, info]) => {
+            if (info && !info.ok && info.error && name !== 'ensemble') {
+              warningParts.push(`${name}: ${info.error}`);
+            }
+          }
+        );
+      }
+      const uniqueWarnings = Array.from(new Set(warningParts.filter(Boolean)));
+      if (uniqueWarnings.length > 0) {
+        setPredictionWarning(uniqueWarnings.join(' · '));
       }
       setPredictionData({
         actual: data.actual || [],
@@ -970,10 +989,20 @@ const AdvancedChartsContent: React.FC = () => {
         best_model: data.best_model || 'TimesFM',
         mae: data.mae ?? 0,
         is_live: data.is_live ?? false,
+        warning: data.warning ?? null,
+        warnings: data.warnings ?? [],
+        providers: data.providers ?? {},
         candles: data.candles || undefined,
       });
     } catch (e) {
-      setPredictionError(e instanceof Error ? e.message : 'Failed to run prediction');
+      const msg = e instanceof Error ? e.message : 'Failed to run prediction';
+      if (msg.includes('HTML instead of JSON') || msg.includes('504') || msg.includes('502')) {
+        setPredictionError(
+          'Prediction timed out (often on first run while TimesFM downloads ~925MB). Wait a few minutes and try again, or run ./scripts/prefetch_ai_models.sh on the host.'
+        );
+      } else {
+        setPredictionError(msg);
+      }
     } finally {
       setPredictionLoading(false);
     }
@@ -1066,9 +1095,9 @@ const AdvancedChartsContent: React.FC = () => {
     const toIso = (ts: string) =>
       ts.includes('T') ? ts : ts.replace(' ', 'T') + (ts.match(/\d{2}:\d{2}$/) ? ':00' : '');
     const overlayX = predictionData.timestamps.map(toIso);
-    const overlays: PredictionOverlay[] = [
-      { name: 'TimesFM', x: overlayX, y: predictionData.timesfm, color: '#1f77b4' },
-    ];
+    const overlays: PredictionOverlay[] = [];
+    if (predictionData.timesfm?.length)
+      overlays.push({ name: 'TimesFM', x: overlayX, y: predictionData.timesfm, color: '#1f77b4' });
     if (predictionData.lstm?.length)
       overlays.push({ name: 'LSTM', x: overlayX, y: predictionData.lstm, color: '#2ca02c' });
     if (predictionData.ensemble?.length)
@@ -1201,46 +1230,6 @@ const AdvancedChartsContent: React.FC = () => {
     if (activeTab !== 'live') return [];
     return liveTrades.filter((t) => markerOnSelectedDate(t.entry_time, selectedDate));
   }, [activeTab, selectedDate, liveTrades]);
-
-  const constituentOverlayTraces = useMemo((): PredictionOverlay[] => {
-    if (!constituentOverlays || chartData.length === 0) return [];
-    const { timestamps, overlays } = constituentOverlays;
-    const norm = (t: string | Date) => {
-      const s = typeof t === 'string' ? t : (t as Date).toISOString();
-      return s.replace(/\.\d+Z?$/i, '').replace('Z', '');
-    };
-    const tsToIdx = new Map<string, number>();
-    timestamps.forEach((ts, i) => tsToIdx.set(norm(ts), i));
-    const colors: Record<string, string> = {
-      HDFCBANK: '#22c55e',
-      ICICIBANK: '#3b82f6',
-      KOTAKBANK: '#f59e0b',
-      SBIN: '#ef4444',
-    };
-    const traces: PredictionOverlay[] = [];
-    for (const [sym, values] of Object.entries(overlays)) {
-      const x: (string | Date)[] = [];
-      const y: number[] = [];
-      for (const c of chartData) {
-        const key = norm(c.time);
-        const idx = tsToIdx.get(key);
-        if (idx != null && values[idx] != null && !Number.isNaN(values[idx])) {
-          x.push(c.time);
-          y.push(values[idx]);
-        }
-      }
-      if (x.length > 0 && y.length > 0) {
-        traces.push({
-          name: sym,
-          x,
-          y,
-          color: colors[sym] ?? '#6b7280',
-          yaxis: 'y4',
-        });
-      }
-    }
-    return traces;
-  }, [constituentOverlays, chartData]);
 
   const liveEventsDisplayLast5 = useMemo(() => {
     if (activeTab !== 'live') return [];
@@ -1422,7 +1411,6 @@ const AdvancedChartsContent: React.FC = () => {
                 adxData={liveAdxDisplay}
                 indexLabel={`${selectedIndex} Close`}
                 markers={liveMarkersDisplay}
-                predictionOverlays={constituentOverlayTraces}
               />
 
               <div className="row mt-3">
@@ -2614,10 +2602,17 @@ const AdvancedChartsContent: React.FC = () => {
                 <div className="alert alert-info py-2 small mb-3">
                   <i className="bi bi-info-circle me-2"></i>
                   Live mode: predicting next 12 five-minute candles. No actual data to compare yet.
+                  First run may take several minutes while TimesFM weights download (~925MB); LSTM may appear sooner if TimesFM is still loading.
                 </div>
               )}
               {predictionError && (
                 <div className="alert alert-danger py-2 mb-3">{predictionError}</div>
+              )}
+              {predictionWarning && !predictionError && (
+                <div className="alert alert-warning py-2 small mb-3">
+                  <i className="bi bi-exclamation-triangle me-2"></i>
+                  {predictionWarning}
+                </div>
               )}
               {predictionData && (
                 <div className="mb-3">
@@ -2627,7 +2622,7 @@ const AdvancedChartsContent: React.FC = () => {
                       <span><strong>MAE:</strong> {predictionData.mae.toFixed(2)}</span>
                     )}
                   </div>
-                  {predictionData.moirai_error && (
+                  {predictionData.moirai_error && !predictionWarning && (
                     <div className="alert alert-warning py-2 small mb-2">
                       <i className="bi bi-exclamation-triangle me-2"></i>
                       Moirai 2.0 unavailable: {predictionData.moirai_error}
@@ -2664,15 +2659,17 @@ const AdvancedChartsContent: React.FC = () => {
                                 marker: { size: 6 },
                               }]
                             : []),
-                          {
-                            x: predictionData.timestamps,
-                            y: predictionData.timesfm,
-                            type: 'scatter',
-                            mode: 'lines+markers',
-                            name: 'TimesFM',
-                            line: { color: '#1f77b4', width: 1.5 },
-                            marker: { size: 5 },
-                          },
+                          ...(predictionData.timesfm?.length
+                            ? [{
+                                x: predictionData.timestamps,
+                                y: predictionData.timesfm,
+                                type: 'scatter',
+                                mode: 'lines+markers',
+                                name: 'TimesFM',
+                                line: { color: '#1f77b4', width: 1.5 },
+                                marker: { size: 5 },
+                              }]
+                            : []),
                           ...(predictionData.lstm
                             ? [{
                                 x: predictionData.timestamps,

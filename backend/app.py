@@ -3802,6 +3802,23 @@ def api_plotly_constituent_overlays():
     })
 
 
+def _prediction_has_series(res: dict) -> bool:
+    for key in ('timesfm', 'lstm', 'ensemble', 'moirai'):
+        values = res.get(key)
+        if isinstance(values, list) and len(values) > 0:
+            return True
+    return False
+
+
+@app.route('/api/prediction/status', methods=['GET'])
+def api_prediction_status():
+    """Ops: provider install/cache status and outbound host checklist."""
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'error': 'User not logged in'}), 401
+    from prediction_providers import get_prediction_status
+    return jsonify(get_prediction_status())
+
+
 @app.route('/api/prediction/forecast', methods=['GET'])
 def api_prediction_forecast():
     """Run TimesFM + LSTM + Ensemble forecast. Returns actual, predictions, timestamps for chart."""
@@ -3861,8 +3878,8 @@ def api_prediction_forecast():
         logging.error(f"/api/prediction/forecast error: {err}", exc_info=True)
         return jsonify({'error': str(err)}), 500
 
-    if res.get('error'):
-        return jsonify({'error': res['error']}), 400
+    if res.get('error') and not _prediction_has_series(res):
+        return jsonify({'error': res['error'], 'providers': res.get('providers', {})}), 400
 
     payload = {
         'actual': res.get('actual', []),
@@ -3875,6 +3892,9 @@ def api_prediction_forecast():
         'best_model': res.get('best_model', 'TimesFM'),
         'mae': res.get('mae', 0),
         'is_live': is_live,
+        'providers': res.get('providers', {}),
+        'warning': res.get('warning'),
+        'warnings': res.get('warnings', []),
     }
     if full_day and not is_live and res.get('candles'):
         payload['candles'] = res['candles']

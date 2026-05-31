@@ -9,6 +9,9 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      args:
+        INSTALL_TIMESFM: "1"
+        INSTALL_MOIRAI: "0"
     env_file:
       - ./backend/.env.production
     environment:
@@ -17,9 +20,18 @@ services:
       SERVER_HOST: "0.0.0.0"
       DATABASE_PATH: /app/data/database.db
       PLAYWRIGHT_IN_DOCKER: "1"
+      TIMESFM_MODEL_PATH: /app/timesfm_model
+      MOIRAI_MODEL_PATH: /app/moirai_model
+      LSTM_MODEL_DIR: /app/models
+      PREDICTION_ENABLE_TIMESFM: "1"
+      PREDICTION_ENABLE_LSTM: "1"
+      PREDICTION_ENABLE_MOIRAI: "0"
     shm_size: "1gb"
     volumes:
       - ./data:/app/data
+      - ./data/timesfm_model:/app/timesfm_model
+      - ./data/moirai_model:/app/moirai_model
+      - ./data/models:/app/models
     # All interfaces :8003 — restrict with security group / firewall; prefer :5175 for browsers.
     ports:
       - "8003:8003"

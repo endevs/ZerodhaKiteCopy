@@ -5,8 +5,8 @@ worker_class = "gthread"
 workers = 1
 threads = 4
 bind = "0.0.0.0:8003"
-timeout = 180
-graceful_timeout = 180
+timeout = 600
+graceful_timeout = 120
 accesslog = "-"
 errorlog = "-"
 
