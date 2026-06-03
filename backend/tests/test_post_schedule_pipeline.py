@@ -40,7 +40,19 @@ class PostSchedulePipelineTests(unittest.TestCase):
         )
         self.assertEqual(calls, ["bad", "good"])
 
-    def test_default_hooks_run_for_succeeded(self) -> None:
+    @mock.patch("kite_auth.post_schedule_actions.resume_live_trades_for_user")
+    @mock.patch("kite_auth.post_schedule_actions.refresh_paper_trades_for_user")
+    @mock.patch("kite_auth.post_schedule_actions.refresh_live_deployment_tokens_for_user")
+    @mock.patch("kite_auth.post_schedule_actions.restart_backend_ticker_for_user")
+    @mock.patch("kite_auth.post_schedule_actions.ensure_options_collection_scheduler")
+    def test_default_hooks_run_for_succeeded(
+        self,
+        mock_options: mock.MagicMock,
+        mock_ticker: mock.MagicMock,
+        mock_refresh: mock.MagicMock,
+        mock_paper: mock.MagicMock,
+        mock_live: mock.MagicMock,
+    ) -> None:
         with self.assertLogs("kite_auth.post_schedule_pipeline", level="INFO") as logs:
             run_post_schedule_pipeline(
                 PostScheduleContext(
@@ -51,7 +63,12 @@ class PostSchedulePipelineTests(unittest.TestCase):
             )
         joined = "\n".join(logs.output)
         self.assertIn("post_schedule_pipeline outcome", joined)
-        self.assertIn("start_options_collection not implemented", joined)
+        self.assertNotIn("not implemented", joined)
+        mock_options.assert_called_once()
+        mock_ticker.assert_called_once_with(1)
+        mock_refresh.assert_called_once_with(1)
+        mock_paper.assert_called_once_with(1)
+        mock_live.assert_called_once_with(1)
 
     def test_stubs_skip_on_failed_outcome(self) -> None:
         with self.assertLogs("kite_auth.post_schedule_pipeline", level="INFO") as logs:

@@ -131,6 +131,49 @@ def _row_to_dict(row: Optional[Any]) -> Optional[Dict[str, Any]]:
     return data
 
 
+def list_deployments_for_user(user_id: int) -> List[Dict[str, Any]]:
+    conn = get_db_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM live_trade_deployments
+            WHERE user_id = ?
+            ORDER BY id DESC
+            """,
+            (user_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [_row_to_dict(row) for row in rows if row is not None]
+
+
+def refresh_kite_access_tokens_for_user(user_id: int, access_token: str) -> int:
+    """Update snapshotted kite_access_token on non-stopped deployments for a user."""
+    conn = get_db_connection()
+    try:
+        cursor = conn.execute(
+            """
+            UPDATE live_trade_deployments
+            SET kite_access_token = ?
+            WHERE user_id = ?
+              AND status IN (?, ?, ?, ?)
+            """,
+            (
+                access_token,
+                user_id,
+                STATUS_SCHEDULED,
+                STATUS_ACTIVE,
+                STATUS_PAUSED,
+                STATUS_ERROR,
+            ),
+        )
+        conn.commit()
+        return cursor.rowcount
+    finally:
+        conn.close()
+
+
 def get_deployment_for_user(user_id: int) -> Optional[Dict[str, Any]]:
     conn = get_db_connection()
     try:

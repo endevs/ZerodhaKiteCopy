@@ -6,8 +6,8 @@ Design rules for hooks:
 - Do not depend on Socket.IO or a browser tab.
 - Live deployments snapshot kite_access_token at deploy time; refresh via a dedicated hook.
 
-Phase 1: structured logging only.
-Phase 2: register real implementations for data collection, ticker, paper/live trading.
+Phase 1: structured logging only (superseded for default hooks).
+Phase 2: restart options scheduler, ticker, deployment tokens, paper/live monitors via post_schedule_actions.
 """
 from __future__ import annotations
 
@@ -99,43 +99,38 @@ def log_post_schedule_outcome(ctx: PostScheduleContext) -> None:
 def start_options_collection(ctx: PostScheduleContext) -> None:
     if ctx.auth_outcome not in ("succeeded", "skipped_token_valid"):
         return
-    logger.info(
-        "post_schedule_pipeline: start_options_collection not implemented (user_id=%s)",
-        ctx.user_id,
-    )
+    from kite_auth.post_schedule_actions import ensure_options_collection_scheduler
+
+    ensure_options_collection_scheduler()
 
 
 def start_backend_ticker(ctx: PostScheduleContext) -> None:
     if ctx.auth_outcome not in ("succeeded", "skipped_token_valid"):
         return
-    logger.info(
-        "post_schedule_pipeline: start_backend_ticker not implemented (user_id=%s)",
-        ctx.user_id,
-    )
+    from kite_auth.post_schedule_actions import restart_backend_ticker_for_user
+
+    restart_backend_ticker_for_user(ctx.user_id)
 
 
 def refresh_live_deployment_tokens(ctx: PostScheduleContext) -> None:
     if ctx.auth_outcome not in ("succeeded", "skipped_token_valid"):
         return
-    logger.info(
-        "post_schedule_pipeline: refresh_live_deployment_tokens not implemented (user_id=%s)",
-        ctx.user_id,
-    )
+    from kite_auth.post_schedule_actions import refresh_live_deployment_tokens_for_user
+
+    refresh_live_deployment_tokens_for_user(ctx.user_id)
 
 
 def start_paper_trades(ctx: PostScheduleContext) -> None:
     if ctx.auth_outcome not in ("succeeded", "skipped_token_valid"):
         return
-    logger.info(
-        "post_schedule_pipeline: start_paper_trades not implemented (user_id=%s)",
-        ctx.user_id,
-    )
+    from kite_auth.post_schedule_actions import refresh_paper_trades_for_user
+
+    refresh_paper_trades_for_user(ctx.user_id)
 
 
 def start_live_trades(ctx: PostScheduleContext) -> None:
     if ctx.auth_outcome not in ("succeeded", "skipped_token_valid"):
         return
-    logger.info(
-        "post_schedule_pipeline: start_live_trades not implemented (user_id=%s)",
-        ctx.user_id,
-    )
+    from kite_auth.post_schedule_actions import resume_live_trades_for_user
+
+    resume_live_trades_for_user(ctx.user_id)

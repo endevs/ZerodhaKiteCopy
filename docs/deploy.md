@@ -183,6 +183,8 @@ If the browser console shows `Unexpected token '<'` / `not valid JSON` for `/api
 
 ## Local Docker
 
+**Windows quick refresh:** double-click [`docker-refresh.bat`](../docker-refresh.bat) in the repo root to rebuild backend + frontend images, recreate containers, run health checks, and show a success/issues summary before closing.
+
 The backend image installs **CPU-only PyTorch** (`requirements-docker.txt` + PyTorch CPU index) so the first build stays ~minutes instead of multi‑GB CUDA wheels. For GPU training on the host, use a venv + full `requirements.txt` outside Docker.
 
 ```bash
