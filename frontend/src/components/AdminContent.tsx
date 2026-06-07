@@ -10,6 +10,9 @@ interface User {
   app_secret: string;
   is_admin: boolean;
   has_token: boolean;
+  token_status: 'none' | 'inactive' | 'active';
+  kite_developer_plan: string;
+  kite_user_id: string;
   token_created_at: string | null;
 }
 
@@ -139,6 +142,7 @@ const AdminContent: React.FC = () => {
   const [editingUser, setEditingUser] = useState<User | null>(null);
   const [editAppKey, setEditAppKey] = useState('');
   const [editAppSecret, setEditAppSecret] = useState('');
+  const [editKiteDeveloperPlan, setEditKiteDeveloperPlan] = useState<'connect' | 'personal' | ''>('');
   const [clearCredentials, setClearCredentials] = useState(false);
   const [savingCredentials, setSavingCredentials] = useState(false);
 
@@ -653,6 +657,8 @@ const AdminContent: React.FC = () => {
     setEditingUser(user);
     setEditAppKey('');
     setEditAppSecret('');
+    const plan = (user.kite_developer_plan || '').toLowerCase();
+    setEditKiteDeveloperPlan(plan === 'personal' ? 'personal' : plan === 'connect' ? 'connect' : '');
     setClearCredentials(false);
   };
 
@@ -660,6 +666,7 @@ const AdminContent: React.FC = () => {
     setEditingUser(null);
     setEditAppKey('');
     setEditAppSecret('');
+    setEditKiteDeveloperPlan('');
     setClearCredentials(false);
     setSavingCredentials(false);
   };
@@ -670,8 +677,9 @@ const AdminContent: React.FC = () => {
     if (!clearCredentials) {
       const key = editAppKey.trim();
       const secret = editAppSecret.trim();
-      if (!key || !secret) {
-        alert('Please provide both API Key and API Secret, or choose Clear Zerodha credentials.');
+      const planOnly = !key && !secret && Boolean(editKiteDeveloperPlan);
+      if (!planOnly && (!key || !secret)) {
+        alert('Please provide both API Key and API Secret, choose Clear Zerodha credentials, or set Developer plan only.');
         return;
       }
     }
@@ -680,7 +688,11 @@ const AdminContent: React.FC = () => {
       setSavingCredentials(true);
       const body = clearCredentials
         ? { clear_zerodha_credentials: true }
-        : { app_key: editAppKey.trim(), app_secret: editAppSecret.trim() };
+        : {
+            ...(editAppKey.trim() ? { app_key: editAppKey.trim() } : {}),
+            ...(editAppSecret.trim() ? { app_secret: editAppSecret.trim() } : {}),
+            ...(editKiteDeveloperPlan ? { kite_developer_plan: editKiteDeveloperPlan } : {}),
+          };
 
       const response = await fetch(apiUrl(`/api/admin/users/${editingUser.id}`), {
         method: 'PUT',
@@ -702,6 +714,37 @@ const AdminContent: React.FC = () => {
     } finally {
       setSavingCredentials(false);
     }
+  };
+
+  const renderDeveloperPlanBadge = (plan: string) => {
+    const normalized = (plan || '').toLowerCase();
+    if (normalized === 'connect') {
+      return <span className="badge bg-primary">Connect</span>;
+    }
+    if (normalized === 'personal') {
+      return <span className="badge bg-info text-dark">Personal</span>;
+    }
+    return <span className="text-muted">—</span>;
+  };
+
+  const renderTokenStatusBadge = (status: User['token_status']) => {
+    if (status === 'active') {
+      return (
+        <span className="badge bg-success">
+          <i className="bi bi-check-circle me-1"></i>
+          Active
+        </span>
+      );
+    }
+    if (status === 'inactive') {
+      return (
+        <span className="badge bg-warning text-dark">
+          <i className="bi bi-exclamation-circle me-1"></i>
+          Inactive
+        </span>
+      );
+    }
+    return <span className="badge bg-secondary">None</span>;
   };
 
   if (loading) {
@@ -921,10 +964,12 @@ const AdminContent: React.FC = () => {
                         <th>ID</th>
                         <th>Email</th>
                         <th>Mobile</th>
+                        <th>Zerodha ID</th>
                         <th>Status</th>
                         <th>Admin</th>
                         <th>API Key</th>
                         <th>Secret Key</th>
+                        <th>Developer Plan</th>
                         <th>Zerodha Token</th>
                         <th>Actions</th>
                       </tr>
@@ -932,7 +977,7 @@ const AdminContent: React.FC = () => {
                     <tbody>
                       {users.length === 0 ? (
                         <tr>
-                          <td colSpan={9} className="text-center text-muted">
+                          <td colSpan={11} className="text-center text-muted">
                             No users found
                           </td>
                         </tr>
@@ -942,6 +987,13 @@ const AdminContent: React.FC = () => {
                             <td>{user.id}</td>
                             <td>{user.email}</td>
                             <td>{user.mobile || 'N/A'}</td>
+                            <td>
+                              {user.kite_user_id ? (
+                                <code className="small">{user.kite_user_id}</code>
+                              ) : (
+                                <span className="text-muted">—</span>
+                              )}
+                            </td>
                             <td>
                               <span className={`badge ${user.email_verified ? 'bg-success' : 'bg-secondary'}`}>
                                 {user.email_verified ? 'Active' : 'Inactive'}
@@ -972,14 +1024,10 @@ const AdminContent: React.FC = () => {
                               </code>
                             </td>
                             <td>
-                              {user.has_token ? (
-                                <span className="badge bg-info">
-                                  <i className="bi bi-check-circle me-1"></i>
-                                  Active
-                                </span>
-                              ) : (
-                                <span className="badge bg-secondary">None</span>
-                              )}
+                              {renderDeveloperPlanBadge(user.kite_developer_plan)}
+                            </td>
+                            <td>
+                              {renderTokenStatusBadge(user.token_status || (user.has_token ? 'active' : 'none'))}
                             </td>
                             <td>
                               <div className="btn-group" role="group">
@@ -1671,6 +1719,24 @@ const AdminContent: React.FC = () => {
                   <label className="form-check-label" htmlFor="clear-zerodha-credentials">
                     Clear Zerodha credentials (remove API key and secret)
                   </label>
+                </div>
+                <div className="mb-3">
+                  <label htmlFor="admin-edit-developer-plan" className="form-label">
+                    Developer plan
+                  </label>
+                  <select
+                    id="admin-edit-developer-plan"
+                    className="form-select"
+                    value={editKiteDeveloperPlan}
+                    onChange={(e) =>
+                      setEditKiteDeveloperPlan(e.target.value as 'connect' | 'personal' | '')
+                    }
+                    disabled={savingCredentials}
+                  >
+                    <option value="">Not set</option>
+                    <option value="connect">Connect</option>
+                    <option value="personal">Personal</option>
+                  </select>
                 </div>
                 {!clearCredentials && (
                   <>

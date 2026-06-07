@@ -13,31 +13,27 @@ logger = logging.getLogger(__name__)
 
 
 def get_kite_client(user_email: str = None, user_id: int = None) -> KiteConnect:
-    """Get KiteConnect client from database"""
+    """Get KiteConnect client from database or global market data provider."""
+    if not user_id and not user_email:
+        from kite_client_resolver import get_global_provider_kite
+        return get_global_provider_kite()
+
     conn = get_db_connection()
     try:
         if user_id:
             cursor = conn.execute(
                 'SELECT app_key, app_secret, zerodha_access_token FROM users WHERE id = ? LIMIT 1',
-                (user_id,)
-            )
-        elif user_email:
-            cursor = conn.execute(
-                'SELECT app_key, app_secret, zerodha_access_token FROM users WHERE email = ? LIMIT 1',
-                (user_email,)
+                (user_id,),
             )
         else:
-            # For scheduler, get first user with valid credentials
             cursor = conn.execute(
-                'SELECT app_key, app_secret, zerodha_access_token FROM users WHERE app_key IS NOT NULL AND zerodha_access_token IS NOT NULL LIMIT 1'
+                'SELECT app_key, app_secret, zerodha_access_token FROM users WHERE email = ? LIMIT 1',
+                (user_email,),
             )
-        
         user = cursor.fetchone()
         if not user or not user[0] or not user[2]:
             raise ValueError("Zerodha credentials not found")
-        
-        kite = KiteConnect(api_key=user[0], access_token=user[2])
-        return kite
+        return KiteConnect(api_key=user[0], access_token=user[2])
     finally:
         conn.close()
 

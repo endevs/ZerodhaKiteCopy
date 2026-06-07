@@ -50,6 +50,8 @@ def ensure_core_schema():
             ("kite_password", "TEXT"),
             ("kite_totp_secret", "TEXT"),
             ("auto_auth_configured_at", "DATETIME"),
+            ("kite_developer_plan", "TEXT"),
+            ("is_market_data_provider", "BOOLEAN NOT NULL DEFAULT 0"),
         ):
             if column_name not in user_columns:
                 cur.execute(f"ALTER TABLE users ADD COLUMN {column_name} {column_def}")

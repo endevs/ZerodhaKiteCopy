@@ -1513,6 +1513,12 @@ except Exception as e:
     logging.error(f"ensure_core_schema failed: {e}")
 
 try:
+    from migrate_kite_developer_plan import migrate as migrate_kite_developer_plan
+    migrate_kite_developer_plan()
+except Exception as e:
+    logging.warning(f"Kite developer plan migration: {e}")
+
+try:
     from migrate_option_chain_quotes import ensure_option_chain_quote_schema
     ensure_option_chain_quote_schema()
 except Exception as e:
@@ -3667,12 +3673,10 @@ def api_plotly_index_candles():
         )
 
     try:
-        hist = _with_valid_kite_client(
-            session['user_id'],
-            f"plotly index candles for {index}",
-            _fetch,
-            preferred_tokens=[session.get('access_token')],
-        )
+        from kite_client_resolver import run_with_market_data_kite, MarketDataUnavailable
+        hist = run_with_market_data_kite(session['user_id'], _fetch)
+    except MarketDataUnavailable as err:
+        return jsonify({'error': str(err)}), 400
     except kite_exceptions.TokenException:
         return jsonify({'error': 'Zerodha session expired. Please log in again.', 'authExpired': True}), 401
     except RuntimeError as err:
@@ -4026,8 +4030,27 @@ def api_backtest_run():
         return all_candles
 
     try:
-        raw = _with_valid_kite_client(user_id, f"backtest {index}", _fetch_range,
-                                       preferred_tokens=[session.get('access_token')])
+        from kite_client_resolver import run_with_market_data_kite, MarketDataUnavailable
+        raw = run_with_market_data_kite(user_id, _fetch_range)
+        # #region agent log
+        try:
+            import json
+            import time
+            with open('debug-c3dc96.log', 'a', encoding='utf-8') as _df:
+                _df.write(json.dumps({
+                    'sessionId': 'c3dc96',
+                    'hypothesisId': 'H1',
+                    'location': 'app.py:api_backtest_run',
+                    'message': 'backtest market data resolved',
+                    'data': {'user_id': user_id, 'index': index, 'candle_count': len(raw or [])},
+                    'timestamp': int(time.time() * 1000),
+                    'runId': 'post-fix',
+                }) + '\n')
+        except Exception:
+            pass
+        # #endregion
+    except MarketDataUnavailable as err:
+        return jsonify({'status': 'error', 'message': str(err)}), 400
     except kite_exceptions.TokenException:
         return jsonify({'status': 'error', 'message': 'Zerodha session expired.', 'authExpired': True}), 401
     except RuntimeError as err:
@@ -5684,23 +5707,29 @@ def api_admin_get_users():
         try:
             users = conn.execute('''
                 SELECT id, email, mobile, email_verified, app_key, app_secret, 
-                       is_admin, zerodha_access_token, zerodha_token_created_at
+                       is_admin, zerodha_access_token, zerodha_token_created_at,
+                       kite_developer_plan, kite_user_id
                 FROM users
                 ORDER BY id DESC
             ''').fetchall()
             
+            from kite_client_resolver import compute_token_status
             users_list = []
             for user in users:
+                user_dict = dict(user)
                 users_list.append({
-                    'id': user['id'],
-                    'email': user['email'],
-                    'mobile': user['mobile'],
-                    'email_verified': bool(user['email_verified']),
-                    'app_key': user['app_key'] if user['app_key'] else '',
-                    'app_secret': user['app_secret'] if user['app_secret'] else '',
-                    'is_admin': bool(user['is_admin']) if user['is_admin'] is not None else False,
-                    'has_token': bool(user['zerodha_access_token']),
-                    'token_created_at': user['zerodha_token_created_at']
+                    'id': user_dict['id'],
+                    'email': user_dict['email'],
+                    'mobile': user_dict['mobile'],
+                    'email_verified': bool(user_dict['email_verified']),
+                    'app_key': user_dict['app_key'] if user_dict['app_key'] else '',
+                    'app_secret': user_dict['app_secret'] if user_dict['app_secret'] else '',
+                    'is_admin': bool(user_dict['is_admin']) if user_dict['is_admin'] is not None else False,
+                    'has_token': bool(user_dict['zerodha_access_token']),
+                    'token_status': compute_token_status(user_dict, validate=True),
+                    'token_created_at': user_dict['zerodha_token_created_at'],
+                    'kite_developer_plan': user_dict.get('kite_developer_plan') or '',
+                    'kite_user_id': user_dict.get('kite_user_id') or '',
                 })
             return jsonify({'status': 'success', 'users': users_list}), 200
         finally:
@@ -5854,12 +5883,21 @@ def api_admin_manage_user(user_id):
                         values.extend([None, None])
                         credentials_updated = True
 
-                # Update is_admin
                 if 'is_admin' in data:
                     is_admin = bool(data['is_admin'])
                     updates.append('is_admin = ?')
                     values.append(1 if is_admin else 0)
-                
+
+                if 'kite_developer_plan' in data:
+                    plan = (data.get('kite_developer_plan') or '').strip().lower()
+                    if plan and plan not in ('connect', 'personal'):
+                        return jsonify({
+                            'status': 'error',
+                            'message': 'Developer plan must be connect or personal',
+                        }), 400
+                    updates.append('kite_developer_plan = ?')
+                    values.append(plan or None)
+
                 # Update email_verified (for inactive/active)
                 if 'email_verified' in data:
                     email_verified = bool(data['email_verified'])
@@ -6117,6 +6155,11 @@ def api_user_data():
             'kite_client_id': None,  # Will be populated if token is valid
             'auto_auth': auto_auth_state,
         }
+        try:
+            from kite_client_resolver import get_user_kite_context
+            default_response.update(get_user_kite_context(user_id))
+        except Exception as exc:
+            logging.debug("Kite context unavailable: %s", exc)
 
         tokens_to_try: List[str] = []
         if session_token:
@@ -6423,7 +6466,7 @@ def api_user_credentials():
     if request.method == 'GET':
         try:
             row = conn.execute(
-                'SELECT app_key, app_secret, kite_user_id, kite_password, kite_totp_secret, auto_auth_configured_at FROM users WHERE id = ?',
+                'SELECT app_key, app_secret, kite_user_id, kite_password, kite_totp_secret, auto_auth_configured_at, kite_developer_plan FROM users WHERE id = ?',
                 (user_id,)
             ).fetchone()
             conn.close()
@@ -6453,6 +6496,7 @@ def api_user_credentials():
                 'has_kite_password': bool(row and row['kite_password']),
                 'has_kite_totp_secret': bool(row and row['kite_totp_secret']),
                 'auto_auth_configured_at': row['auto_auth_configured_at'] if row else None,
+                'kite_developer_plan': row['kite_developer_plan'] if row else None,
             })
         except Exception as exc:
             conn.close()
@@ -6467,8 +6511,13 @@ def api_user_credentials():
         kite_password = (payload.get('kite_password') or '').strip()
         kite_totp_secret = (payload.get('kite_totp_secret') or '').strip()
 
+        kite_developer_plan = (payload.get('kite_developer_plan') or '').strip().lower()
+        if kite_developer_plan and kite_developer_plan not in ('connect', 'personal'):
+            conn.close()
+            return jsonify({'status': 'error', 'message': 'kite_developer_plan must be connect or personal'}), 400
+
         row = conn.execute(
-            'SELECT app_key, app_secret, kite_user_id, kite_password, kite_totp_secret FROM users WHERE id = ?',
+            'SELECT app_key, app_secret, kite_user_id, kite_password, kite_totp_secret, kite_developer_plan FROM users WHERE id = ?',
             (user_id,),
         ).fetchone()
         existing = dict(row) if row else {}
@@ -6477,6 +6526,7 @@ def api_user_credentials():
         final_kite_user_id = kite_user_id or (existing.get('kite_user_id') or '')
         final_kite_password = kite_password or (existing.get('kite_password') or '')
         final_kite_totp_secret = kite_totp_secret or (existing.get('kite_totp_secret') or '')
+        final_plan = kite_developer_plan or (existing.get('kite_developer_plan') or '')
 
         missing_fields: List[str] = []
         if not final_app_key:
@@ -6489,6 +6539,8 @@ def api_user_credentials():
             missing_fields.append('kite_password')
         if not final_kite_totp_secret:
             missing_fields.append('kite_totp_secret')
+        if not final_plan and app_key and app_secret:
+            missing_fields.append('kite_developer_plan')
         if missing_fields:
             conn.close()
             return jsonify({
@@ -6498,7 +6550,7 @@ def api_user_credentials():
             }), 400
 
         conn.execute(
-            'UPDATE users SET app_key = ?, app_secret = ?, kite_user_id = ?, kite_password = ?, kite_totp_secret = ?, auto_auth_configured_at = ? WHERE id = ?',
+            'UPDATE users SET app_key = ?, app_secret = ?, kite_user_id = ?, kite_password = ?, kite_totp_secret = ?, auto_auth_configured_at = ?, kite_developer_plan = ? WHERE id = ?',
             (
                 final_app_key,
                 final_app_secret,
@@ -6506,6 +6558,7 @@ def api_user_credentials():
                 final_kite_password,
                 final_kite_totp_secret,
                 datetime.datetime.now().isoformat(),
+                final_plan,
                 user_id,
             )
         )
@@ -6517,6 +6570,7 @@ def api_user_credentials():
             'has_credentials': True,
             'auto_auth_details_present': True,
             'missing_fields': [],
+            'kite_developer_plan': final_plan or None,
         })
     except sqlite3.IntegrityError as db_err:
         conn.rollback()
@@ -6528,6 +6582,37 @@ def api_user_credentials():
         conn.close()
         logging.error("Unexpected error while saving credentials: %s", exc, exc_info=True)
         return jsonify({'status': 'error', 'message': 'Unexpected error occurred.'}), 500
+
+
+@app.route("/api/user-credentials/plan", methods=['POST'])
+def api_user_credentials_plan():
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+    payload = request.get_json(silent=True) or {}
+    plan = (payload.get('kite_developer_plan') or '').strip().lower()
+    if plan not in ('connect', 'personal'):
+        return jsonify({'status': 'error', 'message': 'Select Connect or Personal plan type'}), 400
+    user_id = session['user_id']
+    conn = get_db_connection()
+    try:
+        row = conn.execute(
+            'SELECT app_key, app_secret FROM users WHERE id = ?',
+            (user_id,),
+        ).fetchone()
+        if not row or not row['app_key'] or not row['app_secret']:
+            return jsonify({
+                'status': 'error',
+                'message': 'Add API key and secret on Welcome before selecting a plan type.',
+            }), 400
+        conn.execute(
+            'UPDATE users SET kite_developer_plan = ? WHERE id = ?',
+            (plan, user_id),
+        )
+        conn.commit()
+        return jsonify({'status': 'success', 'kite_developer_plan': plan})
+    finally:
+        conn.close()
+
 
 @app.route("/strategy/save", methods=['POST'])
 @app.route("/api/strategy/save", methods=['POST'])
@@ -9065,14 +9150,16 @@ def api_market_snapshot():
         }
 
         try:
-            resp = _with_valid_kite_client(
+            from kite_client_resolver import run_with_market_data_kite, MarketDataUnavailable
+            resp = run_with_market_data_kite(
                 session['user_id'],
-                "market snapshot",
                 lambda client: execute_with_retries(
                     "fetching quick market snapshot",
                     lambda: client.ltp(list(instruments.values()))
-                )
+                ),
             )
+        except MarketDataUnavailable as err:
+            return jsonify({'status': 'error', 'message': str(err)}), 503
         except kite_exceptions.TokenException:
             # #region agent log
             try:
@@ -11418,20 +11505,22 @@ def api_mountain_signal_live_place_order():
 def api_zerodha_orders():
     if 'user_id' not in session:
         return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+    from kite_client_resolver import (
+        resolve_trading_kite,
+        TradingCredentialsRequired,
+        TradingTokenRequired,
+    )
     try:
-        def _fetch_orders(client: KiteConnect):
-            return execute_with_retries("fetching Zerodha orders", lambda: client.orders())
-
-        raw = _with_valid_kite_client(
-            session['user_id'],
-            "Zerodha orders for Mountain Signal",
-            _fetch_orders,
-            preferred_tokens=[session.get('access_token')] if session.get('access_token') else None,
-        )
-    except kite_exceptions.TokenException:
+        kite = resolve_trading_kite(session['user_id'])
+        raw = execute_with_retries("fetching Zerodha orders", lambda: kite.orders())
+    except TradingCredentialsRequired:
+        return jsonify({
+            'status': 'error',
+            'message': 'Zerodha API credentials required. Add them on the Welcome page.',
+            'needsCredentials': True,
+        }), 401
+    except TradingTokenRequired:
         return jsonify({'status': 'error', 'message': 'Zerodha session expired. Please re-login.', 'authExpired': True}), 401
-    except RuntimeError as exc:
-        return jsonify({'status': 'error', 'message': str(exc)}), 400
     except Exception as exc:
         logging.exception("Failed to fetch Zerodha orders")
         return jsonify({'status': 'error', 'message': str(exc)}), 500
@@ -11449,20 +11538,22 @@ def api_zerodha_orders():
 def api_zerodha_positions():
     if 'user_id' not in session:
         return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+    from kite_client_resolver import (
+        resolve_trading_kite,
+        TradingCredentialsRequired,
+        TradingTokenRequired,
+    )
     try:
-        def _fetch_positions(client: KiteConnect):
-            return execute_with_retries("fetching Zerodha positions", lambda: client.positions())
-
-        raw = _with_valid_kite_client(
-            session['user_id'],
-            "Zerodha positions for Mountain Signal",
-            _fetch_positions,
-            preferred_tokens=[session.get('access_token')] if session.get('access_token') else None,
-        )
-    except kite_exceptions.TokenException:
+        kite = resolve_trading_kite(session['user_id'])
+        raw = execute_with_retries("fetching Zerodha positions", lambda: kite.positions())
+    except TradingCredentialsRequired:
+        return jsonify({
+            'status': 'error',
+            'message': 'Zerodha API credentials required. Add them on the Welcome page.',
+            'needsCredentials': True,
+        }), 401
+    except TradingTokenRequired:
         return jsonify({'status': 'error', 'message': 'Zerodha session expired. Please re-login.', 'authExpired': True}), 401
-    except RuntimeError as exc:
-        return jsonify({'status': 'error', 'message': str(exc)}), 400
     except Exception as exc:
         logging.exception("Failed to fetch Zerodha positions")
         return jsonify({'status': 'error', 'message': str(exc)}), 500
@@ -11475,20 +11566,22 @@ def api_zerodha_positions():
 def api_zerodha_holdings():
     if 'user_id' not in session:
         return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+    from kite_client_resolver import (
+        resolve_trading_kite,
+        TradingCredentialsRequired,
+        TradingTokenRequired,
+    )
     try:
-        def _fetch_holdings(client: KiteConnect):
-            return execute_with_retries("fetching Zerodha holdings", lambda: client.holdings())
-
-        raw = _with_valid_kite_client(
-            session['user_id'],
-            "Zerodha holdings",
-            _fetch_holdings,
-            preferred_tokens=[session.get('access_token')] if session.get('access_token') else None,
-        )
-    except kite_exceptions.TokenException:
+        kite = resolve_trading_kite(session['user_id'])
+        raw = execute_with_retries("fetching Zerodha holdings", lambda: kite.holdings())
+    except TradingCredentialsRequired:
+        return jsonify({
+            'status': 'error',
+            'message': 'Zerodha API credentials required. Add them on the Welcome page.',
+            'needsCredentials': True,
+        }), 401
+    except TradingTokenRequired:
         return jsonify({'status': 'error', 'message': 'Zerodha session expired. Please re-login.', 'authExpired': True}), 401
-    except RuntimeError as exc:
-        return jsonify({'status': 'error', 'message': str(exc)}), 400
     except Exception as exc:
         logging.exception("Failed to fetch Zerodha holdings")
         return jsonify({'status': 'error', 'message': str(exc)}), 500

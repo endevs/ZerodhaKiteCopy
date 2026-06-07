@@ -15,6 +15,7 @@ import SubscribeContent from './SubscribeContent';
 import OptionsContent from './OptionsContent';
 import AdvancedChartsContent from './AdvancedChartsContent';
 import RiskDisclosureModal from './RiskDisclosureModal';
+import KitePlanSelectionModal from './KitePlanSelectionModal';
 import { apiUrl } from '../config/api';
 import { useSocket } from '../hooks/useSocket';
 import { tryAcquireAuthNavigationLock } from '../utils/authNavigation';
@@ -33,6 +34,7 @@ const Dashboard: React.FC = () => {
   const [showLiveStrategyModal, setShowLiveStrategyModal] = useState<boolean>(false);
   const [liveStrategyId, setLiveStrategyId] = useState<string | null>(null);
   const [showRiskDisclosure, setShowRiskDisclosure] = useState<boolean>(false);
+  const [showPlanModal, setShowPlanModal] = useState<boolean>(false);
   const warningShownRef = useRef<boolean>(false);
   const redirectedToWelcomeRef = useRef<boolean>(false);
   const socket = useSocket();
@@ -64,6 +66,19 @@ const Dashboard: React.FC = () => {
     sessionStorage.setItem('riskDisclosureShown', 'true');
   }, []);
 
+  const handlePlanSelectionComplete = useCallback(async () => {
+    setShowPlanModal(false);
+    try {
+      const response = await fetch(apiUrl('/api/user-data'), { credentials: 'include' });
+      const data = await response.json();
+      if (response.ok && data.needs_plan_selection) {
+        setShowPlanModal(true);
+      }
+    } catch {
+      // Plan was saved; ignore refresh errors.
+    }
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     let retryMarketSnapshot: ReturnType<typeof setTimeout> | undefined;
@@ -89,6 +104,10 @@ const Dashboard: React.FC = () => {
           redirectedToWelcomeRef.current = false;
           setUserName(data.user_name || data.email || 'User');
           setKiteClientId(data.kite_client_id || null);
+
+          if (data.needs_plan_selection) {
+            setShowPlanModal(true);
+          }
 
           const riskDisclosureShown = sessionStorage.getItem('riskDisclosureShown');
           if (!riskDisclosureShown) {
@@ -192,7 +211,7 @@ const Dashboard: React.FC = () => {
         return;
       }
 
-      if (tokenValid) {
+      if (tokenValid || !hasCredentials) {
         fetchInitialMarketData();
         retryMarketSnapshot = setTimeout(fetchInitialMarketData, 3000);
         const MARKET_SNAPSHOT_INTERVAL_MS = 30 * 1000;
@@ -207,14 +226,14 @@ const Dashboard: React.FC = () => {
             })
             .catch(() => {});
         }, MARKET_SNAPSHOT_INTERVAL_MS);
-      } else if (!hasCredentials) {
+      } else if (hasCredentials) {
         setNiftyPrice('Not Connected');
         setBankNiftyPrice('Not Connected');
       }
 
       checkAccessTokenInterval = setInterval(async () => {
         const status = await fetchUserData();
-        if (!cancelled && status.tokenValid && !marketSnapshotInterval) {
+        if (!cancelled && (status.tokenValid || !status.hasCredentials) && !marketSnapshotInterval) {
           fetchInitialMarketData();
           const MARKET_SNAPSHOT_INTERVAL_MS = 30 * 1000;
           marketSnapshotInterval = setInterval(() => {
@@ -236,7 +255,7 @@ const Dashboard: React.FC = () => {
 
     const timeoutId = setTimeout(() => {
       if (!warningShownRef.current && (niftyPrice === 'Loading...' || bankNiftyPrice === 'Loading...')) {
-        console.warn('Market data not received yet. Make sure Zerodha is connected and market is open.');
+        console.warn('Market data not received yet. Prices may be unavailable outside market hours.');
         warningShownRef.current = true;
       }
     }, 10000);
@@ -405,6 +424,9 @@ const Dashboard: React.FC = () => {
         show={showRiskDisclosure}
         onClose={handleRiskDisclosureClose}
       />
+      {showPlanModal && (
+        <KitePlanSelectionModal onComplete={handlePlanSelectionComplete} />
+      )}
     </Layout>
   );
 };

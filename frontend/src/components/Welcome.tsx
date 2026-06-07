@@ -36,6 +36,7 @@ const WelcomeContent: React.FC<{
   const [kiteUserId, setKiteUserId] = useState('');
   const [kitePassword, setKitePassword] = useState('');
   const [kiteTotpSecret, setKiteTotpSecret] = useState('');
+  const [kiteDeveloperPlan, setKiteDeveloperPlan] = useState<'connect' | 'personal'>('connect');
   const [feedback, setFeedback] = useState<{ type: string; text: string } | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [startingAutoAuth, setStartingAutoAuth] = useState(false);
@@ -110,6 +111,7 @@ const WelcomeContent: React.FC<{
           kite_user_id: kiteUserId.trim(),
           kite_password: kitePassword.trim(),
           kite_totp_secret: kiteTotpSecret.trim(),
+          kite_developer_plan: kiteDeveloperPlan,
         }),
       });
       const data = await response.json();
@@ -342,6 +344,56 @@ const WelcomeContent: React.FC<{
                 placeholder="kiteconnect_secret"
                 required
               />
+            </div>
+            <div>
+              <label className="form-label d-block">Kite developer app type</label>
+              <div className="row g-2">
+                <div className="col-md-6">
+                  <label className={`card p-2 h-100 ${kiteDeveloperPlan === 'connect' ? 'border-primary' : ''}`}>
+                    <div className="form-check">
+                      <input
+                        className="form-check-input"
+                        type="radio"
+                        name="kiteDeveloperPlan"
+                        checked={kiteDeveloperPlan === 'connect'}
+                        onChange={() => setKiteDeveloperPlan('connect')}
+                      />
+                      <span className="form-check-label fw-semibold ms-1">Connect</span>
+                    </div>
+                    <small className="text-muted d-block mt-1">
+                      Historical data + live quotes on your API key (paid credits).
+                    </small>
+                  </label>
+                </div>
+                <div className="col-md-6">
+                  <label className={`card p-2 h-100 ${kiteDeveloperPlan === 'personal' ? 'border-primary' : ''}`}>
+                    <div className="form-check">
+                      <input
+                        className="form-check-input"
+                        type="radio"
+                        name="kiteDeveloperPlan"
+                        checked={kiteDeveloperPlan === 'personal'}
+                        onChange={() => setKiteDeveloperPlan('personal')}
+                      />
+                      <span className="form-check-label fw-semibold ms-1">Personal</span>
+                    </div>
+                    <small className="text-muted d-block mt-1">
+                      Trading/reports only; charts/options use platform shared data.
+                    </small>
+                  </label>
+                </div>
+              </div>
+              <small className="text-muted">
+                See{' '}
+                <a
+                  href="https://support.zerodha.com/category/trading-and-markets/general-kite/kite-api/articles/how-do-i-sign-up-for-kite-connect"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  how to sign up for Kite Connect
+                </a>
+                .
+              </small>
             </div>
             <div>
               <label htmlFor="kite_user_id" className="form-label">

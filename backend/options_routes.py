@@ -61,27 +61,15 @@ def _fetch_index_candles_from_kite(kite, index: str, date_str: str) -> list:
     return candles
 
 
-def get_kite_client():
-    """Get KiteConnect client from session user's credentials"""
+def get_market_data_kite():
+    """Kite client for market data (option chain, candles, LTP). Uses shared provider for guest/personal."""
     if 'user_id' not in session:
         raise ValueError("User not logged in")
-    
-    user_id = session.get('user_id')
-    conn = get_db_connection()
+    from kite_client_resolver import resolve_market_data_kite, MarketDataUnavailable
     try:
-        cursor = conn.execute(
-            'SELECT app_key, app_secret, zerodha_access_token FROM users WHERE id = ? LIMIT 1',
-            (user_id,)
-        )
-        user = cursor.fetchone()
-        
-        if not user or not user[0] or not user[2]:
-            raise ValueError("Zerodha credentials not configured")
-        
-        kite = KiteConnect(api_key=user[0], access_token=user[2])
-        return kite
-    finally:
-        conn.close()
+        return resolve_market_data_kite(session['user_id'])
+    except MarketDataUnavailable as exc:
+        raise ValueError(str(exc)) from exc
 
 
 @options_bp.route('/api/options/ltp', methods=['GET'])
@@ -100,7 +88,7 @@ def get_index_ltp():
         else:
             return jsonify({'error': 'Invalid index. Use NIFTY or BANKNIFTY'}), 400
         
-        kite = get_kite_client()
+        kite = get_market_data_kite()
         ltp_response = kite.ltp(symbol)
         
         if symbol not in ltp_response:
@@ -137,7 +125,7 @@ def get_expiry_dates():
         if index not in ['NIFTY', 'BANKNIFTY']:
             return jsonify({'error': 'Invalid index. Use NIFTY or BANKNIFTY'}), 400
         
-        kite = get_kite_client()
+        kite = get_market_data_kite()
         
         # Fetch instruments from NFO
         instruments = kite.instruments('NFO')
@@ -219,7 +207,7 @@ def fetch_option_chain():
         except (ValueError, TypeError) as e:
             return jsonify({'error': f'Invalid date format. Use YYYY-MM-DD: {str(e)}'}), 400
         
-        kite = get_kite_client()
+        kite = get_market_data_kite()
         
         # Check if expiry is in the future (active) or past (historical)
         today = datetime.date.today()
@@ -478,7 +466,7 @@ def get_option_candles():
         # If no data in database, try Zerodha API (for active contracts)
         if not candles:
             try:
-                kite = get_kite_client()
+                kite = get_market_data_kite()
                 today = datetime.date.today()
                 from_date = today - datetime.timedelta(days=7)
                 to_date = today
@@ -645,7 +633,7 @@ def get_index_candles():
 
         if len(candles) == 0:
             try:
-                kite = get_kite_client()
+                kite = get_market_data_kite()
                 candles = _fetch_index_candles_from_kite(kite, index, date_str)
                 if candles:
                     logger.info(
@@ -822,7 +810,7 @@ def get_default_selection():
         trading_date = today.strftime('%Y-%m-%d')
         expiries: list = []
         try:
-            kite = get_kite_client()
+            kite = get_market_data_kite()
             instruments = kite.instruments('NFO')
             expiries = sorted(list(set([
                 inst['expiry'].strftime('%Y-%m-%d') if hasattr(inst.get('expiry'), 'strftime') else str(inst['expiry'])
@@ -873,7 +861,7 @@ def get_chain_board():
             return jsonify({'error': 'trading_date and expiry_date are required'}), 400
         kite = None
         try:
-            kite = get_kite_client()
+            kite = get_market_data_kite()
         except ValueError:
             pass
         from option_chain_board import build_chain_board
@@ -916,7 +904,7 @@ def subscribe_option_capture():
         expiry_date_str = data.get('expiry_date')
         if not expiry_date_str:
             return jsonify({'error': 'expiry_date required'}), 400
-        kite = get_kite_client()
+        kite = get_market_data_kite()
         sym = 'NSE:NIFTY BANK' if index == 'BANKNIFTY' else 'NSE:NIFTY 50'
         spot = float(kite.ltp(sym)[sym]['last_price'])
         expiry_date = datetime.datetime.strptime(expiry_date_str, '%Y-%m-%d').date()
@@ -955,7 +943,7 @@ def trigger_data_collection():
         # Import the collection function
         from options_data_collector import collect_index_data, collect_option_chain
         
-        kite = get_kite_client()
+        kite = get_market_data_kite()
         results = {}
         
         # Collect for specific index or both

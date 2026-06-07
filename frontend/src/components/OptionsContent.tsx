@@ -3,6 +3,7 @@ import { apiUrl } from '../config/api';
 import OptionChainTable, { ChainRow } from './OptionChainTable';
 import PlotlyCandlestickChart, { PlotlyCandlePoint } from './PlotlyCandlestickChart';
 import './OptionChainBoard.css';
+import MarketDataBanner from './MarketDataBanner';
 
 interface OptionChain {
   index: string;
@@ -661,6 +662,7 @@ const OptionsContent: React.FC = () => {
 
   return (
     <div className="container-fluid py-4">
+      <MarketDataBanner />
       <div className="row mb-4">
         <div className="col-12">
           <h2 className="mb-4">Options Trading Analysis</h2>

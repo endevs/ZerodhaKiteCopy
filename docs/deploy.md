@@ -169,6 +169,18 @@ Same stack as the table above: **browser UI on host `5175`**, Flask on **`8003`*
   - **Local Docker:** `http://localhost:5175/callback` (Nginx on **5175** proxies `/callback` to the backend) **or** `http://localhost:8003/callback` (direct to the mapped backend port).
 - **CloudFront:** If the default behavior sends `/*` to the **frontend** origin on **`5175`**, **`/callback`** is handled by **Nginx** → backend (see `frontend/nginx.conf`). You do **not** need port **8000**; align origins with **5175** / **443** (TLS), not legacy **3000** / **8000**.
 
+### Shared market data (Connect vs Personal tiers)
+
+Guest and **Personal** users read options, charts, and nav LTP via a platform **Connect** account. By default this is the **`RD2033`** service user (`is_market_data_provider=1` in the DB after migration).
+
+- Keep **RD2033** on a **Connect** developer app with a healthy auto-auth token ([`backend/scripts/verify_kite_totp.py`](../backend/scripts/verify_kite_totp.py)).
+- Optional override: set **`GLOBAL_MARKET_DATA_KITE_USER_ID`** in **`backend/.env`** / **`.env.production`** to another user’s numeric DB id if RD2033 is not the provider row.
+
+```env
+# Optional — defaults to users.is_market_data_provider=1 or kite_user_id RD2033
+GLOBAL_MARKET_DATA_KITE_USER_ID=1
+```
+
 ### CloudFront — avoid “HTML instead of JSON” on `/api/*`
 
 If the browser console shows `Unexpected token '<'` / `not valid JSON` for `/api/...`, the **CDN returned HTML** (usually `index.html` or an error page), not Flask JSON.

@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { Link } from 'react-router-dom';
 import { apiUrl } from '../config/api';
 
 type PositionTab = 'positions' | 'orders' | 'holdings';
@@ -45,12 +46,14 @@ const PositionContent: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [authExpired, setAuthExpired] = useState(false);
+  const [needsCredentials, setNeedsCredentials] = useState(false);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
 
   const fetchAll = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
     setError(null);
     setAuthExpired(false);
+    setNeedsCredentials(false);
 
     try {
       const [posRes, ordRes, holdRes] = await Promise.all([
@@ -66,6 +69,12 @@ const PositionContent: React.FC = () => {
       if (posData.authExpired || ordData.authExpired || holdData.authExpired) {
         setAuthExpired(true);
         setError('Zerodha session expired. Please log in with Zerodha again from the welcome page.');
+        return;
+      }
+
+      if (posData.needsCredentials || ordData.needsCredentials || holdData.needsCredentials) {
+        setNeedsCredentials(true);
+        setError('Add your Zerodha API credentials to view positions, orders, and holdings.');
         return;
       }
 
@@ -146,6 +155,17 @@ const PositionContent: React.FC = () => {
         </button>
       </div>
 
+      {needsCredentials && (
+        <div className="alert alert-warning">
+          <i className="bi bi-key me-2" />
+          Add your Zerodha API credentials on the Welcome page to view your portfolio.
+          {' '}
+          <Link to="/welcome" className="alert-link">
+            Set up API credentials
+          </Link>
+        </div>
+      )}
+
       {authExpired && (
         <div className="alert alert-warning">
           <i className="bi bi-exclamation-triangle me-2" />
@@ -153,7 +173,7 @@ const PositionContent: React.FC = () => {
         </div>
       )}
 
-      {error && !authExpired && (
+      {error && !authExpired && !needsCredentials && (
         <div className="alert alert-danger py-2 small">{error}</div>
       )}
 

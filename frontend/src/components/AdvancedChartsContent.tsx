@@ -6,6 +6,7 @@ import { useSocket } from '../hooks/useSocket';
 import { runMountainBacktest } from './advancedCharts/mountainStrategyEngine';
 import { computeRSI, computeADX } from './advancedCharts/mountainIndicators';
 import { MountainEvent, MountainEventType } from './advancedCharts/MountainStrategyTypes';
+import MarketDataBanner from './MarketDataBanner';
 
 type BtStrategy = 'mountain' | 'ema_crossover';
 
@@ -1260,6 +1261,7 @@ const AdvancedChartsContent: React.FC = () => {
 
   return (
     <div className="container-fluid py-4">
+      <MarketDataBanner />
       <div className="card shadow-sm border-0 mb-4">
         <div className="card-header bg-dark text-white">
           <h4 className="card-title mb-0">

@@ -34,12 +34,11 @@ def poll_capture_band() -> None:
     if not _in_market_hours():
         return
     try:
-        from options_data_collector import get_kite_client
+        from kite_client_resolver import get_global_provider_kite
         from option_chain_board import pick_default_expiry
         from option_chain_capture import capture_quotes_from_kite, resolve_atm_band_contracts
-        from database import get_db_connection
 
-        kite = get_kite_client()
+        kite = get_global_provider_kite()
         today = datetime.date.today()
         trading_date = today
         for index_name in ("NIFTY", "BANKNIFTY"):
