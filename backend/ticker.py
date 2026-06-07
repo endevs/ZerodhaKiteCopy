@@ -89,6 +89,11 @@ class Ticker:
         conn = get_db_connection()
         cursor = conn.cursor()
         for tick in ticks:
+            try:
+                from option_chain_capture import ingest_ticker_tick
+                ingest_ticker_tick(tick)
+            except Exception:
+                pass
             # Store tick data in the database
             instrument_token = tick['instrument_token']
             last_price = tick['last_price']

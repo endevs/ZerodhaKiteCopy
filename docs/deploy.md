@@ -185,6 +185,10 @@ If the browser console shows `Unexpected token '<'` / `not valid JSON` for `/api
 
 **Windows quick refresh:** double-click [`docker-refresh.bat`](../docker-refresh.bat) in the repo root to rebuild backend + frontend images, recreate containers, run health checks, and show a success/issues summary before closing.
 
+### Options chain (live + historical)
+
+The **Options** tab loads today’s nearest expiry by default and polls `/api/options/chain-board` every 3s when live. Zerodha does **not** provide historical data for **expired options**; chains for past dates/expiries come only from data captured in SQLite (`option_quote_latest`, `option_quote_ticks`, `option_chain_snapshots`). Run `python backend/migrate_option_chain_quotes.py` once on existing DBs. Tick retention defaults to **60 trading days** (`OPTION_TICK_RETENTION_DAYS`). Live capture uses **ATM ±15 strikes** for spike detection (`OPTION_LTP_SPIKE_PCT_30S`, `OPTION_IV_SPIKE_PCT_60S`).
+
 The backend image installs **CPU-only PyTorch** (`requirements-docker.txt` + PyTorch CPU index) so the first build stays ~minutes instead of multi‑GB CUDA wheels. For GPU training on the host, use a venv + full `requirements.txt` outside Docker.
 
 ```bash

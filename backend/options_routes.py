@@ -13,6 +13,53 @@ logger = logging.getLogger(__name__)
 
 options_bp = Blueprint('options', __name__)
 
+_INDEX_TOKENS = {'NIFTY': 256265, 'BANKNIFTY': 260105}
+
+
+def _normalize_candle_ts(ts) -> str:
+    """Normalize DB/Kite timestamps to YYYY-MM-DD HH:MM:SS (IST wall-clock)."""
+    if hasattr(ts, 'strftime'):
+        return ts.strftime('%Y-%m-%d %H:%M:%S')
+    s = str(ts).strip()
+    s = s.split('+')[0].split('Z')[0]
+    if 'T' in s:
+        s = s.replace('T', ' ')
+    if '.' in s:
+        s = s.split('.')[0]
+    return s[:19] if len(s) >= 19 else s
+
+
+def _fetch_index_candles_from_kite(kite, index: str, date_str: str) -> list:
+    """Fetch 5m index OHLC from Kite when DB has no rows for the date."""
+    token = _INDEX_TOKENS.get(index)
+    if not token:
+        return []
+    try:
+        selected_date = datetime.datetime.strptime(date_str, '%Y-%m-%d').date()
+    except ValueError:
+        return []
+    from_dt = datetime.datetime.combine(selected_date, datetime.time(9, 15))
+    to_dt = datetime.datetime.combine(selected_date, datetime.time(15, 30))
+    try:
+        hist = kite.historical_data(token, from_dt, to_dt, '5minute')
+    except Exception as exc:
+        logger.warning("Kite index candles failed for %s %s: %s", index, date_str, exc)
+        return []
+    candles = []
+    for row in hist or []:
+        ts = _normalize_candle_ts(row.get('date'))
+        if not ts.startswith(date_str):
+            continue
+        candles.append({
+            'timestamp': ts,
+            'open': float(row.get('open') or 0),
+            'high': float(row.get('high') or 0),
+            'low': float(row.get('low') or 0),
+            'close': float(row.get('close') or 0),
+            'volume': int(row.get('volume') or 0),
+        })
+    return candles
+
 
 def get_kite_client():
     """Get KiteConnect client from session user's credentials"""
@@ -414,8 +461,11 @@ def get_option_candles():
                 """, (instrument_token,))
             
             for row in cursor.fetchall():
+                ts = row[0]
+                if hasattr(ts, 'strftime'):
+                    ts = ts.strftime('%Y-%m-%d %H:%M:%S')
                 candles.append({
-                    'timestamp': row[0],
+                    'timestamp': str(ts),
                     'open': row[1],
                     'high': row[2],
                     'low': row[3],
@@ -431,25 +481,43 @@ def get_option_candles():
                 kite = get_kite_client()
                 today = datetime.date.today()
                 from_date = today - datetime.timedelta(days=7)
-                
+                to_date = today
+                if expiry_date:
+                    try:
+                        target = datetime.datetime.strptime(expiry_date, '%Y-%m-%d').date()
+                        from_date = target
+                        to_date = target
+                    except ValueError:
+                        pass
+
                 data = kite.historical_data(
                     instrument_token=instrument_token,
                     from_date=from_date,
-                    to_date=today,
+                    to_date=to_date,
                     interval='5minute'
                 )
-                
+
+                def _candle_ts_str(ts) -> str:
+                    if hasattr(ts, 'strftime'):
+                        return ts.strftime('%Y-%m-%d %H:%M:%S')
+                    return str(ts)
+
                 candles = [
                     {
-                        'timestamp': candle['date'],
+                        'timestamp': _candle_ts_str(candle['date']),
                         'open': candle['open'],
                         'high': candle['high'],
                         'low': candle['low'],
                         'close': candle['close'],
-                        'volume': candle.get('volume', 0)
+                        'volume': candle.get('volume', 0),
                     }
                     for candle in data
                 ]
+                if expiry_date:
+                    candles = [
+                        c for c in candles
+                        if c['timestamp'].startswith(expiry_date)
+                    ]
             except kite_exceptions.TokenException:
                 return jsonify({
                     'error': 'Zerodha session expired. Please log in again.',
@@ -565,30 +633,47 @@ def get_index_candles():
             candles = []
             for row in cursor.fetchall():
                 candles.append({
-                    'timestamp': row[0],
+                    'timestamp': _normalize_candle_ts(row[0]),
                     'open': row[1],
                     'high': row[2],
                     'low': row[3],
                     'close': row[4],
                     'volume': row[5] if row[5] else 0
                 })
-            
-            if len(candles) == 0:
-                logger.warning(f"No index candles found for {index} on {date_str}")
+        finally:
+            conn.close()
+
+        if len(candles) == 0:
+            try:
+                kite = get_kite_client()
+                candles = _fetch_index_candles_from_kite(kite, index, date_str)
+                if candles:
+                    logger.info(
+                        "Fetched %d index candles from Kite for %s on %s",
+                        len(candles), index, date_str,
+                    )
+            except kite_exceptions.TokenException:
                 return jsonify({
-                    'index': index,
-                    'date': date_str,
-                    'candles': [],
-                    'warning': f'No data found for {date_str}. Please check Database Record Status tab to see available dates.'
-                }), 200
-            
+                    'error': 'Zerodha session expired. Please log in again.',
+                    'authExpired': True,
+                }), 401
+            except (ValueError, Exception) as exc:
+                logger.warning("Kite fallback for index candles failed: %s", exc)
+
+        if len(candles) == 0:
+            logger.warning(f"No index candles found for {index} on {date_str}")
             return jsonify({
                 'index': index,
                 'date': date_str,
-                'candles': candles
-            })
-        finally:
-            conn.close()
+                'candles': [],
+                'warning': f'No data found for {date_str}. Please check Database Record Status tab to see available dates.'
+            }), 200
+
+        return jsonify({
+            'index': index,
+            'date': date_str,
+            'candles': candles
+        })
     except ValueError as e:
         return jsonify({'error': str(e)}), 401
     except Exception as e:
@@ -700,6 +785,148 @@ def get_db_status():
             conn.close()
     except Exception as e:
         logger.error(f"Error fetching database status: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
+
+def _debug_log_options(hypothesis_id: str, message: str, data: dict) -> None:
+    import json
+    import os
+    import time
+    payload = {
+        'sessionId': 'c3dc96',
+        'hypothesisId': hypothesis_id,
+        'location': 'options_routes.py:default-selection',
+        'message': message,
+        'data': data,
+        'timestamp': int(time.time() * 1000),
+    }
+    path = os.environ.get('DEBUG_LOG_PATH', 'debug-c3dc96.log')
+    try:
+        with open(path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(payload) + '\n')
+    except Exception:
+        pass
+
+
+@options_bp.route('/api/options/default-selection', methods=['GET'])
+def get_default_selection():
+    """Default index, trading date, and nearest expiry for Options tab on load."""
+    try:
+        if 'user_id' not in session:
+            _debug_log_options('A', 'default-selection unauthorized', {})
+            return jsonify({'error': 'User not logged in'}), 401
+        index = request.args.get('index', 'NIFTY').upper()
+        if index not in ('NIFTY', 'BANKNIFTY'):
+            index = 'NIFTY'
+        today = datetime.date.today()
+        trading_date = today.strftime('%Y-%m-%d')
+        expiries: list = []
+        try:
+            kite = get_kite_client()
+            instruments = kite.instruments('NFO')
+            expiries = sorted(list(set([
+                inst['expiry'].strftime('%Y-%m-%d') if hasattr(inst.get('expiry'), 'strftime') else str(inst['expiry'])
+                for inst in instruments
+                if inst.get('name') == index and inst.get('expiry')
+            ])))
+        except Exception:
+            pass
+        conn = get_db_connection()
+        try:
+            rows = conn.execute(
+                "SELECT DISTINCT expiry_date FROM option_contracts WHERE index_name = ? ORDER BY expiry_date DESC",
+                (index,),
+            ).fetchall()
+            db_ex = [r[0] for r in rows]
+            expiries = sorted(list(set(expiries + db_ex)))
+        finally:
+            conn.close()
+        from option_chain_board import pick_default_expiry
+        expiry = pick_default_expiry(expiries, today)
+        _debug_log_options('A', 'default-selection ok', {
+            'index': index,
+            'trading_date': trading_date,
+            'expiry_date': expiry,
+            'expiries_count': len(expiries),
+        })
+        return jsonify({
+            'index': index,
+            'trading_date': trading_date,
+            'expiry_date': expiry,
+            'expiry_dates': expiries,
+        })
+    except Exception as e:
+        logger.error(f"default-selection error: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
+
+@options_bp.route('/api/options/chain-board', methods=['GET'])
+def get_chain_board():
+    """Option chain with LTP, IV, OI and changes for UI board."""
+    try:
+        if 'user_id' not in session:
+            return jsonify({'error': 'User not logged in'}), 401
+        index = request.args.get('index', 'NIFTY').upper()
+        trading_date = request.args.get('trading_date')
+        expiry_date = request.args.get('expiry_date')
+        if not trading_date or not expiry_date:
+            return jsonify({'error': 'trading_date and expiry_date are required'}), 400
+        kite = None
+        try:
+            kite = get_kite_client()
+        except ValueError:
+            pass
+        from option_chain_board import build_chain_board
+        board = build_chain_board(kite, index, trading_date, expiry_date, live_poll=True)
+        return jsonify(board)
+    except kite_exceptions.TokenException:
+        return jsonify({
+            'error': 'Zerodha session expired. Please log in again.',
+            'authExpired': True,
+        }), 401
+    except Exception as e:
+        logger.error(f"chain-board error: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
+
+@options_bp.route('/api/options/spikes', methods=['GET'])
+def get_option_spikes():
+    try:
+        if 'user_id' not in session:
+            return jsonify({'error': 'User not logged in'}), 401
+        index = request.args.get('index', 'NIFTY').upper()
+        trading_date = request.args.get('trading_date', datetime.date.today().strftime('%Y-%m-%d'))
+        expiry_date = request.args.get('expiry_date')
+        from option_spike_detector import list_recent_spikes
+        spikes = list_recent_spikes(index, trading_date, expiry_date)
+        return jsonify({'spikes': spikes, 'index': index, 'trading_date': trading_date})
+    except Exception as e:
+        logger.error(f"spikes error: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
+
+@options_bp.route('/api/options/capture/subscribe', methods=['POST'])
+def subscribe_option_capture():
+    """Register ATM±15 tokens for tick capture (called when Options tab is active)."""
+    try:
+        if 'user_id' not in session:
+            return jsonify({'error': 'User not logged in'}), 401
+        data = request.get_json() or {}
+        index = data.get('index', 'NIFTY').upper()
+        expiry_date_str = data.get('expiry_date')
+        if not expiry_date_str:
+            return jsonify({'error': 'expiry_date required'}), 400
+        kite = get_kite_client()
+        sym = 'NSE:NIFTY BANK' if index == 'BANKNIFTY' else 'NSE:NIFTY 50'
+        spot = float(kite.ltp(sym)[sym]['last_price'])
+        expiry_date = datetime.datetime.strptime(expiry_date_str, '%Y-%m-%d').date()
+        trading_date = datetime.date.today()
+        from option_chain_capture import capture_quotes_from_kite, resolve_atm_band_contracts
+        band = resolve_atm_band_contracts(kite, index, expiry_date, spot, trading_date)
+        capture_quotes_from_kite(kite, band, spot)
+        return jsonify({'status': 'ok', 'tokens': len(band)})
+    except Exception as e:
+        logger.error(f"capture subscribe error: {e}", exc_info=True)
         return jsonify({'error': str(e)}), 500
 
 

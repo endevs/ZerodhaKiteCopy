@@ -1,0 +1,127 @@
+.option-chain-table {
+  font-size: 0.8rem;
+}
+
+.option-chain-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: #212529;
+  color: #f8f9fa;
+  white-space: nowrap;
+}
+
+.option-chain-table tbody td {
+  color: #212529;
+  background-color: #fff;
+}
+
+.option-chain-table .strike-col {
+  min-width: 72px;
+  font-weight: 600;
+}
+
+.option-chain-table tbody td.strike-col {
+  color: #212529;
+  background-color: #e9ecef;
+}
+
+.option-chain-table thead th.strike-col {
+  color: #fff;
+  background-color: #495057;
+}
+
+.option-chain-table tr.row-atm td {
+  background-color: #cff4fc !important;
+  color: #212529;
+  font-weight: 600;
+}
+
+.option-chain-table tr.row-atm td.strike-col {
+  background-color: #9eeaf9 !important;
+  color: #212529;
+}
+
+.option-chain-table tr.row-itm-ce td.call-side {
+  background-color: #fff9e6;
+}
+
+.option-chain-table tr.row-itm-pe td.put-side {
+  background-color: #fff9e6;
+}
+
+.option-chain-table .oi-bar-wrap {
+  height: 6px;
+  background: #e9ecef;
+  border-radius: 2px;
+  margin-top: 2px;
+  overflow: hidden;
+}
+
+.option-chain-table .oi-bar-ce {
+  background: #f8a5a5;
+  height: 100%;
+}
+
+.option-chain-table .oi-bar-pe {
+  background: #8fd19e;
+  height: 100%;
+}
+
+.option-chain-table tbody tr.option-chain-row:hover td {
+  filter: brightness(0.97);
+}
+
+.option-chain-table tbody tr.row-hovered td {
+  filter: brightness(0.97);
+}
+
+.option-chain-table td.ltp-col {
+  min-width: 6.5rem;
+}
+
+.option-chain-table .ltp-cell-inner {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  min-height: 1.5rem;
+}
+
+.option-chain-table .ltp-value {
+  flex: 1;
+  min-width: 0;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.option-chain-table .row-chart-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0.1rem 0.35rem;
+  line-height: 1;
+  font-size: 0.65rem;
+}
+
+.option-chain-table .row-chart-btn .bi {
+  font-size: 0.85rem;
+}
+
+.option-chain-table .row-chart-btn-label {
+  font-weight: 600;
+}
+
+.chg-pos {
+  color: #198754;
+}
+
+.chg-neg {
+  color: #dc3545;
+}
+
+.spike-panel {
+  max-height: 160px;
+  overflow-y: auto;
+}

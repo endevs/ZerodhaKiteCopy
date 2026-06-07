@@ -1513,6 +1513,12 @@ except Exception as e:
     logging.error(f"ensure_core_schema failed: {e}")
 
 try:
+    from migrate_option_chain_quotes import ensure_option_chain_quote_schema
+    ensure_option_chain_quote_schema()
+except Exception as e:
+    logging.warning(f"Option chain quote schema: {e}")
+
+try:
     from migrate_subscriptions import migrate as migrate_subscriptions_schema
     migrate_subscriptions_schema()
 except Exception as e:
@@ -2313,6 +2319,23 @@ def _sanitize_positions(raw_positions: Dict[str, Any]) -> List[Dict[str, Any]]:
             'm2m': pos.get('m2m'),
         })
     return positions
+
+
+def _sanitize_holdings(raw_holdings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    fields = [
+        'tradingsymbol', 'exchange', 'isin', 'quantity', 't1_quantity',
+        'realised_quantity', 'used_quantity', 'authorised_quantity',
+        'opening_quantity', 'collateral_quantity', 'collateral_type',
+        'average_price', 'last_price', 'close_price', 'pnl', 'day_change',
+        'day_change_percentage', 'product',
+    ]
+    sanitized: List[Dict[str, Any]] = []
+    for holding in raw_holdings or []:
+        entry = {key: holding.get(key) for key in fields if key in holding}
+        if entry.get('last_price') is None and holding.get('last_price') is None:
+            entry['last_price'] = holding.get('close_price')
+        sanitized.append(entry)
+    return sanitized
 
 
 def _round_to_multiple(value: float, multiple: int) -> int:
@@ -11448,6 +11471,33 @@ def api_zerodha_positions():
     return jsonify({'status': 'success', 'positions': positions})
 
 
+@app.route("/api/zerodha/holdings", methods=['GET'])
+def api_zerodha_holdings():
+    if 'user_id' not in session:
+        return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
+    try:
+        def _fetch_holdings(client: KiteConnect):
+            return execute_with_retries("fetching Zerodha holdings", lambda: client.holdings())
+
+        raw = _with_valid_kite_client(
+            session['user_id'],
+            "Zerodha holdings",
+            _fetch_holdings,
+            preferred_tokens=[session.get('access_token')] if session.get('access_token') else None,
+        )
+    except kite_exceptions.TokenException:
+        return jsonify({'status': 'error', 'message': 'Zerodha session expired. Please re-login.', 'authExpired': True}), 401
+    except RuntimeError as exc:
+        return jsonify({'status': 'error', 'message': str(exc)}), 400
+    except Exception as exc:
+        logging.exception("Failed to fetch Zerodha holdings")
+        return jsonify({'status': 'error', 'message': str(exc)}), 500
+
+    holdings = _sanitize_holdings(raw if isinstance(raw, list) else [])
+    logging.info("[Zerodha] holdings: count=%d", len(holdings))
+    return jsonify({'status': 'success', 'holdings': holdings})
+
+
 @app.route("/api/mountain_signal/live/order_preview", methods=['POST'])
 def api_mountain_signal_live_order_preview():
     if 'user_id' not in session:
@@ -12419,6 +12469,12 @@ if __name__ == "__main__":
             logging.info("Options data collection scheduler initialized")
         except Exception as e:
             logging.warning(f"Could not start options scheduler: {e}")
+        try:
+            from option_chain_scheduler import start_option_chain_scheduler
+            start_option_chain_scheduler()
+            logging.info("Option chain capture scheduler initialized")
+        except Exception as e:
+            logging.warning(f"Could not start option chain scheduler: {e}")
         try:
             _register_auto_auth_scheduler()
             logging.info("Auto-auth schedule scheduler initialized")

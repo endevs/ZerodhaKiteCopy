@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 
 interface NavigationProps {
   activeTab: string;
@@ -13,6 +13,58 @@ interface NavigationProps {
   onSubscribeClick?: () => void;
 }
 
+const useHoverDropdown = () => {
+  const [show, setShow] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const closeTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  const clearCloseTimeout = useCallback(() => {
+    if (closeTimeoutRef.current) {
+      clearTimeout(closeTimeoutRef.current);
+      closeTimeoutRef.current = null;
+    }
+  }, []);
+
+  const scheduleClose = useCallback(() => {
+    clearCloseTimeout();
+    closeTimeoutRef.current = setTimeout(() => setShow(false), 200);
+  }, [clearCloseTimeout]);
+
+  const open = useCallback(() => {
+    clearCloseTimeout();
+    setShow(true);
+  }, [clearCloseTimeout]);
+
+  const close = useCallback(() => {
+    clearCloseTimeout();
+    setShow(false);
+  }, [clearCloseTimeout]);
+
+  const toggle = useCallback(() => {
+    if (show) close();
+    else open();
+  }, [show, close, open]);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent | TouchEvent) => {
+      if (ref.current && !ref.current.contains(event.target as Node)) {
+        close();
+      }
+    };
+    if (show) {
+      document.addEventListener('mousedown', handleClickOutside);
+      document.addEventListener('touchstart', handleClickOutside);
+    }
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('touchstart', handleClickOutside);
+      clearCloseTimeout();
+    };
+  }, [show, close, clearCloseTimeout]);
+
+  return { show, ref, open, close, toggle, scheduleClose };
+};
+
 const Navigation: React.FC<NavigationProps> = ({
   activeTab,
   onTabChange,
@@ -25,83 +77,74 @@ const Navigation: React.FC<NavigationProps> = ({
   onProfileClick,
   onSubscribeClick,
 }) => {
-  const [showDropdown, setShowDropdown] = useState(false);
-  const dropdownRef = useRef<HTMLDivElement>(null);
-  const closeTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const profileMenu = useHoverDropdown();
+  const liveTradeMenu = useHoverDropdown();
 
-  // Clear timeout helper
-  const clearCloseTimeout = () => {
-    if (closeTimeoutRef.current) {
-      clearTimeout(closeTimeoutRef.current);
-      closeTimeoutRef.current = null;
-    }
-  };
+  const isLiveTradeActive = activeTab === 'live-trade' || activeTab === 'position';
 
-  // Close dropdown with delay
-  const scheduleClose = () => {
-    clearCloseTimeout();
-    closeTimeoutRef.current = setTimeout(() => {
-      setShowDropdown(false);
-    }, 200); // 200ms delay before closing
-  };
-
-  // Open dropdown immediately
-  const openDropdown = () => {
-    clearCloseTimeout();
-    setShowDropdown(true);
-  };
-
-  // Close dropdown when clicking/touching outside
-  useEffect(() => {
-    const handleClickOutside = (event: MouseEvent | TouchEvent) => {
-      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
-        setShowDropdown(false);
-        clearCloseTimeout();
-      }
-    };
-
-    if (showDropdown) {
-      document.addEventListener('mousedown', handleClickOutside);
-      document.addEventListener('touchstart', handleClickOutside);
-    }
-
-    return () => {
-      document.removeEventListener('mousedown', handleClickOutside);
-      document.removeEventListener('touchstart', handleClickOutside);
-      clearCloseTimeout();
-    };
-  }, [showDropdown]);
-  const navItems = [
+  const navItemsBeforeLiveTrade = [
     { id: 'dashboard', label: 'Dashboard', icon: '📊' },
     { id: 'algo-visualization', label: 'Algo Visualization', icon: '🎯' },
-    { id: 'live-trade', label: 'Live Trade', icon: '⚡' },
+  ];
+
+  const navItemsAfterLiveTrade = [
     { id: 'ai-ml', label: 'AI / ML', icon: '🤖' },
     { id: 'options', label: 'Options', icon: '📈' },
     { id: 'advanced-charts', label: 'Advanced Charts', icon: '📊' },
     ...(isAdmin ? [{ id: 'admin', label: 'Admin', icon: '🛡️' }] : []),
   ];
 
+  const renderNavButton = (item: { id: string; label: string; icon: string }) => (
+    <li key={item.id} className="nav-item">
+      <button
+        className={`nav-link ${activeTab === item.id ? 'active fw-bold' : ''}`}
+        onClick={() => onTabChange(item.id)}
+        style={navLinkStyle(activeTab === item.id)}
+        onMouseEnter={(e) => handleNavHoverEnter(e, activeTab === item.id)}
+        onMouseLeave={(e) => handleNavHoverLeave(e, activeTab === item.id)}
+      >
+        <span className="me-2">{item.icon}</span>
+        {item.label}
+      </button>
+    </li>
+  );
+
+  const navLinkStyle = (isActive: boolean): React.CSSProperties => ({
+    background: 'none',
+    border: 'none',
+    color: isActive ? '#0d6efd' : 'rgba(255,255,255,.55)',
+    cursor: 'pointer',
+    padding: '0.5rem 1rem',
+  });
+
+  const handleNavHoverEnter = (e: React.MouseEvent<HTMLButtonElement>, isActive: boolean) => {
+    if (!isActive) e.currentTarget.style.color = '#fff';
+  };
+
+  const handleNavHoverLeave = (e: React.MouseEvent<HTMLButtonElement>, isActive: boolean) => {
+    if (!isActive) e.currentTarget.style.color = 'rgba(255,255,255,.55)';
+  };
+
   return (
     <nav className="navbar navbar-expand-lg navbar-dark bg-dark shadow-sm">
       <div className="container-fluid">
-        <a 
-          className="navbar-brand d-flex align-items-center" 
-          href="https://drpinfotech.com" 
-          target="_blank" 
+        <a
+          className="navbar-brand d-flex align-items-center"
+          href="https://drpinfotech.com"
+          target="_blank"
           rel="noopener noreferrer"
           style={{ paddingTop: '0.5rem', paddingBottom: '0.5rem' }}
         >
-          <img 
-            src="/drp-infotech-logo.png" 
-            alt="DRP Infotech Pvt Ltd Logo" 
-            style={{ 
-              height: '45px', 
+          <img
+            src="/drp-infotech-logo.png"
+            alt="DRP Infotech Pvt Ltd Logo"
+            style={{
+              height: '45px',
               width: 'auto',
               marginRight: '10px',
-              objectFit: 'contain'
+              objectFit: 'contain',
             }}
             onError={(e) => {
-              // Fallback to text if image fails to load
               e.currentTarget.style.display = 'none';
               const fallback = document.createElement('span');
               fallback.className = 'fs-5 fw-bold text-light';
@@ -123,34 +166,78 @@ const Navigation: React.FC<NavigationProps> = ({
         </button>
         <div className="collapse navbar-collapse" id="navbarNav">
           <ul className="navbar-nav me-auto mb-2 mb-lg-0">
-            {navItems.map((item) => (
-              <li key={item.id} className="nav-item">
+            {navItemsBeforeLiveTrade.map(renderNavButton)}
+
+            <li className="nav-item">
+              <div
+                className="position-relative"
+                ref={liveTradeMenu.ref}
+                onMouseEnter={liveTradeMenu.open}
+                onMouseLeave={liveTradeMenu.scheduleClose}
+                style={{ touchAction: 'manipulation' }}
+              >
                 <button
-                  className={`nav-link ${activeTab === item.id ? 'active fw-bold' : ''}`}
-                  onClick={() => onTabChange(item.id)}
-                  style={{
-                    background: 'none',
-                    border: 'none',
-                    color: activeTab === item.id ? '#0d6efd' : 'rgba(255,255,255,.55)',
-                    cursor: 'pointer',
-                    padding: '0.5rem 1rem',
+                  type="button"
+                  className={`nav-link ${isLiveTradeActive ? 'active fw-bold' : ''}`}
+                  style={navLinkStyle(isLiveTradeActive)}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    e.preventDefault();
+                    liveTradeMenu.toggle();
                   }}
-                  onMouseEnter={(e) => {
-                    if (activeTab !== item.id) {
-                      e.currentTarget.style.color = '#fff';
-                    }
+                  onTouchEnd={(e) => {
+                    e.stopPropagation();
+                    e.preventDefault();
+                    liveTradeMenu.toggle();
                   }}
-                  onMouseLeave={(e) => {
-                    if (activeTab !== item.id) {
-                      e.currentTarget.style.color = 'rgba(255,255,255,.55)';
-                    }
-                  }}
+                  onMouseEnter={(e) => handleNavHoverEnter(e, isLiveTradeActive)}
+                  onMouseLeave={(e) => handleNavHoverLeave(e, isLiveTradeActive)}
                 >
-                  <span className="me-2">{item.icon}</span>
-                  {item.label}
+                  <span className="me-2">⚡</span>
+                  Live Trade
+                  <i
+                    className={`bi bi-chevron-${liveTradeMenu.show ? 'up' : 'down'} ms-1`}
+                    style={{ fontSize: '0.75rem' }}
+                  />
                 </button>
-              </li>
-            ))}
+                {liveTradeMenu.show && (
+                  <div
+                    className="dropdown-menu show position-absolute"
+                    style={{
+                      minWidth: '180px',
+                      zIndex: 1050,
+                      marginTop: '0.25rem',
+                      padding: '0.5rem 0',
+                    }}
+                  >
+                    <button
+                      type="button"
+                      className="dropdown-item"
+                      onClick={() => {
+                        liveTradeMenu.close();
+                        onTabChange('live-trade');
+                      }}
+                    >
+                      <i className="bi bi-lightning-charge me-2" />
+                      Live Trade
+                    </button>
+                    <button
+                      type="button"
+                      className="dropdown-item"
+                      onClick={() => {
+                        liveTradeMenu.close();
+                        onTabChange('position');
+                      }}
+                    >
+                      <i className="bi bi-briefcase me-2" />
+                      Position
+                    </button>
+                  </div>
+                )}
+              </div>
+            </li>
+
+            {navItemsAfterLiveTrade.map(renderNavButton)}
           </ul>
           <ul className="navbar-nav ms-auto align-items-center">
             <li className="nav-item me-lg-3 mb-2 mb-lg-0">
@@ -167,19 +254,19 @@ const Navigation: React.FC<NavigationProps> = ({
               </span>
             </li>
             <li className="nav-item">
-              <div 
-                className="position-relative" 
-                ref={dropdownRef}
-                onMouseEnter={openDropdown}
-                onMouseLeave={scheduleClose}
+              <div
+                className="position-relative"
+                ref={profileMenu.ref}
+                onMouseEnter={profileMenu.open}
+                onMouseLeave={profileMenu.scheduleClose}
                 style={{ touchAction: 'manipulation' }}
               >
                 <button
                   type="button"
                   className="nav-link text-light border-0 bg-transparent p-0"
-                  style={{ 
-                    cursor: 'pointer', 
-                    touchAction: 'manipulation', 
+                  style={{
+                    cursor: 'pointer',
+                    touchAction: 'manipulation',
                     userSelect: 'none',
                     WebkitUserSelect: 'none',
                     WebkitTapHighlightColor: 'transparent',
@@ -188,30 +275,17 @@ const Navigation: React.FC<NavigationProps> = ({
                     minHeight: '44px',
                     padding: '0.5rem 1rem',
                     textAlign: 'left',
-                    width: '100%'
+                    width: '100%',
                   }}
                   onClick={(e) => {
                     e.stopPropagation();
                     e.preventDefault();
-                    if (showDropdown) {
-                      setShowDropdown(false);
-                      clearCloseTimeout();
-                    } else {
-                      openDropdown();
-                    }
-                  }}
-                  onTouchStart={(e) => {
-                    e.stopPropagation();
+                    profileMenu.toggle();
                   }}
                   onTouchEnd={(e) => {
                     e.stopPropagation();
                     e.preventDefault();
-                    if (showDropdown) {
-                      setShowDropdown(false);
-                      clearCloseTimeout();
-                    } else {
-                      openDropdown();
-                    }
+                    profileMenu.toggle();
                   }}
                 >
                   <i className="bi bi-person-circle me-2"></i>
@@ -219,33 +293,26 @@ const Navigation: React.FC<NavigationProps> = ({
                   {kiteClientId && (
                     <span className="ms-1 text-white-50">({kiteClientId})</span>
                   )}
-                  <i className={`bi bi-chevron-${showDropdown ? 'up' : 'down'} ms-2`} style={{ fontSize: '0.75rem' }}></i>
+                  <i
+                    className={`bi bi-chevron-${profileMenu.show ? 'up' : 'down'} ms-2`}
+                    style={{ fontSize: '0.75rem' }}
+                  />
                 </button>
-                {showDropdown && (
-                  <div 
+                {profileMenu.show && (
+                  <div
                     className="dropdown-menu show position-absolute end-0"
-                    style={{ 
-                      minWidth: '200px', 
+                    style={{
+                      minWidth: '200px',
                       zIndex: 1050,
                       marginTop: '0.25rem',
-                      padding: '0.5rem 0'
+                      padding: '0.5rem 0',
                     }}
                   >
                     <button
                       className="dropdown-item"
-                      style={{ touchAction: 'manipulation' }}
                       onClick={() => {
-                        setShowDropdown(false);
-                        if (onProfileClick) {
-                          onProfileClick();
-                        }
-                      }}
-                      onTouchStart={(e) => {
-                        e.stopPropagation();
-                        setShowDropdown(false);
-                        if (onProfileClick) {
-                          onProfileClick();
-                        }
+                        profileMenu.close();
+                        onProfileClick?.();
                       }}
                     >
                       <i className="bi bi-person me-2"></i>
@@ -253,19 +320,9 @@ const Navigation: React.FC<NavigationProps> = ({
                     </button>
                     <button
                       className="dropdown-item"
-                      style={{ touchAction: 'manipulation' }}
                       onClick={() => {
-                        setShowDropdown(false);
-                        if (onSubscribeClick) {
-                          onSubscribeClick();
-                        }
-                      }}
-                      onTouchStart={(e) => {
-                        e.stopPropagation();
-                        setShowDropdown(false);
-                        if (onSubscribeClick) {
-                          onSubscribeClick();
-                        }
+                        profileMenu.close();
+                        onSubscribeClick?.();
                       }}
                     >
                       <i className="bi bi-star me-2"></i>
@@ -274,14 +331,8 @@ const Navigation: React.FC<NavigationProps> = ({
                     <hr className="dropdown-divider" />
                     <button
                       className="dropdown-item text-danger"
-                      style={{ touchAction: 'manipulation' }}
                       onClick={() => {
-                        setShowDropdown(false);
-                        onLogout();
-                      }}
-                      onTouchStart={(e) => {
-                        e.stopPropagation();
-                        setShowDropdown(false);
+                        profileMenu.close();
                         onLogout();
                       }}
                     >
@@ -300,4 +351,3 @@ const Navigation: React.FC<NavigationProps> = ({
 };
 
 export default Navigation;
-

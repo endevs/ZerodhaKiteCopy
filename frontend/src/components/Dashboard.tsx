@@ -8,6 +8,7 @@ import ChartModal from './ChartModal';
 import EnhancedRealTimeStrategyMonitor from './EnhancedRealTimeStrategyMonitor';
 import AIMLContent from './AIMLContent';
 import LiveTradeContent from './LiveTradeContent';
+import PositionContent from './PositionContent';
 import AdminContent from './AdminContent';
 import ProfileContent from './ProfileContent';
 import SubscribeContent from './SubscribeContent';
@@ -351,6 +352,8 @@ const Dashboard: React.FC = () => {
         return <AlgoVisualizationContent />;
       case 'live-trade':
         return <LiveTradeContent />;
+      case 'position':
+        return <PositionContent />;
       case 'ai-ml':
         return <AIMLContent onSubscribeClick={handleSubscribeClick} />;
       case 'admin':

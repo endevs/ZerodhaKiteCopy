@@ -42,6 +42,8 @@ interface PlotlyCandlestickChartProps {
   rsiOversold?: number;
   adxData?: (number | null)[];
   indexLabel?: string;
+  /** Plot index close on right Y-axis (for option charts where premium scale differs from index). */
+  indexOnSecondaryAxis?: boolean;
   markers?: TradeMarker[];
   predictionOverlays?: PredictionOverlay[];
 }
@@ -125,13 +127,18 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
   rsiOversold = 30,
   adxData,
   indexLabel = 'Index Close',
+  indexOnSecondaryAxis = false,
   markers,
   predictionOverlays,
 }) => {
   const hasRsi = showRsi && rsiData && rsiData.some((v) => v != null);
   const hasAdx = showRsi && adxData && adxData.some((v) => v != null);
   const hasVolume = showVolume && (data?.some((d) => (d.volume ?? 0) > 0) ?? false);
-  const hasY4Overlay = predictionOverlays?.some((o) => o.yaxis === 'y4') ?? false;
+  const hasConstituentY4 = predictionOverlays?.some((o) => o.yaxis === 'y4') ?? false;
+  const hasIndexCloseData =
+    showIndexLine && (data?.some((d) => d.indexClose != null && !Number.isNaN(d.indexClose)) ?? false);
+  const hasIndexY4 = indexOnSecondaryAxis && hasIndexCloseData;
+  const hasRightY4 = hasConstituentY4 || hasIndexY4;
   const multiDay = useMemo(() => spansMultipleDays(data ?? []), [data]);
 
   const traces = useMemo(() => {
@@ -175,19 +182,6 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
         line: { color: '#ffc107', width: 2 },
         yaxis: 'y',
         connectgaps: false,
-      });
-    }
-
-    if (showIndexLine && indexCloses.some((v) => v != null)) {
-      out.push({
-        x: times,
-        y: indexCloses,
-        type: 'scatter',
-        mode: 'lines',
-        name: indexLabel,
-        line: { color: '#9333ea', width: 2, dash: 'dot' },
-        yaxis: 'y',
-        connectgaps: true,
       });
     }
 
@@ -368,8 +362,26 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
       }
     }
 
+    if (showIndexLine && indexCloses.some((v) => v != null)) {
+      out.push({
+        x: times,
+        y: indexCloses,
+        type: 'scatter',
+        mode: 'lines',
+        name: indexLabel,
+        line: {
+          color: '#9333ea',
+          width: indexOnSecondaryAxis ? 3.5 : 2,
+          dash: 'dot',
+        },
+        yaxis: indexOnSecondaryAxis ? 'y4' : 'y',
+        connectgaps: true,
+        hovertemplate: `<b>${indexLabel}</b><br>%{y:.2f}<extra></extra>`,
+      });
+    }
+
     return out;
-  }, [data, multiDay, showEma, showVolume, showRsi, showIndexLine, rsiData, rsiOverbought, rsiOversold, adxData, indexLabel, markers, predictionOverlays, hasRsi, hasAdx]);
+  }, [data, multiDay, showEma, showVolume, showRsi, showIndexLine, indexOnSecondaryAxis, rsiData, rsiOverbought, rsiOversold, adxData, indexLabel, markers, predictionOverlays, hasRsi, hasAdx]);
 
   const chartHeight = hasRsi ? Math.max(height, 620) : height;
 
@@ -406,11 +418,17 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
       priceDomainBottom = 0.25;
     }
 
+    const y4Title = hasIndexY4
+      ? indexLabel
+      : hasConstituentY4
+        ? 'Constituents'
+        : '';
+
     return {
-      uirevision: `${data.length}-${hasRsi}-${hasVolume}-${hasY4Overlay}`,
+      uirevision: `${data.length}-${hasRsi}-${hasVolume}-${hasRightY4}`,
       title: { text: title || '' },
       height: chartHeight,
-      margin: { l: 50, r: hasY4Overlay ? 72 : 50, t: title ? 40 : 10, b: 40 },
+      margin: { l: 50, r: hasRightY4 ? 72 : 50, t: title ? 40 : 10, b: 40 },
       xaxis: {
         rangeslider: { visible: false },
         type: 'date',
@@ -445,9 +463,9 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
           dtick: 10,
         },
       }),
-      ...(hasY4Overlay && {
+      ...(hasRightY4 && {
         yaxis4: {
-          title: { text: 'Constituents' },
+          title: { text: y4Title },
           overlaying: 'y',
           side: 'right',
           autorange: true,
@@ -463,7 +481,7 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
       dragmode: 'zoom',
       showlegend: true,
     };
-  }, [data.length, multiDay, hasRsi, hasAdx, hasVolume, hasY4Overlay, height, title, chartHeight, xRange]);
+  }, [data.length, multiDay, hasRsi, hasAdx, hasVolume, hasRightY4, hasIndexY4, hasConstituentY4, indexOnSecondaryAxis, indexLabel, height, title, chartHeight, xRange]);
 
   if (!data || data.length === 0) {
     return (
@@ -484,7 +502,7 @@ const PlotlyCandlestickChart: React.FC<PlotlyCandlestickChartProps> = ({
   return (
     <ChartErrorBoundary height={chartHeight}>
       <Plot
-        key={`chart-${hasRsi}-${hasVolume}-${hasY4Overlay}`}
+        key={`chart-${hasRsi}-${hasVolume}-${hasRightY4}`}
         data={traces}
         layout={layout}
         style={{ width: '100%', height: chartHeight }}
