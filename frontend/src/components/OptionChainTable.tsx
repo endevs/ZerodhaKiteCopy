@@ -21,6 +21,15 @@ export interface ChainRow {
   pe: QuoteSide | null;
 }
 
+export interface AddLegFromChainParams {
+  side: 'BUY' | 'SELL';
+  strike: number;
+  optionType: 'CE' | 'PE';
+  tradingsymbol: string;
+  ltp: number;
+  lots: number;
+}
+
 interface OptionChainTableProps {
   chain: ChainRow[];
   spot: number;
@@ -33,6 +42,8 @@ interface OptionChainTableProps {
     type: 'CE' | 'PE'
   ) => void;
   highlightStrike?: number | null;
+  defaultLots?: number;
+  onAddLeg?: (params: AddLegFromChainParams) => void;
 }
 
 const fmt = (v: number | null | undefined, d = 2) =>
@@ -53,6 +64,8 @@ const OptionChainTable: React.FC<OptionChainTableProps> = ({
   tradingDate,
   onSelectContract,
   highlightStrike,
+  defaultLots = 1,
+  onAddLeg,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [hoveredStrike, setHoveredStrike] = useState<number | null>(null);
@@ -95,33 +108,82 @@ const OptionChainTable: React.FC<OptionChainTableProps> = ({
     onSelectContract(side.instrument_token, side.tradingsymbol, strike, type);
   };
 
-  const renderChartButton = (
-    side: QuoteSide | null,
+  const addLegFromChain = (
+    quoteSide: QuoteSide | null,
+    strike: number,
+    type: 'CE' | 'PE',
+    transactionSide: 'BUY' | 'SELL'
+  ) => {
+    if (!onAddLeg || !quoteSide?.tradingsymbol || quoteSide.ltp == null) return;
+    const ltp = Number(quoteSide.ltp);
+    if (!Number.isFinite(ltp)) return;
+    onAddLeg({
+      side: transactionSide,
+      strike,
+      optionType: type,
+      tradingsymbol: quoteSide.tradingsymbol,
+      ltp,
+      lots: defaultLots,
+    });
+  };
+
+  const renderRowActions = (
+    quoteSide: QuoteSide | null,
     strike: number,
     type: 'CE' | 'PE'
   ) => {
-    if (!hasContract(side)) return null;
-    const label = side?.tradingsymbol
-      ? `Chart ${side.tradingsymbol}`
+    if (!hasContract(quoteSide)) return null;
+    const label = quoteSide?.tradingsymbol
+      ? `Chart ${quoteSide.tradingsymbol}`
       : `Chart ${strike} ${type}`;
     const btnClass =
       type === 'CE'
         ? 'btn btn-sm row-chart-btn btn-outline-success'
         : 'btn btn-sm row-chart-btn btn-outline-danger';
     return (
-      <button
-        type="button"
-        className={btnClass}
-        title={label}
-        aria-label={label}
-        onClick={(e) => {
-          e.stopPropagation();
-          openChart(side, strike, type);
-        }}
-      >
-        <i className="bi bi-graph-up" aria-hidden="true" />
-        <span className="row-chart-btn-label">{type}</span>
-      </button>
+      <div className="row-action-btns">
+        {onAddLeg && quoteSide?.ltp != null && (
+          <>
+            <button
+              type="button"
+              className="btn btn-sm row-trade-btn btn-outline-success"
+              title={`Buy ${quoteSide.tradingsymbol}`}
+              aria-label={`Buy ${quoteSide.tradingsymbol}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                addLegFromChain(quoteSide, strike, type, 'BUY');
+              }}
+            >
+              <i className="bi bi-cart-plus" aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              className="btn btn-sm row-trade-btn btn-outline-danger"
+              title={`Sell ${quoteSide.tradingsymbol}`}
+              aria-label={`Sell ${quoteSide.tradingsymbol}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                addLegFromChain(quoteSide, strike, type, 'SELL');
+              }}
+            >
+              <i className="bi bi-cart-dash" aria-hidden="true" />
+            </button>
+          </>
+        )}
+        <button
+          type="button"
+          className={btnClass}
+          title={label}
+          aria-label={label}
+          onClick={(e) => {
+            e.stopPropagation();
+            openChart(quoteSide, strike, type);
+          }}
+        >
+          <i className="bi bi-graph-up" aria-hidden="true" />
+          <span className="row-chart-btn-label">{type}</span>
+        </button>
+      </div>
     );
   };
 
@@ -191,7 +253,7 @@ const OptionChainTable: React.FC<OptionChainTableProps> = ({
                         '—'
                       )}
                     </span>
-                    {isHovered && renderChartButton(row.ce, row.strike, 'CE')}
+                    {isHovered && renderRowActions(row.ce, row.strike, 'CE')}
                   </div>
                 </td>
                 <td className="text-center border-end strike-col">{row.strike}</td>
@@ -218,7 +280,7 @@ const OptionChainTable: React.FC<OptionChainTableProps> = ({
                         '—'
                       )}
                     </span>
-                    {isHovered && renderChartButton(row.pe, row.strike, 'PE')}
+                    {isHovered && renderRowActions(row.pe, row.strike, 'PE')}
                   </div>
                 </td>
                 <td className={`put-side ${chgClass(row.pe?.ltp_chg)}`}>

@@ -2,8 +2,29 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { apiUrl } from '../config/api';
 import OptionChainTable, { ChainRow } from './OptionChainTable';
 import PlotlyCandlestickChart, { PlotlyCandlePoint } from './PlotlyCandlestickChart';
+import PayoffDiagramTab from './PayoffDiagramTab';
+import PayoffChart from './PayoffChart';
+import StrategyBuilderPanel from './StrategyBuilderPanel';
+import {
+  StrategyLeg,
+  AppliedPresetContext,
+  addLegToStrategy,
+  strategyLegsToPositionInputs,
+} from '../lib/optionStrategies';
+import { buildPayoffGroups, IndexUnderlying } from '../lib/payoffDiagram';
 import './OptionChainBoard.css';
 import MarketDataBanner from './MarketDataBanner';
+
+type OptionsMainTab = 'analysis' | 'payoff' | 'dbStatus';
+
+interface ZerodhaPosition {
+  tradingsymbol?: string;
+  exchange?: string;
+  quantity?: number;
+  buy_price?: number;
+  sell_price?: number;
+  last_price?: number;
+}
 
 interface OptionChain {
   index: string;
@@ -101,11 +122,20 @@ const OptionsContent: React.FC = () => {
   const [dbStatus, setDbStatus] = useState<any>(null);
   const [loadingStatus, setLoadingStatus] = useState(false);
   const [collectingData, setCollectingData] = useState(false);
-  const [showDbStatus, setShowDbStatus] = useState(false);
+  const [activeMainTab, setActiveMainTab] = useState<OptionsMainTab>('analysis');
+  const [positions, setPositions] = useState<ZerodhaPosition[]>([]);
+  const [positionsLoading, setPositionsLoading] = useState(false);
+  const [positionsError, setPositionsError] = useState<string | null>(null);
+  const [positionsNeedsCredentials, setPositionsNeedsCredentials] = useState(false);
+  const [positionsAuthExpired, setPositionsAuthExpired] = useState(false);
+  const [marketSnapshot, setMarketSnapshot] = useState<{ NIFTY?: number; BANKNIFTY?: number }>({});
   const [spikes, setSpikes] = useState<SpikeEvent[]>([]);
   const [boardMessage, setBoardMessage] = useState<string | null>(null);
   const [chainUpdatedAt, setChainUpdatedAt] = useState<string | null>(null);
   const [initDone, setInitDone] = useState(false);
+  const [strategyLegs, setStrategyLegs] = useState<StrategyLeg[]>([]);
+  const [appliedPresetContext, setAppliedPresetContext] = useState<AppliedPresetContext | null>(null);
+  const [defaultLots, setDefaultLots] = useState(1);
   const tableContainerRef = useRef<HTMLDivElement>(null);
   const chartCardRef = useRef<HTMLDivElement>(null);
   const userChangedIndexRef = useRef(false);
@@ -207,6 +237,55 @@ const OptionsContent: React.FC = () => {
       alert('Failed to load database status');
     } finally {
       setLoadingStatus(false);
+    }
+  }, []);
+
+  const fetchPositions = useCallback(async (silent = false) => {
+    if (!silent) setPositionsLoading(true);
+    setPositionsError(null);
+    setPositionsNeedsCredentials(false);
+    setPositionsAuthExpired(false);
+
+    try {
+      const response = await fetch(apiUrl('/api/zerodha/positions'), { credentials: 'include' });
+      const data = await response.json();
+
+      if (data.authExpired) {
+        setPositionsAuthExpired(true);
+        setPositionsError('Zerodha session expired. Please log in with Zerodha again from the welcome page.');
+        return;
+      }
+
+      if (data.needsCredentials) {
+        setPositionsNeedsCredentials(true);
+        setPositionsError('Add your Zerodha API credentials to view positions.');
+        return;
+      }
+
+      if (data.status === 'success' && Array.isArray(data.positions)) {
+        setPositions(data.positions);
+      } else if (data.message) {
+        setPositionsError(data.message);
+      }
+    } catch (error) {
+      setPositionsError(error instanceof Error ? error.message : 'Failed to load positions');
+    } finally {
+      if (!silent) setPositionsLoading(false);
+    }
+  }, []);
+
+  const fetchMarketSnapshot = useCallback(async () => {
+    try {
+      const response = await fetch(apiUrl('/api/market_snapshot'), { credentials: 'include' });
+      const data = await response.json();
+      if (response.ok && data.status === 'success') {
+        setMarketSnapshot({
+          NIFTY: typeof data.nifty === 'number' ? data.nifty : undefined,
+          BANKNIFTY: typeof data.banknifty === 'number' ? data.banknifty : undefined,
+        });
+      }
+    } catch {
+      // Best-effort spot prices for payoff chart marker
     }
   }, []);
 
@@ -655,10 +734,85 @@ const OptionsContent: React.FC = () => {
 
   // Load DB status when tab is shown
   useEffect(() => {
-    if (showDbStatus) {
+    if (activeMainTab === 'dbStatus') {
       loadDbStatus();
     }
-  }, [showDbStatus, loadDbStatus]);
+  }, [activeMainTab, loadDbStatus]);
+
+  useEffect(() => {
+    if (activeMainTab !== 'payoff') return;
+
+    fetchPositions();
+    fetchMarketSnapshot();
+    const interval = setInterval(() => {
+      fetchPositions(true);
+      fetchMarketSnapshot();
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [activeMainTab, fetchPositions, fetchMarketSnapshot]);
+
+  useEffect(() => {
+    setStrategyLegs([]);
+    setAppliedPresetContext(null);
+  }, [selectedIndex, selectedExpiry, selectedDate]);
+
+  const handleAddStrategyLeg = useCallback(
+    (params: {
+      side: 'BUY' | 'SELL';
+      strike: number;
+      optionType: 'CE' | 'PE';
+      tradingsymbol: string;
+      ltp: number;
+      lots: number;
+    }) => {
+      setStrategyLegs((prev) => addLegToStrategy(prev, params));
+    },
+    []
+  );
+
+  const openPositions = useMemo(
+    () => positions.filter((p) => p.quantity != null && Number(p.quantity) !== 0),
+    [positions]
+  );
+
+  const spotPrices = useMemo(
+    () => ({
+      NIFTY:
+        selectedIndex === 'NIFTY' && currentLTP != null
+          ? currentLTP
+          : marketSnapshot.NIFTY,
+      BANKNIFTY:
+        selectedIndex === 'BANKNIFTY' && currentLTP != null
+          ? currentLTP
+          : marketSnapshot.BANKNIFTY,
+    }),
+    [selectedIndex, currentLTP, marketSnapshot]
+  );
+
+  const strategyPayoffUnderlying = useMemo((): IndexUnderlying | null => {
+    if (selectedIndex === 'NIFTY' || selectedIndex === 'BANKNIFTY') {
+      return selectedIndex;
+    }
+    return null;
+  }, [selectedIndex]);
+
+  const strategyPayoffSpot = useMemo(() => {
+    if (selectedIndex === 'NIFTY' || selectedIndex === 'BANKNIFTY') {
+      return currentLTP ?? optionChain?.spot ?? spotPrices[selectedIndex];
+    }
+    return undefined;
+  }, [selectedIndex, currentLTP, optionChain?.spot, spotPrices]);
+
+  const strategyPositionInputs = useMemo(
+    () => (selectedIndex ? strategyLegsToPositionInputs(strategyLegs, selectedIndex) : []),
+    [strategyLegs, selectedIndex]
+  );
+
+  const strategyParsedLegs = useMemo(() => {
+    if (!strategyPayoffUnderlying || strategyPositionInputs.length === 0) return [];
+    const groups = buildPayoffGroups(strategyPositionInputs);
+    return groups.find((g) => g.underlying === strategyPayoffUnderlying)?.legs ?? [];
+  }, [strategyPositionInputs, strategyPayoffUnderlying]);
 
   return (
     <div className="container-fluid py-4">
@@ -671,23 +825,34 @@ const OptionsContent: React.FC = () => {
           <ul className="nav nav-tabs mb-4" role="tablist">
             <li className="nav-item" role="presentation">
               <button
-                className={`nav-link ${!showDbStatus ? 'active' : ''}`}
-                onClick={() => setShowDbStatus(false)}
+                type="button"
+                className={`nav-link ${activeMainTab === 'analysis' ? 'active' : ''}`}
+                onClick={() => setActiveMainTab('analysis')}
               >
                 Options Analysis
               </button>
             </li>
             <li className="nav-item" role="presentation">
               <button
-                className={`nav-link ${showDbStatus ? 'active' : ''}`}
-                onClick={() => setShowDbStatus(true)}
+                type="button"
+                className={`nav-link ${activeMainTab === 'payoff' ? 'active' : ''}`}
+                onClick={() => setActiveMainTab('payoff')}
+              >
+                Pay Off Diagram
+              </button>
+            </li>
+            <li className="nav-item" role="presentation">
+              <button
+                type="button"
+                className={`nav-link ${activeMainTab === 'dbStatus' ? 'active' : ''}`}
+                onClick={() => setActiveMainTab('dbStatus')}
               >
                 Database Record Status
               </button>
             </li>
           </ul>
 
-          {!showDbStatus ? (
+          {activeMainTab === 'analysis' && (
             <>
               {/* Controls */}
           <div className="card mb-4">
@@ -849,9 +1014,43 @@ const OptionsContent: React.FC = () => {
                     loadOptionCandles(token, symbol, strike, type)
                   }
                   highlightStrike={selectedOption?.strike ?? null}
+                  defaultLots={defaultLots}
+                  onAddLeg={handleAddStrategyLeg}
                 />
               </div>
             </div>
+          )}
+
+          {optionChain && (
+            <>
+              <StrategyBuilderPanel
+                legs={strategyLegs}
+                onLegsChange={setStrategyLegs}
+                index={selectedIndex}
+                atmStrike={optionChain.atm_strike ?? getATMStrike()}
+                chain={optionChain.chain}
+                spot={currentLTP ?? optionChain.spot}
+                defaultLots={defaultLots}
+                onDefaultLotsChange={setDefaultLots}
+                appliedPreset={appliedPresetContext}
+                onAppliedPresetChange={setAppliedPresetContext}
+              />
+              {strategyLegs.length > 0 && strategyPayoffUnderlying && (
+                <PayoffChart
+                  legs={strategyParsedLegs}
+                  underlying={strategyPayoffUnderlying}
+                  spot={strategyPayoffSpot}
+                  title={`${strategyPayoffUnderlying} — Strategy Payoff (Simulation)`}
+                  showDisclaimer
+                  className="mt-3"
+                  enhanced
+                  chain={optionChain.chain}
+                  atmStrike={optionChain.atm_strike ?? getATMStrike()}
+                  expiryDate={selectedExpiry}
+                  tradingDate={selectedDate}
+                />
+              )}
+            </>
           )}
 
           {/* Candle Chart */}
@@ -924,7 +1123,7 @@ const OptionsContent: React.FC = () => {
                     )}
                     <button
                       className="btn btn-sm btn-primary"
-                      onClick={() => setShowDbStatus(true)}
+                      onClick={() => setActiveMainTab('dbStatus')}
                     >
                       View Database Status
                     </button>
@@ -934,8 +1133,25 @@ const OptionsContent: React.FC = () => {
             </div>
           )}
             </>
-          ) : (
-            // Database Record Status Tab
+          )}
+
+          {activeMainTab === 'payoff' && (
+            <PayoffDiagramTab
+              positions={openPositions}
+              spotPrices={spotPrices}
+              defaultUnderlying={
+                selectedIndex === 'NIFTY' || selectedIndex === 'BANKNIFTY'
+                  ? selectedIndex
+                  : undefined
+              }
+              loading={positionsLoading}
+              error={positionsError}
+              needsCredentials={positionsNeedsCredentials}
+              authExpired={positionsAuthExpired}
+            />
+          )}
+
+          {activeMainTab === 'dbStatus' && (
             <div className="card">
               <div className="card-header d-flex justify-content-between align-items-center">
                 <h5 className="mb-0">Database Record Status</h5>
