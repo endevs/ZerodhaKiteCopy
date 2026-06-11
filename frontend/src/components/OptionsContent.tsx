@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { apiUrl } from '../config/api';
-import OptionChainTable, { ChainRow } from './OptionChainTable';
+import OptionChainTable, { ChainRow, OptionChainTableHandle } from './OptionChainTable';
 import PlotlyCandlestickChart, { PlotlyCandlePoint } from './PlotlyCandlestickChart';
 import PayoffDiagramTab from './PayoffDiagramTab';
 import PayoffChart from './PayoffChart';
@@ -12,6 +12,16 @@ import {
   strategyLegsToPositionInputs,
 } from '../lib/optionStrategies';
 import { buildPayoffGroups, IndexUnderlying } from '../lib/payoffDiagram';
+import { applyQuotePatch, mergeChainBoard, mergeSpotUpdate, QuotePatch } from '../lib/optionChainLive';
+import {
+  DEFAULT_IV_SPIKE_PCT,
+  DEFAULT_PRICE_SPIKE_PCT,
+  IV_SPIKE_STORAGE_KEY,
+  PRICE_SPIKE_STORAGE_KEY,
+  readStoredThreshold,
+  writeStoredThreshold,
+} from '../lib/optionChainSpike';
+import { useSocket } from '../hooks/useSocket';
 import './OptionChainBoard.css';
 import MarketDataBanner from './MarketDataBanner';
 
@@ -36,18 +46,6 @@ interface OptionChain {
   spot?: number;
   data_source?: string;
   message?: string | null;
-}
-
-interface SpikeEvent {
-  instrument_token: number;
-  tradingsymbol?: string;
-  strike?: number;
-  instrument_type?: string;
-  metric: string;
-  value: number;
-  window_sec: number;
-  ts: string;
-  severity?: string;
 }
 
 interface Candle {
@@ -129,16 +127,27 @@ const OptionsContent: React.FC = () => {
   const [positionsNeedsCredentials, setPositionsNeedsCredentials] = useState(false);
   const [positionsAuthExpired, setPositionsAuthExpired] = useState(false);
   const [marketSnapshot, setMarketSnapshot] = useState<{ NIFTY?: number; BANKNIFTY?: number }>({});
-  const [spikes, setSpikes] = useState<SpikeEvent[]>([]);
+  const [priceSpikeThreshold, setPriceSpikeThreshold] = useState(() =>
+    readStoredThreshold(PRICE_SPIKE_STORAGE_KEY, DEFAULT_PRICE_SPIKE_PCT),
+  );
+  const [ivSpikeThreshold, setIvSpikeThreshold] = useState(() =>
+    readStoredThreshold(IV_SPIKE_STORAGE_KEY, DEFAULT_IV_SPIKE_PCT),
+  );
   const [boardMessage, setBoardMessage] = useState<string | null>(null);
   const [chainUpdatedAt, setChainUpdatedAt] = useState<string | null>(null);
   const [initDone, setInitDone] = useState(false);
   const [strategyLegs, setStrategyLegs] = useState<StrategyLeg[]>([]);
   const [appliedPresetContext, setAppliedPresetContext] = useState<AppliedPresetContext | null>(null);
   const [defaultLots, setDefaultLots] = useState(1);
-  const tableContainerRef = useRef<HTMLDivElement>(null);
+  const chainTableRef = useRef<OptionChainTableHandle>(null);
+  const chainBoardInFlightRef = useRef(false);
+  const captureSubscribedKeyRef = useRef<string | null>(null);
   const chartCardRef = useRef<HTMLDivElement>(null);
   const userChangedIndexRef = useRef(false);
+  const lastQuoteTickAtRef = useRef(0);
+  const liveChainStartedAtRef = useRef(0);
+  const [liveTicksDegraded, setLiveTicksDegraded] = useState(false);
+  const socket = useSocket();
 
   const loadExpiryDates = useCallback(async () => {
     if (!selectedIndex) return;
@@ -326,26 +335,27 @@ const OptionsContent: React.FC = () => {
     }
   }, [loadDbStatus]);
 
-  const loadSpikes = useCallback(async () => {
-    if (!selectedIndex || !selectedDate) return;
-    try {
-      const q = new URLSearchParams({
-        index: selectedIndex,
-        trading_date: selectedDate,
-      });
-      if (selectedExpiry) q.set('expiry_date', selectedExpiry);
-      const response = await fetch(apiUrl(`/api/options/spikes?${q}`), { credentials: 'include' });
-      if (!response.ok) return;
-      const data = await response.json();
-      setSpikes(data.spikes || []);
-    } catch {
-      setSpikes([]);
-    }
-  }, [selectedIndex, selectedDate, selectedExpiry]);
+  const handlePriceSpikeThresholdChange = useCallback((raw: string) => {
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0) return;
+    setPriceSpikeThreshold(n);
+    writeStoredThreshold(PRICE_SPIKE_STORAGE_KEY, n);
+  }, []);
 
-  const loadChainBoard = useCallback(async (opts?: { silent?: boolean }) => {
+  const handleIvSpikeThresholdChange = useCallback((raw: string) => {
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0) return;
+    setIvSpikeThreshold(n);
+    writeStoredThreshold(IV_SPIKE_STORAGE_KEY, n);
+  }, []);
+
+  const loadChainBoard = useCallback(async (opts?: { silent?: boolean; livePoll?: boolean }) => {
     if (!selectedIndex || !selectedExpiry || !selectedDate) return;
+    if (chainBoardInFlightRef.current) {
+      return;
+    }
     const silent = opts?.silent ?? false;
+    chainBoardInFlightRef.current = true;
     try {
       if (!silent) setLoading(true);
       const q = new URLSearchParams({
@@ -353,6 +363,9 @@ const OptionsContent: React.FC = () => {
         trading_date: selectedDate,
         expiry_date: selectedExpiry,
       });
+      if (opts?.livePoll === false) {
+        q.set('live_poll', '0');
+      }
       const response = await fetch(apiUrl(`/api/options/chain-board?${q}`), {
         credentials: 'include',
       });
@@ -360,30 +373,32 @@ const OptionsContent: React.FC = () => {
         const err = await response.json();
         throw new Error(err.error || 'Failed to load option chain');
       }
-      const data: OptionChain = await response.json();
-      setOptionChain(data);
+      const raw = await response.json();
+      const data: OptionChain = {
+        ...raw,
+        is_active: raw.is_active ?? raw.is_live ?? false,
+      };
+      setOptionChain((prev) => {
+        if (!silent || !prev) return data;
+        return {
+          ...data,
+          chain: mergeChainBoard(prev.chain, data.chain),
+        };
+      });
       setBoardMessage(data.message || null);
       if (data.spot != null) setCurrentLTP(data.spot);
       setChainUpdatedAt(new Date().toLocaleTimeString('en-IN', { hour12: false }));
-      if (data.is_active) {
-        loadSpikes();
-        fetch(apiUrl('/api/options/capture/subscribe'), {
-          method: 'POST',
-          credentials: 'include',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ index: selectedIndex, expiry_date: selectedExpiry }),
-        }).catch(() => {});
-      } else {
-        setSpikes([]);
-      }
     } catch (error: unknown) {
-      const msg = error instanceof Error ? error.message : 'Failed to load option chain';
-      console.error('Error loading chain board:', error);
-      if (!silent) alert(msg);
+      if (!silent) {
+        const msg = error instanceof Error ? error.message : 'Failed to load option chain';
+        console.error('Error loading chain board:', error);
+        alert(msg);
+      }
     } finally {
+      chainBoardInFlightRef.current = false;
       if (!silent) setLoading(false);
     }
-  }, [selectedIndex, selectedExpiry, selectedDate, loadSpikes]);
+  }, [selectedIndex, selectedExpiry, selectedDate]);
 
   const handleRefreshChain = useCallback(() => {
     clearOptionChart();
@@ -595,39 +610,10 @@ const OptionsContent: React.FC = () => {
     return null;
   };
 
-  // Scroll to ATM row in the middle of the table
-  const scrollToATM = useCallback(() => {
-    if (!tableContainerRef.current || !optionChain || !currentLTP) {
-      return;
-    }
-    
-    const atmStrike = getATMStrike();
-    if (!atmStrike) return;
-    
-    // Find the index of ATM strike
-    const atmIndex = optionChain.chain.findIndex(item => item.strike === atmStrike);
-    if (atmIndex === -1) return;
-    
-    // Get the table rows
-    const tbody = tableContainerRef.current.querySelector('tbody');
-    if (!tbody) return;
-    
-    const rows = Array.from(tbody.querySelectorAll('tr'));
-    if (rows.length === 0) return;
-    
-    const atmRow = rows[atmIndex];
-    if (!atmRow) return;
-    
-    // Calculate scroll position to center ATM row
-    const containerHeight = tableContainerRef.current.clientHeight;
-    const rowHeight = atmRow.clientHeight;
-    const scrollTop = atmRow.offsetTop - (containerHeight / 2) + (rowHeight / 2);
-    
-    tableContainerRef.current.scrollTo({
-      top: Math.max(0, scrollTop),
-      behavior: 'smooth'
-    });
-  }, [optionChain, currentLTP]);
+  const chainScrollContextKey = useMemo(
+    () => `${selectedIndex}|${selectedExpiry}|${selectedDate}`,
+    [selectedIndex, selectedExpiry, selectedDate],
+  );
 
   const bootstrapFromExpiryDates = useCallback(async (index: string) => {
     const today = new Date().toISOString().split('T')[0];
@@ -689,13 +675,92 @@ const OptionsContent: React.FC = () => {
   }, [initDone, selectedIndex, selectedExpiry, selectedDate, loadChainBoard]);
 
   useEffect(() => {
+    if (!optionChain?.is_active || !selectedIndex || !selectedExpiry) return;
+    if (captureSubscribedKeyRef.current === chainScrollContextKey) return;
+    captureSubscribedKeyRef.current = chainScrollContextKey;
+    fetch(apiUrl('/api/options/capture/subscribe'), {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ index: selectedIndex, expiry_date: selectedExpiry }),
+    }).catch(() => {});
+  }, [optionChain?.is_active, chainScrollContextKey, selectedIndex, selectedExpiry]);
+
+  useEffect(() => {
+    if (!optionChain?.is_active || !selectedIndex) {
+      return;
+    }
+    liveChainStartedAtRef.current = Date.now();
+    lastQuoteTickAtRef.current = 0;
+    setLiveTicksDegraded(false);
+
+    socket.emit('join_options_chain', {});
+
+    const onQuoteUpdate = (patch: QuotePatch) => {
+      if (patch.index_name?.toUpperCase() !== selectedIndex.toUpperCase()) return;
+      lastQuoteTickAtRef.current = Date.now();
+      setLiveTicksDegraded(false);
+      setOptionChain((prev) => {
+        if (!prev) return prev;
+        return { ...prev, chain: applyQuotePatch(prev.chain, patch) };
+      });
+      if (patch.updated_at) {
+        try {
+          const t = new Date(patch.updated_at);
+          if (!Number.isNaN(t.getTime())) {
+            setChainUpdatedAt(t.toLocaleTimeString('en-IN', { hour12: false }));
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+    };
+
+    const onMarketData = (data: { nifty_price?: string; banknifty_price?: string }) => {
+      const spot = mergeSpotUpdate(selectedIndex, data);
+      if (spot == null) return;
+      setCurrentLTP(spot);
+      setOptionChain((prev) => (prev ? { ...prev, spot } : prev));
+    };
+
+    socket.on('option_quote_update', onQuoteUpdate);
+    socket.on('market_data', onMarketData);
+
+    return () => {
+      socket.emit('leave_options_chain', {});
+      socket.off('option_quote_update', onQuoteUpdate);
+      socket.off('market_data', onMarketData);
+    };
+  }, [optionChain?.is_active, selectedIndex, socket, chainScrollContextKey]);
+
+  useEffect(() => {
     if (!optionChain?.is_active || !selectedIndex || !selectedExpiry || !selectedDate) return;
+    const slowId = setInterval(() => {
+      loadChainBoard({ silent: true, livePoll: false });
+    }, 30000);
+    return () => clearInterval(slowId);
+  }, [optionChain?.is_active, selectedIndex, selectedExpiry, selectedDate, loadChainBoard]);
+
+  useEffect(() => {
+    if (!optionChain?.is_active) return;
     const id = setInterval(() => {
-      loadChainBoard({ silent: true });
-      loadSpikes();
-    }, 3000);
+      const started = liveChainStartedAtRef.current;
+      const lastTick = lastQuoteTickAtRef.current;
+      const now = Date.now();
+      const stale = lastTick > 0 && now - lastTick > 10000;
+      const noTicksYet = lastTick === 0 && started > 0 && now - started > 10000;
+      setLiveTicksDegraded(stale || noTicksYet);
+    }, 2000);
     return () => clearInterval(id);
-  }, [optionChain?.is_active, selectedIndex, selectedExpiry, selectedDate, loadChainBoard, loadSpikes]);
+  }, [optionChain?.is_active]);
+
+  useEffect(() => {
+    if (!liveTicksDegraded || !optionChain?.is_active) return;
+    const id = setInterval(() => {
+      loadChainBoard({ silent: true, livePoll: false });
+    }, 15000);
+    return () => clearInterval(id);
+  }, [liveTicksDegraded, optionChain?.is_active, loadChainBoard]);
 
   // Reload expiries only when the user changes index (init uses default-selection)
   useEffect(() => {
@@ -719,18 +784,6 @@ const OptionsContent: React.FC = () => {
       setIndexCandles([]);
     }
   }, [selectedIndex, selectedDate, loadIndexCandles]);
-
-  // Scroll to ATM when LTP updates or chain loads
-  useEffect(() => {
-    if (optionChain && currentLTP && tableContainerRef.current) {
-      // Use a small delay to ensure DOM is updated
-      const timer = setTimeout(() => {
-        scrollToATM();
-      }, 200);
-      
-      return () => clearTimeout(timer);
-    }
-  }, [currentLTP, optionChain, scrollToATM]);
 
   // Load DB status when tab is shown
   useEffect(() => {
@@ -970,51 +1023,62 @@ const OptionsContent: React.FC = () => {
                   {chainUpdatedAt && optionChain.is_active && (
                     <span>Updated: <strong>{chainUpdatedAt}</strong></span>
                   )}
+                  <label className="d-inline-flex align-items-center gap-1 mb-0">
+                    <span className="text-muted">Price spike %</span>
+                    <input
+                      type="number"
+                      className="form-control form-control-sm spike-threshold-input"
+                      min={0.1}
+                      step={0.1}
+                      value={priceSpikeThreshold}
+                      onChange={(e) => handlePriceSpikeThresholdChange(e.target.value)}
+                      title="Highlight LTP cells when |day change %| meets or exceeds this value"
+                    />
+                  </label>
+                  <label className="d-inline-flex align-items-center gap-1 mb-0">
+                    <span className="text-muted">IV spike %</span>
+                    <input
+                      type="number"
+                      className="form-control form-control-sm spike-threshold-input"
+                      min={0.1}
+                      step={0.1}
+                      value={ivSpikeThreshold}
+                      onChange={(e) => handleIvSpikeThresholdChange(e.target.value)}
+                      title="Highlight IV cells when |day IV change %| meets or exceeds this value"
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    className="btn btn-outline-secondary btn-sm"
+                    onClick={() => chainTableRef.current?.scrollToAtm()}
+                  >
+                    Center ATM
+                  </button>
                 </span>
               </div>
               <div className="card-body">
                 {boardMessage && (
                   <div className="alert alert-warning py-2 small">{boardMessage}</div>
                 )}
-                {optionChain.is_active && spikes.length > 0 && (
-                  <div className="mb-3 spike-panel border rounded p-2 bg-light">
-                    <strong className="small">Price / IV spikes</strong>
-                    <ul className="list-unstyled mb-0 small mt-1">
-                      {spikes.slice(0, 12).map((s, i) => (
-                        <li key={`${s.ts}-${i}`}>
-                          <button
-                            type="button"
-                            className="btn btn-link btn-sm p-0"
-                            onClick={() => {
-                              if (s.instrument_token && s.tradingsymbol && s.strike != null) {
-                                loadOptionCandles(
-                                  s.instrument_token,
-                                  s.tradingsymbol,
-                                  s.strike,
-                                  (s.instrument_type === 'PE' ? 'PE' : 'CE') as 'CE' | 'PE'
-                                );
-                              }
-                            }}
-                          >
-                            {s.tradingsymbol || s.strike} — {s.metric}{' '}
-                            {s.value > 0 ? '+' : ''}
-                            {s.value}% ({s.window_sec}s)
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
+                {optionChain.is_active && liveTicksDegraded && (
+                  <div className="alert alert-info py-2 small mb-2">
+                    Live tick stream unavailable — refreshing quotes every 15s via REST.
                   </div>
                 )}
                 <OptionChainTable
+                  ref={chainTableRef}
                   chain={optionChain.chain}
                   spot={optionChain.spot ?? currentLTP ?? 0}
                   atmStrike={optionChain.atm_strike ?? getATMStrike()}
                   tradingDate={selectedDate}
+                  scrollContextKey={chainScrollContextKey}
                   onSelectContract={(token, symbol, strike, type) =>
                     loadOptionCandles(token, symbol, strike, type)
                   }
                   highlightStrike={selectedOption?.strike ?? null}
                   defaultLots={defaultLots}
+                  priceSpikeThreshold={priceSpikeThreshold}
+                  ivSpikeThreshold={ivSpikeThreshold}
                   onAddLeg={handleAddStrategyLeg}
                 />
               </div>

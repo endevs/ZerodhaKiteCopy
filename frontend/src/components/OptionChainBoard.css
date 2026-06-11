@@ -47,16 +47,26 @@
   font-weight: 600;
 }
 
+.option-chain-table tr.row-atm td.ltp-col-up {
+  background-color: #d4edda !important;
+  color: #1e7e34;
+}
+
+.option-chain-table tr.row-atm td.ltp-col-down {
+  background-color: #f8d7da !important;
+  color: #c0392b;
+}
+
 .option-chain-table tr.row-atm td.strike-col {
   background-color: #9eeaf9 !important;
   color: #212529;
 }
 
-.option-chain-table tr.row-itm-ce td.call-side {
+.option-chain-table tr.row-itm-ce td.call-side:not(.ltp-col-up):not(.ltp-col-down) {
   background-color: #fff9e6;
 }
 
-.option-chain-table tr.row-itm-pe td.put-side {
+.option-chain-table tr.row-itm-pe td.put-side:not(.ltp-col-up):not(.ltp-col-down) {
   background-color: #fff9e6;
 }
 
@@ -106,6 +116,46 @@
   white-space: nowrap;
 }
 
+.option-chain-table td.ltp-col-up {
+  background-color: #e6f4ea;
+  color: #1e7e34;
+  font-weight: 600;
+}
+
+.option-chain-table td.ltp-col-down {
+  background-color: #fdecea;
+  color: #c0392b;
+  font-weight: 600;
+}
+
+.option-chain-table .ltp-chg-pct {
+  font-weight: 700;
+  margin-left: 0.35rem;
+}
+
+@keyframes ltp-flash-up-keyframes {
+  0% { background-color: #b8e6c8; }
+  100% { background-color: inherit; }
+}
+
+@keyframes ltp-flash-down-keyframes {
+  0% { background-color: #f5c6cb; }
+  100% { background-color: inherit; }
+}
+
+.option-chain-table td.ltp-flash-up {
+  animation: ltp-flash-up-keyframes 0.3s ease-out;
+}
+
+.option-chain-table td.ltp-flash-down {
+  animation: ltp-flash-down-keyframes 0.3s ease-out;
+}
+
+.option-chain-table .iv-level {
+  font-weight: 500;
+  color: #212529;
+}
+
 .option-chain-table .row-chart-btn {
   display: inline-flex;
   align-items: center;
@@ -145,13 +195,31 @@
 
 .chg-pos {
   color: #198754;
+  font-weight: 600;
 }
 
 .chg-neg {
   color: #dc3545;
+  font-weight: 600;
 }
 
-.spike-panel {
-  max-height: 160px;
-  overflow-y: auto;
+.spike-threshold-input {
+  width: 4.5rem;
+}
+
+.option-chain-table td.spike-highlight {
+  background-color: #fff3cd;
+  box-shadow: inset 0 0 0 1px #ffc107;
+}
+
+.option-chain-table td.spike-highlight.chg-pos,
+.option-chain-table td.spike-highlight.ltp-col-up {
+  background-color: #d1e7dd;
+  box-shadow: inset 0 0 0 1px #198754;
+}
+
+.option-chain-table td.spike-highlight.chg-neg,
+.option-chain-table td.spike-highlight.ltp-col-down {
+  background-color: #f8d7da;
+  box-shadow: inset 0 0 0 1px #dc3545;
 }

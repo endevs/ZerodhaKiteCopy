@@ -136,6 +136,19 @@ class ZerodhaPlaywrightAuthOrchestrator:
 
     def _run(self, payload: AuthJobInput) -> None:
         logger.info("Automated Zerodha auth run started for app_user_id=%s", payload.app_user_id)
+        # #region agent log
+        try:
+            from debug_agent_log import agent_log
+
+            agent_log(
+                "orchestrator.py:_run:start",
+                "Auth orchestrator run started",
+                {"app_user_id": payload.app_user_id, "max_attempts": self._max_attempts},
+                "B,C",
+            )
+        except Exception:
+            pass
+        # #endregion
         last_reason: Optional[str] = None
         for attempt in range(1, self._max_attempts + 1):
             self._set_state(payload.app_user_id, status="running", attempts=attempt)
@@ -195,6 +208,25 @@ class ZerodhaPlaywrightAuthOrchestrator:
                     last_reason,
                     exc,
                 )
+                # #region agent log
+                try:
+                    from debug_agent_log import agent_log
+
+                    agent_log(
+                        "orchestrator.py:_run:auth_failed",
+                        "Zerodha auth failed",
+                        {
+                            "app_user_id": payload.app_user_id,
+                            "attempt": attempt,
+                            "reason": last_reason,
+                            "error_type": type(exc).__name__,
+                            "error_msg": str(exc)[:300],
+                        },
+                        "B",
+                    )
+                except Exception:
+                    pass
+                # #endregion
 
         final_status = (
             "needs_manual"

@@ -14,6 +14,12 @@ from option_chain_capture import (
     poll_quotes_from_kite,
     resolve_atm_band_contracts,
 )
+from option_chain_metrics import (
+    compute_day_changes,
+    index_prev_close_from_db,
+    option_prev_close_from_candles,
+    resolve_iv_prev_close,
+)
 from option_iv import implied_volatility
 
 logger = logging.getLogger(__name__)
@@ -128,34 +134,53 @@ def _quote_from_latest(conn, token: int, trading_date: str) -> Optional[Dict[str
     return dict(row) if row else None
 
 
-def _quote_from_candles(conn, token: int, trading_date: str, spot: float, strike: float, itype: str, expiry: str) -> Dict[str, Any]:
+def _quote_from_candles(
+    conn,
+    token: int,
+    trading_date: str,
+    spot: float,
+    strike: float,
+    itype: str,
+    expiry: str,
+    index_name: str,
+) -> Dict[str, Any]:
     rows = conn.execute(
         """
         SELECT close, timestamp FROM option_candles_5min
         WHERE instrument_token = ? AND date = ?
-        ORDER BY timestamp DESC LIMIT 2
+        ORDER BY timestamp DESC LIMIT 1
         """,
         (token, trading_date),
     ).fetchall()
     if not rows:
         return {}
     ltp = float(rows[0][0])
-    prev = float(rows[1][0]) if len(rows) > 1 else ltp
-    chg = ltp - prev
-    chg_pct = (chg / prev * 100.0) if prev else 0.0
+    prev_close = option_prev_close_from_candles(conn, token, trading_date)
+    index_prev_close = index_prev_close_from_db(index_name, trading_date)
+    iv_prev_close = resolve_iv_prev_close(
+        prev_close,
+        index_prev_close,
+        strike,
+        expiry,
+        itype,
+        trading_date,
+        None,
+        None,
+    )
     try:
         exp_d = datetime.datetime.strptime(expiry, "%Y-%m-%d").date()
         days = max((exp_d - datetime.datetime.strptime(trading_date, "%Y-%m-%d").date()).days, 1)
     except ValueError:
         days = 7
     iv = implied_volatility(ltp, spot, strike, float(days), itype)
+    changes = compute_day_changes(ltp, iv, prev_close, iv_prev_close)
     return {
         "ltp": ltp,
-        "ltp_chg": round(chg, 2),
-        "ltp_chg_pct": round(chg_pct, 2),
+        "ltp_chg": changes["ltp_chg"],
+        "ltp_chg_pct": changes["ltp_chg_pct"],
         "iv": iv,
-        "iv_chg": None,
-        "iv_chg_pct": None,
+        "iv_chg": changes["iv_chg"],
+        "iv_chg_pct": changes["iv_chg_pct"],
         "oi": None,
         "oi_lakh": None,
         "oi_chg": None,
@@ -248,6 +273,7 @@ def build_chain_board(
                         "trading_date": trading_date_str,
                         "chain": cached,
                         "is_live": False,
+                        "is_active": False,
                         "data_source": "db_snapshot",
                         "atm_strike": atm_strike,
                         "spot": spot,
@@ -268,6 +294,7 @@ def build_chain_board(
                     float(c["strike"]),
                     c["instrument_type"],
                     expiry_date_str,
+                    c.get("index_name") or index_name,
                 )
             if q:
                 quotes_by_token[token] = q
@@ -315,6 +342,7 @@ def build_chain_board(
         "trading_date": trading_date_str,
         "chain": chain,
         "is_live": is_live,
+        "is_active": is_live,
         "data_source": data_source,
         "atm_strike": atm_strike,
         "spot": round(spot, 2),

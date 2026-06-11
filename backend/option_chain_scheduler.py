@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import datetime
 import logging
+import time
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -33,6 +34,20 @@ def _in_market_hours() -> bool:
 def poll_capture_band() -> None:
     if not _in_market_hours():
         return
+    # #region agent log
+    _poll_started = time.perf_counter()
+    try:
+        from debug_agent_log import agent_log
+
+        agent_log(
+            "option_chain_scheduler.py:poll_capture_band:start",
+            "poll_capture_band started",
+            {},
+            "D",
+        )
+    except Exception:
+        pass
+    # #endregion
     try:
         from kite_client_resolver import get_global_provider_kite
         from option_chain_board import pick_default_expiry
@@ -41,6 +56,7 @@ def poll_capture_band() -> None:
         kite = get_global_provider_kite()
         today = datetime.date.today()
         trading_date = today
+        total_ingested = 0
         for index_name in ("NIFTY", "BANKNIFTY"):
             sym = "NSE:NIFTY BANK" if index_name == "BANKNIFTY" else "NSE:NIFTY 50"
             spot = float(kite.ltp(sym)[sym]["last_price"])
@@ -56,8 +72,40 @@ def poll_capture_band() -> None:
             expiry_date = datetime.datetime.strptime(expiry_str, "%Y-%m-%d").date()
             band = resolve_atm_band_contracts(kite, index_name, expiry_date, spot, trading_date)
             capture_quotes_from_kite(kite, band, spot)
+            total_ingested += len(band)
     except Exception as exc:
         logger.debug("poll_capture_band skipped: %s", exc)
+        # #region agent log
+        try:
+            from debug_agent_log import agent_log
+
+            agent_log(
+                "option_chain_scheduler.py:poll_capture_band:error",
+                "poll_capture_band failed",
+                {
+                    "duration_ms": int((time.perf_counter() - _poll_started) * 1000),
+                    "error_type": type(exc).__name__,
+                    "error_msg": str(exc)[:300],
+                },
+                "D",
+            )
+        except Exception:
+            pass
+        # #endregion
+    else:
+        # #region agent log
+        try:
+            from debug_agent_log import agent_log
+
+            agent_log(
+                "option_chain_scheduler.py:poll_capture_band:done",
+                "poll_capture_band finished",
+                {"duration_ms": int((time.perf_counter() - _poll_started) * 1000)},
+                "D",
+            )
+        except Exception:
+            pass
+        # #endregion
 
 
 def purge_ticks_job() -> None:

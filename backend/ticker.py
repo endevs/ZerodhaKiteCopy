@@ -3,8 +3,57 @@ from kiteconnect import KiteTicker
 import logging
 import datetime
 import time
+from typing import List, Optional, Set
 from database import get_db_connection
 from utils import get_option_symbols
+
+
+def refresh_capture_subscriptions() -> None:
+    """Subscribe KiteTicker to ATM capture-band tokens registered by option_chain_capture."""
+    try:
+        from option_chain_capture import get_capture_tokens
+        import app as app_module
+
+        ticker = getattr(app_module, "ticker", None)
+        if not ticker:
+            return
+        tokens = get_capture_tokens()
+        if tokens:
+            ticker.subscribe_tokens(tokens)
+            # #region agent log
+            try:
+                import json as _json
+                import os as _os
+                import time as _time
+
+                _line = _json.dumps({
+                    "sessionId": "2338ea",
+                    "timestamp": int(_time.time() * 1000),
+                    "location": "ticker.py:refresh_capture_subscriptions",
+                    "message": "capture tokens subscribed",
+                    "data": {
+                        "token_count": len(tokens),
+                        "ws_connected": getattr(ticker, "_ws_connected", False),
+                    },
+                    "hypothesisId": "H2",
+                }) + "\n"
+                _base = _os.path.dirname(_os.path.abspath(__file__))
+                for _path in (
+                    _os.path.join(_base, "..", "debug-2338ea.log"),
+                    "/app/data/debug-2338ea.log",
+                ):
+                    try:
+                        with open(_path, "a", encoding="utf-8") as _f:
+                            _f.write(_line)
+                        break
+                    except OSError:
+                        continue
+            except Exception:
+                pass
+            # #endregion
+    except Exception as exc:
+        logging.warning("refresh_capture_subscriptions failed: %s", exc)
+
 
 class Ticker:
     def __init__(self, api_key, access_token, running_strategies, socketio, kite):
@@ -15,11 +64,51 @@ class Ticker:
         self.api_key = api_key
         self.access_token = access_token
         self.token_expired = False  # Flag to track if token has expired
+        self._subscribed_tokens: Set[int] = set()
+        self._pending_tokens: List[int] = []
+        self._ws_connected = False
         self.kws.on_ticks = self.on_ticks
         self.kws.on_connect = self.on_connect
         self.kws.on_close = self.on_close
         self.kws.on_error = self.on_error
         self.db_connection = get_db_connection() # Initialize DB connection here
+
+    def subscribe_tokens(self, tokens: List[int], mode: Optional[int] = None) -> None:
+        """Merge tokens into the subscription set; subscribe immediately if WS is connected."""
+        if mode is None:
+            mode = self.kws.MODE_FULL
+        new_tokens: List[int] = []
+        for raw in tokens:
+            token = int(raw)
+            if token not in self._subscribed_tokens and token not in self._pending_tokens:
+                new_tokens.append(token)
+        if not new_tokens:
+            return
+        if not self._ws_connected:
+            self._pending_tokens.extend(new_tokens)
+            return
+        try:
+            self.kws.subscribe(new_tokens)
+            self.kws.set_mode(mode, new_tokens)
+            for token in new_tokens:
+                self._subscribed_tokens.add(token)
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                for token in new_tokens:
+                    cursor.execute(
+                        "INSERT OR IGNORE INTO tick_data_status (instrument_token, status) VALUES (?, ?)",
+                        (token, "Running"),
+                    )
+                conn.commit()
+        except Exception as exc:
+            logging.warning("subscribe_tokens failed: %s", exc)
+
+    def _flush_pending_subscriptions(self, mode: Optional[int] = None) -> None:
+        if not self._pending_tokens or not self._ws_connected:
+            return
+        pending = list(self._pending_tokens)
+        self._pending_tokens.clear()
+        self.subscribe_tokens(pending, mode=mode)
 
     def _tick_has_timestamp(self, tick):
         return bool(
@@ -450,6 +539,11 @@ class Ticker:
                 try:
                     # Combine both formats in one emit for efficiency
                     if instrument_token == 256265: # NIFTY 50
+                        try:
+                            from option_chain_capture import update_index_spot
+                            update_index_spot("NIFTY", float(last_price))
+                        except Exception:
+                            pass
                         market_data = {
                             'nifty_price': str(last_price),
                             'instrument_token': instrument_token,
@@ -466,6 +560,11 @@ class Ticker:
                         if self._nifty_tick_count % 100 == 0:
                             logging.debug(f"Emitted NIFTY market_data: {last_price}")
                     elif instrument_token == 260105: # NIFTY BANK
+                        try:
+                            from option_chain_capture import update_index_spot
+                            update_index_spot("BANKNIFTY", float(last_price))
+                        except Exception:
+                            pass
                         market_data = {
                             'banknifty_price': str(last_price),
                             'instrument_token': instrument_token,
@@ -496,6 +595,7 @@ class Ticker:
 
     def on_connect(self, ws, response):
         logging.info("Kite Ticker connected")
+        self._ws_connected = True
         instrument_tokens = [256265, 260105] # NIFTY 50 and NIFTY BANK
 
         # Get NIFTY weekly options (with error handling)
@@ -524,22 +624,10 @@ class Ticker:
 
         for strategy_info in self.running_strategies.values():
             instrument_tokens.append(strategy_info['strategy'].instrument_token)
-        
-        # Remove duplicates
-        instrument_tokens = list(set(instrument_tokens))
 
-        ws.subscribe(instrument_tokens)
-        ws.set_mode(ws.MODE_FULL, instrument_tokens)
-
-        # Populate the tick_data_status table
-        try:
-            with get_db_connection() as conn:
-                cursor = conn.cursor()
-                for token in instrument_tokens:
-                    cursor.execute("INSERT OR IGNORE INTO tick_data_status (instrument_token, status) VALUES (?, ?)", (token, 'Running'))
-                conn.commit()
-        except Exception as e:
-            logging.error(f"Error populating tick_data_status table: {e}")
+        self.subscribe_tokens(list(set(instrument_tokens)))
+        refresh_capture_subscriptions()
+        self._flush_pending_subscriptions()
 
     def on_error(self, ws, code, reason):
         """Handle WebSocket errors, especially token expiration (403 Forbidden)."""
@@ -592,6 +680,7 @@ class Ticker:
 
     def on_close(self, ws, code, reason):
         """Handle WebSocket connection close."""
+        self._ws_connected = False
         error_str = str(reason) if reason else ''
         
         # Check for token expiration (403 Forbidden)

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { apiUrl } from '../config/api';
 
@@ -8,11 +8,57 @@ interface ZerodhaPosition {
   tradingsymbol?: string;
   quantity?: number;
   buy_price?: number;
+  sell_price?: number;
+  average_price?: number;
   last_price?: number;
   pnl?: number;
   product?: string;
   exchange?: string;
 }
+
+const entryPrice = (p: ZerodhaPosition): number | null => {
+  const qty = Number(p.quantity);
+  if (!Number.isFinite(qty) || qty === 0) return null;
+
+  const avg = Number(p.average_price);
+  if (Number.isFinite(avg) && avg > 0) return avg;
+
+  const price = qty > 0 ? Number(p.buy_price) : Number(p.sell_price);
+  return Number.isFinite(price) && price > 0 ? price : null;
+};
+
+const costBasis = (p: ZerodhaPosition): number | null => {
+  const qty = Math.abs(Number(p.quantity));
+  const entry = entryPrice(p);
+  if (!Number.isFinite(qty) || qty === 0 || entry == null) return null;
+  return qty * entry;
+};
+
+const pnlPercent = (p: ZerodhaPosition): number | null => {
+  const basis = costBasis(p);
+  const pnl = Number(p.pnl);
+  if (basis == null || basis === 0 || !Number.isFinite(pnl)) return null;
+  return (pnl / basis) * 100;
+};
+
+const isClosedLeg = (p: ZerodhaPosition): boolean =>
+  p.quantity != null && Number(p.quantity) === 0;
+
+const rowPnlPercent = (p: ZerodhaPosition): number | null => {
+  if (isClosedLeg(p)) return 0;
+  return pnlPercent(p);
+};
+
+const displayAvgPrice = (p: ZerodhaPosition): number | null => {
+  if (isClosedLeg(p)) {
+    const avg = Number(p.average_price);
+    return Number.isFinite(avg) && avg >= 0 ? avg : null;
+  }
+  const entry = entryPrice(p);
+  if (entry != null) return entry;
+  const buy = Number(p.buy_price);
+  return Number.isFinite(buy) && buy > 0 ? buy : null;
+};
 
 interface ZerodhaOrder {
   order_id?: string;
@@ -115,9 +161,38 @@ const PositionContent: React.FC = () => {
     return () => clearInterval(interval);
   }, [fetchAll]);
 
-  const openPositions = positions.filter(
-    (p) => p.quantity != null && Number(p.quantity) !== 0
-  );
+  const displayPositions = useMemo(() => {
+    return [...positions].sort((a, b) => {
+      const aOpen = !isClosedLeg(a);
+      const bOpen = !isClosedLeg(b);
+      if (aOpen && !bOpen) return -1;
+      if (!aOpen && bOpen) return 1;
+      return 0;
+    });
+  }, [positions]);
+
+  const positionTotals = useMemo(() => {
+    let totalPnl = 0;
+    let openPnl = 0;
+    let totalCostBasis = 0;
+    let hasPnl = false;
+
+    for (const p of displayPositions) {
+      const pnl = Number(p.pnl);
+      if (Number.isFinite(pnl)) {
+        totalPnl += pnl;
+        hasPnl = true;
+        if (!isClosedLeg(p)) openPnl += pnl;
+      }
+      const basis = costBasis(p);
+      if (basis != null) totalCostBasis += basis;
+    }
+
+    const totalPnlPercent =
+      totalCostBasis > 0 ? (openPnl / totalCostBasis) * 100 : null;
+
+    return { totalPnl: hasPnl ? totalPnl : null, totalPnlPercent };
+  }, [displayPositions]);
 
   const fmtPrice = (v: unknown) =>
     v != null && !Number.isNaN(Number(v)) ? Number(v).toFixed(2) : '–';
@@ -131,6 +206,12 @@ const PositionContent: React.FC = () => {
   const pnlClass = (v: unknown) => {
     if (v == null || Number.isNaN(Number(v))) return '';
     return Number(v) >= 0 ? 'text-success' : 'text-danger';
+  };
+
+  const fmtPct = (v: number | null | undefined) => {
+    if (v == null || Number.isNaN(Number(v))) return '–';
+    const n = Number(v);
+    return `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`;
   };
 
   return (
@@ -185,8 +266,8 @@ const PositionContent: React.FC = () => {
             onClick={() => setActiveTab('positions')}
           >
             Positions
-            {openPositions.length > 0 && (
-              <span className="badge bg-primary ms-2">{openPositions.length}</span>
+            {displayPositions.length > 0 && (
+              <span className="badge bg-primary ms-2">{displayPositions.length}</span>
             )}
           </button>
         </li>
@@ -229,12 +310,12 @@ const PositionContent: React.FC = () => {
               <div className="card-header bg-dark text-white">
                 <h6 className="mb-0">
                   <i className="bi bi-briefcase me-2" />
-                  Open Positions
+                  Positions
                 </h6>
               </div>
               <div className="card-body p-0">
-                {openPositions.length === 0 ? (
-                  <div className="p-4 text-muted">No open positions.</div>
+                {displayPositions.length === 0 ? (
+                  <div className="p-4 text-muted">No positions for today.</div>
                 ) : (
                   <div className="table-responsive">
                     <table className="table table-sm table-hover mb-0">
@@ -245,23 +326,44 @@ const PositionContent: React.FC = () => {
                           <th>Buy Price</th>
                           <th>LTP</th>
                           <th>P&amp;L</th>
+                          <th>P&amp;L %</th>
                           <th>Product</th>
                           <th>Exchange</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {openPositions.map((p, idx) => (
-                          <tr key={p.tradingsymbol || idx}>
+                        {displayPositions.map((p, idx) => {
+                          const closed = isClosedLeg(p);
+                          const pct = rowPnlPercent(p);
+                          return (
+                          <tr
+                            key={p.tradingsymbol || idx}
+                            className={closed ? 'table-secondary text-muted' : undefined}
+                          >
                             <td><code>{p.tradingsymbol}</code></td>
-                            <td>{p.quantity}</td>
-                            <td>{fmtPrice(p.buy_price)}</td>
+                            <td>{p.quantity ?? 0}</td>
+                            <td>{fmtPrice(displayAvgPrice(p))}</td>
                             <td>{fmtPrice(p.last_price)}</td>
                             <td className={pnlClass(p.pnl)}>{fmtPnl(p.pnl)}</td>
+                            <td className={closed ? '' : pnlClass(pct)}>{fmtPct(pct)}</td>
                             <td>{p.product ?? '–'}</td>
                             <td>{p.exchange ?? '–'}</td>
                           </tr>
-                        ))}
+                          );
+                        })}
                       </tbody>
+                      <tfoot className="table-light fw-semibold">
+                        <tr>
+                          <td colSpan={4}>Total</td>
+                          <td className={pnlClass(positionTotals.totalPnl)}>
+                            {fmtPnl(positionTotals.totalPnl)}
+                          </td>
+                          <td className={pnlClass(positionTotals.totalPnlPercent)}>
+                            {fmtPct(positionTotals.totalPnlPercent)}
+                          </td>
+                          <td colSpan={2} />
+                        </tr>
+                      </tfoot>
                     </table>
                   </div>
                 )}

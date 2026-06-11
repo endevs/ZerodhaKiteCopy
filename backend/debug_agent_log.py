@@ -1,10 +1,50 @@
-"""NDJSON debug logging for agent debug sessions (session c3dc96)."""
+"""NDJSON debug logging for agent debug sessions."""
 import json
 import os
 import time
 from typing import Any, Dict, Optional
 
-SESSION_ID = "c3dc96"
+SESSION_ID = os.environ.get("DEBUG_SESSION_ID", "c3dc96")
+
+
+def agent_log_session(
+    session_id: str,
+    location: str,
+    message: str,
+    data: Dict[str, Any],
+    hypothesis_id: str,
+    run_id: str = "pre-fix",
+) -> None:
+    """Write NDJSON to debug-{session_id}.log in workspace / app data."""
+    payload = {
+        "sessionId": session_id,
+        "timestamp": int(time.time() * 1000),
+        "location": location,
+        "message": message,
+        "data": data,
+        "runId": run_id,
+        "hypothesisId": hypothesis_id,
+    }
+    line = json.dumps(payload, default=str) + "\n"
+    base = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.environ.get("DEBUG_LOG_PATH"),
+        os.path.join(base, "..", f"debug-{session_id}.log"),
+        os.path.join(base, f"debug-{session_id}.log"),
+        f"/app/data/debug-{session_id}.log",
+    ]
+    for path in candidates:
+        if not path:
+            continue
+        try:
+            parent = os.path.dirname(os.path.abspath(path))
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(line)
+            return
+        except OSError:
+            continue
 
 
 def agent_log(

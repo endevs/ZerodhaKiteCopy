@@ -1817,6 +1817,42 @@ def _validate_kite_token(app_key: str, token: str) -> Tuple[Dict[str, Any], Dict
     return profile, margins
 
 
+def _debug_session_log(
+    location: str,
+    message: str,
+    data: Dict[str, Any],
+    hypothesis_id: str,
+    run_id: str = "pre-fix",
+) -> None:
+    # #region agent log
+    import json as _json
+    import os as _os
+    import time as _time
+
+    payload = {
+        "sessionId": "2338ea",
+        "timestamp": int(_time.time() * 1000),
+        "location": location,
+        "message": message,
+        "data": data,
+        "runId": run_id,
+        "hypothesisId": hypothesis_id,
+    }
+    line = _json.dumps(payload, default=str) + "\n"
+    base = _os.path.dirname(_os.path.abspath(__file__))
+    for path in (
+        _os.path.join(base, "..", "debug-2338ea.log"),
+        "/app/data/debug-2338ea.log",
+    ):
+        try:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(line)
+            return
+        except OSError:
+            continue
+    # #endregion
+
+
 def _store_user_name(user_id: int, user_name: Optional[str], source: str) -> None:
     if not user_name or user_name == "Guest":
         return
@@ -2320,6 +2356,7 @@ def _sanitize_positions(raw_positions: Dict[str, Any]) -> List[Dict[str, Any]]:
             'gross_quantity': pos.get('quantity'),
             'buy_price': pos.get('buy_price'),
             'sell_price': pos.get('sell_price'),
+            'average_price': pos.get('average_price'),
             'last_price': pos.get('last_price'),
             'pnl': pos.get('pnl'),
             'm2m': pos.get('m2m'),
@@ -6216,6 +6253,23 @@ def api_user_data():
                     return jsonify(default_response)
                 except kite_exceptions.TokenException as exc:
                     logging.warning("Zerodha token invalid for user %s: %s", user_id, exc)
+                    # #region agent log
+                    try:
+                        from debug_agent_log import agent_log
+                        agent_log(
+                            "app.py:api_user_data:token_exception",
+                            "Token validation failed",
+                            {
+                                "user_id": user_id,
+                                "error_msg": str(exc)[:200],
+                                "session_token_present": bool(session_token),
+                                "stored_token_present": bool(stored_token),
+                            },
+                            "B",
+                        )
+                    except Exception:
+                        pass
+                    # #endregion
                     if token == session_token:
                         session.pop('access_token', None)
                         session_token = None
@@ -8686,108 +8740,169 @@ def connect(auth=None):
     try:
         access_token_valid = False
         if user_id_from_session and access_token_from_session:
+            conn = get_db_connection()
             try:
-                kite.set_access_token(access_token_from_session)
-                kite.profile()  # Validate the token
-                access_token_valid = True
-            except Exception as e:
-                error_msg = str(e)
-                if "Invalid `api_key` or `access_token`" in error_msg or "Incorrect `api_key` or `access_token`" in error_msg:
+                user = conn.execute(
+                    'SELECT * FROM users WHERE id = ?', (user_id_from_session,)
+                ).fetchone()
+                if user is None:
                     try:
-                        session.pop('access_token', None)
-                    except:
-                        pass  # Silently handle session errors
-                    # Delay logging to avoid write() before start_response
-                    try:
-                        logging.warning("SocketIO: Invalid access token - accepting connection but not starting ticker")
-                    except:
+                        logging.error(
+                            "SocketIO connect error: User with ID %s not found in DB.",
+                            user_id_from_session,
+                        )
+                    except Exception:
                         pass
-                    # Accept connection but emit warning - don't start ticker
                     try:
-                        emit('warning', {'message': 'Zerodha session expired. Please reconnect to Zerodha.'})
-                    except:
-                        pass  # If emit fails, connection is already established
+                        emit('error', {'message': 'User not found'})
+                    except Exception:
+                        pass
+                elif not user['app_key']:
+                    try:
+                        logging.warning(
+                            "SocketIO connect warning: User %s has no app_key.",
+                            user['id'],
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        emit('warning', {'message': 'Zerodha credentials not configured'})
+                    except Exception:
+                        pass
                 else:
-                    # Delay logging to avoid write() before start_response
                     try:
-                        logging.error(f"SocketIO: Error validating token: {e}")
-                    except:
-                        pass
-                    # Accept connection but emit error
-                    try:
-                        emit('error', {'message': 'Error validating Zerodha session'})
-                    except:
-                        pass
-
-            if access_token_valid:
-                conn = get_db_connection()
-                try:
-                    # Use cached user_id to avoid accessing session during handshake
-                    user_id = user_id_from_session
-                    if not user_id:
-                        conn.close()
-                        return True  # Accept connection but don't proceed
-                    user = conn.execute('SELECT * FROM users WHERE id = ?', (user_id,)).fetchone()
-                    if user is None:
-                        try:
-                            logging.error(f"SocketIO connect error: User with ID {user_id} not found in DB.")
-                        except:
-                            pass
-                        try:
-                            emit('error', {'message': 'User not found'})
-                        except:
-                            pass
-                    elif user['app_key'] is None or not access_token_present:
-                        try:
-                            logging.warning(f"SocketIO connect warning: User {user['id']} has no app_key or access_token.")
-                        except:
-                            pass
-                        try:
-                            emit('warning', {'message': 'Zerodha credentials not configured'})
-                        except:
-                            pass
-                    else:
-                        # Start ticker if not already started
-                        if ticker is None:
+                        kite_client = KiteConnect(api_key=user['app_key'])
+                        kite_client.set_access_token(access_token_from_session)
+                        kite_client.profile()
+                        access_token_valid = True
+                        global kite
+                        kite = kite_client
+                        _debug_session_log(
+                            "app.py:connect",
+                            "token validated with user app_key",
+                            {
+                                "user_id": user_id_from_session,
+                                "app_key_prefix": str(user['app_key'])[:4],
+                            },
+                            "H1",
+                        )
+                    except Exception as e:
+                        error_msg = str(e)
+                        _debug_session_log(
+                            "app.py:connect",
+                            "token validation failed",
+                            {
+                                "user_id": user_id_from_session,
+                                "app_key_prefix": str(user['app_key'])[:4],
+                                "error": error_msg[:200],
+                            },
+                            "H1",
+                        )
+                        if (
+                            "Invalid `api_key` or `access_token`" in error_msg
+                            or "Incorrect `api_key` or `access_token`" in error_msg
+                        ):
                             try:
-                                # Use cached access_token to avoid session access during handshake
-                                if access_token_from_session:
-                                    ticker = Ticker(user['app_key'], access_token_from_session, running_strategies, socketio, kite)
-                                    ticker.start()
+                                session.pop('access_token', None)
+                            except Exception:
+                                pass
+                            try:
+                                logging.warning(
+                                    "SocketIO: Invalid access token - accepting connection but not starting ticker"
+                                )
+                            except Exception:
+                                pass
+                            try:
+                                emit('warning', {'message': 'Zerodha session expired. Please reconnect to Zerodha.'})
+                            except Exception:
+                                pass
+                        else:
+                            try:
+                                logging.error(f"SocketIO: Error validating token: {e}")
+                            except Exception:
+                                pass
+                            try:
+                                emit('error', {'message': 'Error validating Zerodha session'})
+                            except Exception:
+                                pass
+
+                    if access_token_valid and ticker is None:
+                        try:
+                            ticker = Ticker(
+                                user['app_key'],
+                                access_token_from_session,
+                                running_strategies,
+                                socketio,
+                                kite,
+                            )
+                            ticker.start()
+                            try:
+                                logging.info("SocketIO: Ticker started successfully")
+                            except Exception:
+                                pass
+                            # #region agent log
+                            try:
+                                from debug_agent_log import agent_log_session
+                                agent_log_session(
+                                    "2338ea",
+                                    "app.py:connect",
+                                    "ticker started on socket connect",
+                                    {"user_id": user_id_from_session},
+                                    "H1",
+                                )
+                            except Exception:
+                                pass
+                            # #endregion
+                        except Exception as e:
+                            error_str = str(e).lower()
+                            if (
+                                ('token' in error_str and 'expired' in error_str)
+                                or '403' in error_str
+                                or 'forbidden' in error_str
+                            ):
                                 try:
-                                    logging.info("SocketIO: Ticker started successfully")
-                                except:
+                                    logging.warning(f"SocketIO: Cannot start ticker - token expired: {e}")
+                                except Exception:
                                     pass
-                            except Exception as e:
-                                error_str = str(e).lower()
-                                # Check if it's a token expiration error
-                                if ('token' in error_str and 'expired' in error_str) or '403' in error_str or 'forbidden' in error_str:
-                                    try:
-                                        logging.warning(f"SocketIO: Cannot start ticker - token expired: {e}")
-                                    except:
-                                        pass
-                                    ticker = None
-                                    try:
-                                        emit('ticker_error', {
-                                            'message': 'Zerodha session expired. Please log in again.',
-                                            'code': 403,
-                                            'reason': 'Token expired - re-authentication required'
-                                        })
-                                    except:
-                                        pass
-                                else:
-                                    try:
-                                        logging.error(f"SocketIO: Error starting ticker: {e}", exc_info=True)
-                                    except:
-                                        pass  # Don't let logging errors break connection
-                                    ticker = None
-                                    try:
-                                        emit('error', {'message': 'Failed to start market data feed'})
-                                    except:
-                                        pass
-                finally:
-                    conn.close()
+                                ticker = None
+                                try:
+                                    emit('ticker_error', {
+                                        'message': 'Zerodha session expired. Please log in again.',
+                                        'code': 403,
+                                        'reason': 'Token expired - re-authentication required',
+                                    })
+                                except Exception:
+                                    pass
+                            else:
+                                try:
+                                    logging.error(f"SocketIO: Error starting ticker: {e}", exc_info=True)
+                                except Exception:
+                                    pass
+                                ticker = None
+                                try:
+                                    emit('error', {'message': 'Failed to start market data feed'})
+                                except Exception:
+                                    pass
+            finally:
+                conn.close()
         else:
+            # #region agent log
+            try:
+                from debug_agent_log import agent_log_session
+                agent_log_session(
+                    "2338ea",
+                    "app.py:connect",
+                    "socket connect without ticker",
+                    {
+                        "user_id_present": bool(user_id_from_session),
+                        "access_token_present": bool(access_token_from_session),
+                        "ticker_running": ticker is not None,
+                    },
+                    "H2",
+                )
+            except Exception:
+                pass
+            # #endregion
             try:
                 logging.info("SocketIO: Connected without authentication (no user_id or access_token in session)")
             except:
@@ -9072,7 +9187,7 @@ def start_tick_collection():
 @app.route("/api/ticker/start", methods=['POST'])
 def api_start_ticker():
     """HTTP endpoint to start the ticker after login"""
-    global ticker
+    global ticker, kite
     if 'user_id' not in session:
         return jsonify({'status': 'error', 'message': 'User not logged in'}), 401
     
@@ -9084,14 +9199,6 @@ def api_start_ticker():
         if ticker is not None:
             return jsonify({'status': 'success', 'message': 'Ticker is already running'})
         
-        # Validate access token
-        try:
-            kite.set_access_token(session['access_token'])
-            kite.profile()  # Validate the token
-        except Exception as e:
-            return jsonify({'status': 'error', 'message': f'Invalid access token: {str(e)}'}), 401
-        
-        # Get user data
         conn = get_db_connection()
         try:
             user = conn.execute('SELECT * FROM users WHERE id = ?', (session['user_id'],)).fetchone()
@@ -9100,11 +9207,43 @@ def api_start_ticker():
             
             if not user['app_key']:
                 return jsonify({'status': 'error', 'message': 'Zerodha API credentials are not configured. Please add your API Key and Secret from the Welcome page to enable this feature.'}), 400
+
+            _debug_session_log(
+                "app.py:api_start_ticker",
+                "validating ticker start",
+                {
+                    "user_id": session['user_id'],
+                    "app_key_prefix": str(user['app_key'])[:4],
+                    "global_kite_key_prefix": str(getattr(kite, "api_key", ""))[:12],
+                },
+                "H1",
+            )
+
+            try:
+                kite_client = KiteConnect(api_key=user['app_key'])
+                kite_client.set_access_token(session['access_token'])
+                kite_client.profile()
+                kite = kite_client
+            except Exception as e:
+                _debug_session_log(
+                    "app.py:api_start_ticker",
+                    "token validation failed",
+                    {"error": str(e)[:200]},
+                    "H1",
+                )
+                return jsonify({'status': 'error', 'message': f'Invalid access token: {str(e)}'}), 401
             
             # Start ticker
             try:
                 ticker = Ticker(user['app_key'], session['access_token'], running_strategies, socketio, kite)
                 ticker.start()
+                _debug_session_log(
+                    "app.py:api_start_ticker",
+                    "ticker started",
+                    {"user_id": session['user_id']},
+                    "H1",
+                    run_id="post-fix",
+                )
                 logging.info("Ticker started via /api/ticker/start endpoint")
                 return jsonify({'status': 'success', 'message': 'Market data feed started successfully'})
             except Exception as ticker_error:
@@ -9189,6 +9328,19 @@ def api_market_snapshot():
             'nifty': float(nifty) if nifty is not None else None,
             'banknifty': float(banknifty) if banknifty is not None else None
         }
+        # #region agent log
+        try:
+            from debug_agent_log import agent_log_session
+            agent_log_session(
+                "2338ea",
+                "app.py:api_market_snapshot",
+                "market_snapshot success",
+                {"nifty": data.get("nifty"), "banknifty": data.get("banknifty")},
+                "H1",
+            )
+        except Exception:
+            pass
+        # #endregion
         return jsonify(data)
     except Exception as e:
         logging.error(f"Error fetching market snapshot: {e}", exc_info=True)
@@ -9427,6 +9579,40 @@ def on_join_paper_trade(data):
         from flask_socketio import join_room
         join_room(room_name)
         emit('info', {'message': f'Joined paper trade room for strategy {strategy_id}'})
+
+
+@socketio.on('join_options_chain')
+def on_join_options_chain(data=None):
+    """Join room for live option chain quote patches."""
+    if 'user_id' not in session:
+        emit('error', {'message': 'Not authenticated'})
+        return
+    from flask_socketio import join_room
+    room_name = f"options_chain_{session['user_id']}"
+    join_room(room_name)
+    # #region agent log
+    try:
+        from debug_agent_log import agent_log_session
+        agent_log_session(
+            "2338ea",
+            "app.py:on_join_options_chain",
+            "client joined options chain room",
+            {"user_id": session["user_id"], "room": room_name},
+            "H3",
+        )
+    except Exception:
+        pass
+    # #endregion
+    emit('info', {'message': 'Joined options chain live updates'})
+
+
+@socketio.on('leave_options_chain')
+def on_leave_options_chain(data=None):
+    """Leave option chain live quote room."""
+    if 'user_id' not in session:
+        return
+    from flask_socketio import leave_room
+    leave_room(f"options_chain_{session['user_id']}")
 
 @app.route("/api/paper_trade/sessions", methods=['GET'])
 def api_paper_trade_sessions():

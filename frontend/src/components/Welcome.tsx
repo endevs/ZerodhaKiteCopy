@@ -765,7 +765,7 @@ const Welcome: React.FC = () => {
               <div>
                 <strong>Real-time</strong>
                 <small>Market feeds via Zerodha Kite Connect.</small>
-              </div>
+                </div>
               <div>
                 <strong>Single</strong>
                 <small>Token unlocks trading, backtests, and monitoring.</small>

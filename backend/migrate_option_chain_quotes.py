@@ -64,6 +64,14 @@ def ensure_option_chain_quote_schema() -> None:
             ON option_quote_latest(index_name, trading_date, expiry_date)
         """)
 
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(option_quote_latest)")
+        oql_cols = {row[1] for row in cur.fetchall()}
+        if "prev_close" not in oql_cols:
+            cur.execute("ALTER TABLE option_quote_latest ADD COLUMN prev_close REAL")
+        if "iv_prev_close" not in oql_cols:
+            cur.execute("ALTER TABLE option_quote_latest ADD COLUMN iv_prev_close REAL")
+
         conn.execute("""
             CREATE TABLE IF NOT EXISTS option_quote_ticks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,

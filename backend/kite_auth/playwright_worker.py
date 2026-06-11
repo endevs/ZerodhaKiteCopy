@@ -490,16 +490,44 @@ def authenticate_and_get_request_token(
             "redirect_path": urlparse(creds.redirect_uri).path,
             "timeout_ms": timeout_ms,
             "headed": headed,
+            "display": os.getenv("DISPLAY", ""),
+            "in_docker": os.getenv("PLAYWRIGHT_IN_DOCKER", ""),
+            "headed_env": os.getenv("KITE_AUTOMATION_HEADED", ""),
+            "headless_forced": os.getenv("KITE_AUTOMATION_HEADLESS", ""),
         },
-        "H5",
+        "A",
     )
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=not headed,
-            args=_chromium_launch_args(),
-            ignore_default_args=["--enable-automation"],
+        try:
+            browser = p.chromium.launch(
+                headless=not headed,
+                args=_chromium_launch_args(),
+                ignore_default_args=["--enable-automation"],
+            )
+        except Exception as launch_exc:
+            # #region agent log
+            agent_log(
+                "playwright_worker.py:authenticate:launch_failed",
+                "Chromium launch failed",
+                {
+                    "headed": headed,
+                    "display": os.getenv("DISPLAY", ""),
+                    "error_type": type(launch_exc).__name__,
+                    "error_msg": str(launch_exc)[:300],
+                },
+                "A,C",
+            )
+            # #endregion
+            raise
+        # #region agent log
+        agent_log(
+            "playwright_worker.py:authenticate:launch_ok",
+            "Chromium launched",
+            {"headed": headed, "display": os.getenv("DISPLAY", "")},
+            "A",
         )
+        # #endregion
         context = browser.new_context(
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "

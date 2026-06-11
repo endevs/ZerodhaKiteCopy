@@ -864,8 +864,10 @@ def get_chain_board():
             kite = get_market_data_kite()
         except ValueError:
             pass
+        live_poll_arg = request.args.get('live_poll', '1')
+        live_poll = live_poll_arg not in ('0', 'false', 'False')
         from option_chain_board import build_chain_board
-        board = build_chain_board(kite, index, trading_date, expiry_date, live_poll=True)
+        board = build_chain_board(kite, index, trading_date, expiry_date, live_poll=live_poll)
         return jsonify(board)
     except kite_exceptions.TokenException:
         return jsonify({

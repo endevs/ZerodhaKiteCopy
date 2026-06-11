@@ -1,5 +1,5 @@
 """
-Live capture of ATM±15 option quotes (ticks + latest row) for chain board and spikes.
+Live capture of ATM±15 option quotes (ticks + latest row) for chain board.
 """
 from __future__ import annotations
 
@@ -7,18 +7,39 @@ import datetime
 import json
 import logging
 import threading
+import time
 from typing import Any, Dict, List, Optional, Set
 
 from database import get_db_connection
+from option_chain_metrics import (
+    compute_day_changes,
+    resolve_index_prev_close,
+    resolve_iv_prev_close,
+    resolve_prev_close,
+)
 from option_iv import implied_volatility
-from option_spike_detector import evaluate_spike, persist_spike_events
-
 logger = logging.getLogger(__name__)
 
 STRIKE_BAND = 15
 _capture_tokens: Set[int] = set()
 _capture_lock = threading.Lock()
 _capture_meta: Dict[int, Dict[str, Any]] = {}
+_emit_last: Dict[int, float] = {}
+_EMIT_MIN_INTERVAL_SEC = 0.15
+
+
+def get_capture_tokens() -> List[int]:
+    with _capture_lock:
+        return list(_capture_tokens)
+
+
+def update_index_spot(index_name: str, spot: float) -> None:
+    """Cache index spot on capture contracts so IV stays accurate on tick path."""
+    idx = index_name.upper()
+    with _capture_lock:
+        for meta in _capture_meta.values():
+            if meta.get("index_name", "").upper() == idx:
+                meta["_spot"] = float(spot)
 
 
 def register_capture_tokens(contracts: List[Dict[str, Any]]) -> None:
@@ -31,6 +52,11 @@ def register_capture_tokens(contracts: List[Dict[str, Any]]) -> None:
             if c.get("instrument_token")
         }
     logger.info("Option capture registered %s tokens", len(_capture_tokens))
+    try:
+        from ticker import refresh_capture_subscriptions
+        refresh_capture_subscriptions()
+    except Exception as exc:
+        logger.debug("refresh_capture_subscriptions after register: %s", exc)
 
 
 def is_capture_token(instrument_token: int) -> bool:
@@ -80,7 +106,8 @@ def resolve_atm_band_contracts(
 def _prev_latest(conn, instrument_token: int, trading_date: str) -> Optional[Dict[str, Any]]:
     row = conn.execute(
         """
-        SELECT ltp, iv, oi FROM option_quote_latest
+        SELECT ltp, iv, oi, prev_close, iv_prev_close
+        FROM option_quote_latest
         WHERE instrument_token = ? AND trading_date = ?
         """,
         (instrument_token, trading_date),
@@ -88,11 +115,23 @@ def _prev_latest(conn, instrument_token: int, trading_date: str) -> Optional[Dic
     return dict(row) if row else None
 
 
+def _cache_baselines_in_meta(token: int, prev_close: Optional[float], iv_prev_close: Optional[float]) -> None:
+    with _capture_lock:
+        meta = _capture_meta.get(token)
+        if not meta:
+            return
+        if prev_close is not None:
+            meta["prev_close"] = prev_close
+        if iv_prev_close is not None:
+            meta["iv_prev_close"] = iv_prev_close
+
+
 def ingest_quote_row(
     contract: Dict[str, Any],
     quote: Dict[str, Any],
     spot: float,
     ts: Optional[str] = None,
+    index_prev_close: Optional[float] = None,
 ) -> None:
     """Persist one quote update (from Kite quote API or ticker tick)."""
     token = int(contract["instrument_token"])
@@ -123,14 +162,33 @@ def ingest_quote_row(
         contract["instrument_type"],
     )
 
+    with _capture_lock:
+        meta_snapshot = dict(_capture_meta.get(token) or {})
+
     conn = get_db_connection()
     try:
-        prev = _prev_latest(conn, token, trading_date)
-        ltp_chg = (ltp - prev["ltp"]) if prev and prev.get("ltp") else 0.0
-        ltp_chg_pct = (ltp_chg / prev["ltp"] * 100.0) if prev and prev.get("ltp") else 0.0
-        iv_chg = (iv - prev["iv"]) if iv is not None and prev and prev.get("iv") is not None else 0.0
-        iv_chg_pct = (iv_chg / prev["iv"] * 100.0) if prev and prev.get("iv") and iv is not None else 0.0
-        oi_chg = oi - int(prev["oi"] or 0) if prev else 0
+        existing = _prev_latest(conn, token, trading_date)
+        prev_close = resolve_prev_close(quote, existing, meta_snapshot)
+        if index_prev_close is None:
+            index_prev_close = meta_snapshot.get("_index_prev_close")
+        iv_prev_close = resolve_iv_prev_close(
+            prev_close,
+            float(index_prev_close) if index_prev_close else None,
+            float(contract["strike"]),
+            expiry_date,
+            contract.get("instrument_type", ""),
+            trading_date,
+            existing,
+            meta_snapshot,
+        )
+        _cache_baselines_in_meta(token, prev_close, iv_prev_close)
+
+        changes = compute_day_changes(ltp, iv, prev_close, iv_prev_close)
+        ltp_chg = changes["ltp_chg"]
+        ltp_chg_pct = changes["ltp_chg_pct"]
+        iv_chg = changes["iv_chg"]
+        iv_chg_pct = changes["iv_chg_pct"]
+        oi_chg = oi - int(existing["oi"] or 0) if existing else 0
 
         conn.execute(
             """
@@ -156,11 +214,30 @@ def ingest_quote_row(
         )
         conn.execute(
             """
-            INSERT OR REPLACE INTO option_quote_latest (
+            INSERT INTO option_quote_latest (
                 instrument_token, tradingsymbol, index_name, trading_date, expiry_date,
                 strike, instrument_type, ltp, ltp_chg, ltp_chg_pct, iv, iv_chg, iv_chg_pct,
-                oi, oi_lakh, oi_chg, volume, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                oi, oi_lakh, oi_chg, volume, updated_at, prev_close, iv_prev_close
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(instrument_token, trading_date) DO UPDATE SET
+                tradingsymbol=excluded.tradingsymbol,
+                index_name=excluded.index_name,
+                expiry_date=excluded.expiry_date,
+                strike=excluded.strike,
+                instrument_type=excluded.instrument_type,
+                ltp=excluded.ltp,
+                ltp_chg=excluded.ltp_chg,
+                ltp_chg_pct=excluded.ltp_chg_pct,
+                iv=excluded.iv,
+                iv_chg=excluded.iv_chg,
+                iv_chg_pct=excluded.iv_chg_pct,
+                oi=excluded.oi,
+                oi_lakh=excluded.oi_lakh,
+                oi_chg=excluded.oi_chg,
+                volume=excluded.volume,
+                updated_at=excluded.updated_at,
+                prev_close=COALESCE(option_quote_latest.prev_close, excluded.prev_close),
+                iv_prev_close=COALESCE(option_quote_latest.iv_prev_close, excluded.iv_prev_close)
             """,
             (
                 token,
@@ -172,42 +249,76 @@ def ingest_quote_row(
                 contract.get("instrument_type"),
                 ltp,
                 ltp_chg,
-                round(ltp_chg_pct, 2),
+                ltp_chg_pct,
                 iv,
-                round(iv_chg, 2) if iv is not None else None,
-                round(iv_chg_pct, 2) if iv is not None else None,
+                iv_chg,
+                iv_chg_pct,
                 oi,
                 round(oi / 100000.0, 2),
                 oi_chg,
                 volume,
                 ts,
+                prev_close,
+                iv_prev_close,
             ),
         )
         conn.commit()
     finally:
         conn.close()
 
-    events = evaluate_spike(
-        instrument_token=token,
-        tradingsymbol=contract.get("tradingsymbol", ""),
-        index_name=contract["index_name"],
-        trading_date=trading_date,
-        expiry_date=expiry_date,
-        strike=float(contract.get("strike") or 0),
-        instrument_type=contract.get("instrument_type", ""),
-        ts=ts,
+    oi_lakh = round(oi / 100000.0, 2)
+    _emit_quote_update(
+        contract,
         ltp=ltp,
+        ltp_chg=ltp_chg,
+        ltp_chg_pct=ltp_chg_pct,
         iv=iv,
+        iv_chg=iv_chg,
+        oi_lakh=oi_lakh,
+        ts=ts,
     )
-    if events:
-        persist_spike_events(events)
-        try:
-            import app as app_module
-            if getattr(app_module, "socketio", None):
-                for ev in events:
-                    app_module.socketio.emit("option_spike", ev, namespace="/")
-        except Exception:
-            pass
+
+
+def _emit_quote_update(
+    contract: Dict[str, Any],
+    *,
+    ltp: float,
+    ltp_chg: Optional[float],
+    ltp_chg_pct: Optional[float],
+    iv: Optional[float],
+    iv_chg: Optional[float],
+    oi_lakh: float,
+    ts: str,
+) -> None:
+    token = int(contract["instrument_token"])
+    now = time.monotonic()
+    last = _emit_last.get(token, 0.0)
+    if now - last < _EMIT_MIN_INTERVAL_SEC:
+        return
+    _emit_last[token] = now
+
+    payload = {
+        "instrument_token": token,
+        "tradingsymbol": contract.get("tradingsymbol"),
+        "strike": float(contract.get("strike") or 0),
+        "instrument_type": contract.get("instrument_type"),
+        "index_name": contract.get("index_name"),
+        "ltp": ltp,
+        "ltp_chg": round(ltp_chg, 2) if ltp_chg is not None else None,
+        "ltp_chg_pct": round(ltp_chg_pct, 2) if ltp_chg_pct is not None else None,
+        "iv": iv,
+        "iv_chg": round(iv_chg, 2) if iv_chg is not None else None,
+        "oi_lakh": oi_lakh,
+        "updated_at": ts,
+    }
+    try:
+        import app as app_module
+
+        socketio = getattr(app_module, "socketio", None)
+        if socketio:
+            socketio.emit("option_quote_update", payload, namespace="/")
+    except Exception:
+        pass
 
 
 def ingest_ticker_tick(tick: Dict[str, Any]) -> None:
@@ -232,12 +343,18 @@ def ingest_ticker_tick(tick: Dict[str, Any]) -> None:
     )
 
 
-def poll_quotes_from_kite(kite, contracts: List[Dict[str, Any]], spot: float) -> None:
+def poll_quotes_from_kite(kite, contracts: List[Dict[str, Any]], spot: float) -> int:
     """Fetch quotes for board display without changing capture token registration."""
     if not contracts:
-        return
+        return 0
+    ingested = 0
+    index_name = (contracts[0].get("index_name") or "NIFTY").upper()
+    trading_date = contracts[0].get("trading_date") or datetime.date.today().strftime("%Y-%m-%d")
+    index_prev_close = resolve_index_prev_close(kite, index_name, trading_date)
     for c in contracts:
         c["_spot"] = spot
+        if index_prev_close is not None:
+            c["_index_prev_close"] = index_prev_close
 
     symbols = [f"NFO:{c['tradingsymbol']}" for c in contracts if c.get("tradingsymbol")]
     batch = 400
@@ -252,7 +369,9 @@ def poll_quotes_from_kite(kite, contracts: List[Dict[str, Any]], spot: float) ->
         for sym, q in quotes.items():
             c = sym_to_contract.get(sym)
             if c:
-                ingest_quote_row(c, q, spot)
+                ingest_quote_row(c, q, spot, index_prev_close=index_prev_close)
+                ingested += 1
+    return ingested
 
 
 def capture_quotes_from_kite(kite, contracts: List[Dict[str, Any]], spot: float) -> None:
