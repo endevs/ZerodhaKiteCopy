@@ -28,6 +28,12 @@ export function writeStoredThreshold(key: string, value: number): void {
   }
 }
 
+export function resetSpikeThresholds(): { price: number; iv: number } {
+  writeStoredThreshold(PRICE_SPIKE_STORAGE_KEY, DEFAULT_PRICE_SPIKE_PCT);
+  writeStoredThreshold(IV_SPIKE_STORAGE_KEY, DEFAULT_IV_SPIKE_PCT);
+  return { price: DEFAULT_PRICE_SPIKE_PCT, iv: DEFAULT_IV_SPIKE_PCT };
+}
+
 /** Day-change LTP % vs yesterday close; both + and − count. */
 export function isLtpSpike(
   ltpChgPct: number | null | undefined,

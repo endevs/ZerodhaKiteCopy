@@ -13,12 +13,14 @@ import {
 } from '../lib/optionStrategies';
 import { buildPayoffGroups, IndexUnderlying } from '../lib/payoffDiagram';
 import { applyQuotePatch, mergeChainBoard, mergeSpotUpdate, QuotePatch } from '../lib/optionChainLive';
+import { positionsByTradingsymbol } from '../lib/optionChainPositions';
 import {
   DEFAULT_IV_SPIKE_PCT,
   DEFAULT_PRICE_SPIKE_PCT,
   IV_SPIKE_STORAGE_KEY,
   PRICE_SPIKE_STORAGE_KEY,
   readStoredThreshold,
+  resetSpikeThresholds,
   writeStoredThreshold,
 } from '../lib/optionChainSpike';
 import { useSocket } from '../hooks/useSocket';
@@ -133,6 +135,8 @@ const OptionsContent: React.FC = () => {
   const [ivSpikeThreshold, setIvSpikeThreshold] = useState(() =>
     readStoredThreshold(IV_SPIKE_STORAGE_KEY, DEFAULT_IV_SPIKE_PCT),
   );
+  const [showPositionPayoff, setShowPositionPayoff] = useState(false);
+  const [positionPayoffEmptyMsg, setPositionPayoffEmptyMsg] = useState<string | null>(null);
   const [boardMessage, setBoardMessage] = useState<string | null>(null);
   const [chainUpdatedAt, setChainUpdatedAt] = useState<string | null>(null);
   const [initDone, setInitDone] = useState(false);
@@ -347,6 +351,12 @@ const OptionsContent: React.FC = () => {
     if (!Number.isFinite(n) || n <= 0) return;
     setIvSpikeThreshold(n);
     writeStoredThreshold(IV_SPIKE_STORAGE_KEY, n);
+  }, []);
+
+  const handleResetSpikeThresholds = useCallback(() => {
+    const { price, iv } = resetSpikeThresholds();
+    setPriceSpikeThreshold(price);
+    setIvSpikeThreshold(iv);
   }, []);
 
   const loadChainBoard = useCallback(async (opts?: { silent?: boolean; livePoll?: boolean }) => {
@@ -793,20 +803,23 @@ const OptionsContent: React.FC = () => {
   }, [activeMainTab, loadDbStatus]);
 
   useEffect(() => {
-    if (activeMainTab !== 'payoff') return;
+    if (activeMainTab !== 'payoff' && activeMainTab !== 'analysis') return;
 
     fetchPositions();
     fetchMarketSnapshot();
+    const pollMs = activeMainTab === 'payoff' ? 5000 : 30000;
     const interval = setInterval(() => {
       fetchPositions(true);
       fetchMarketSnapshot();
-    }, 5000);
+    }, pollMs);
     return () => clearInterval(interval);
   }, [activeMainTab, fetchPositions, fetchMarketSnapshot]);
 
   useEffect(() => {
     setStrategyLegs([]);
     setAppliedPresetContext(null);
+    setShowPositionPayoff(false);
+    setPositionPayoffEmptyMsg(null);
   }, [selectedIndex, selectedExpiry, selectedDate]);
 
   const handleAddStrategyLeg = useCallback(
@@ -827,6 +840,49 @@ const OptionsContent: React.FC = () => {
     () => positions.filter((p) => p.quantity != null && Number(p.quantity) !== 0),
     [positions]
   );
+
+  const positionBySymbol = useMemo(() => {
+    if (selectedIndex !== 'NIFTY' && selectedIndex !== 'BANKNIFTY') {
+      return undefined;
+    }
+    return positionsByTradingsymbol(openPositions, selectedIndex);
+  }, [openPositions, selectedIndex]);
+
+  const positionPayoffLegs = useMemo(() => {
+    if (selectedIndex !== 'NIFTY' && selectedIndex !== 'BANKNIFTY') return [];
+    const groups = buildPayoffGroups(openPositions);
+    return groups.find((g) => g.underlying === selectedIndex)?.legs ?? [];
+  }, [openPositions, selectedIndex]);
+
+  const canShowPositionPayoff =
+    positionPayoffLegs.length > 0 &&
+    !positionsNeedsCredentials &&
+    !positionsAuthExpired;
+
+  const handlePositionPayoffClick = useCallback(() => {
+    if (positionsNeedsCredentials) {
+      setPositionPayoffEmptyMsg('Add your Zerodha API credentials to view position payoff.');
+      setShowPositionPayoff(false);
+      return;
+    }
+    if (positionsAuthExpired) {
+      setPositionPayoffEmptyMsg('Zerodha session expired. Please reconnect from the Welcome page.');
+      setShowPositionPayoff(false);
+      return;
+    }
+    if (positionPayoffLegs.length === 0) {
+      setPositionPayoffEmptyMsg(`No open ${selectedIndex} F&O positions to chart.`);
+      setShowPositionPayoff(false);
+      return;
+    }
+    setPositionPayoffEmptyMsg(null);
+    setShowPositionPayoff((v) => !v);
+  }, [
+    positionPayoffLegs.length,
+    positionsAuthExpired,
+    positionsNeedsCredentials,
+    selectedIndex,
+  ]);
 
   const spotPrices = useMemo(
     () => ({
@@ -1050,6 +1106,15 @@ const OptionsContent: React.FC = () => {
                   <button
                     type="button"
                     className="btn btn-outline-secondary btn-sm"
+                    title="Reset spike thresholds to defaults (LTP 120%, IV 10%)"
+                    onClick={handleResetSpikeThresholds}
+                    aria-label="Reset spike thresholds"
+                  >
+                    <i className="bi bi-arrow-counterclockwise" />
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-outline-secondary btn-sm"
                     onClick={() => chainTableRef.current?.scrollToAtm()}
                   >
                     Center ATM
@@ -1079,8 +1144,39 @@ const OptionsContent: React.FC = () => {
                   defaultLots={defaultLots}
                   priceSpikeThreshold={priceSpikeThreshold}
                   ivSpikeThreshold={ivSpikeThreshold}
+                  positionBySymbol={positionBySymbol}
                   onAddLeg={handleAddStrategyLeg}
                 />
+                <div className="option-chain-footer d-flex flex-wrap align-items-center gap-3 mt-3 pt-2 border-top">
+                  <button
+                    type="button"
+                    className="btn btn-primary btn-sm"
+                    onClick={handlePositionPayoffClick}
+                  >
+                    <i className="bi bi-graph-up me-1" />
+                    Position Payoff Diagram
+                  </button>
+                  {positionsError && !positionsNeedsCredentials && !positionsAuthExpired && (
+                    <span className="text-danger small">{positionsError}</span>
+                  )}
+                </div>
+                {positionPayoffEmptyMsg && (
+                  <div className="alert alert-info py-2 small mt-2 mb-0">{positionPayoffEmptyMsg}</div>
+                )}
+                {showPositionPayoff && canShowPositionPayoff && strategyPayoffUnderlying && (
+                  <PayoffChart
+                    legs={positionPayoffLegs}
+                    underlying={strategyPayoffUnderlying}
+                    spot={strategyPayoffSpot}
+                    title={`${selectedIndex} — Position Payoff (Live)`}
+                    className="mt-3"
+                    enhanced
+                    chain={optionChain.chain}
+                    atmStrike={optionChain.atm_strike ?? getATMStrike()}
+                    expiryDate={selectedExpiry}
+                    tradingDate={selectedDate}
+                  />
+                )}
               </div>
             </div>
           )}

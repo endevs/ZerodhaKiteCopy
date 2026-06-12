@@ -27,7 +27,7 @@
 }
 
 .option-chain-table .strike-col {
-  min-width: 72px;
+  min-width: 96px;
   font-weight: 600;
 }
 
@@ -205,6 +205,74 @@
 
 .spike-threshold-input {
   width: 4.5rem;
+}
+
+.strike-cell-inner {
+  display: grid;
+  grid-template-columns: 2.75rem 1fr 2.75rem;
+  align-items: center;
+  column-gap: 2px;
+}
+
+.strike-value {
+  grid-column: 2;
+  text-align: center;
+  justify-self: center;
+  font-weight: 600;
+}
+
+.strike-position-left {
+  grid-column: 1;
+  justify-self: end;
+}
+
+.strike-position-right {
+  grid-column: 3;
+  justify-self: start;
+}
+
+.position-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 0.65rem;
+  line-height: 1;
+  padding: 1px 3px;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+
+.position-badge-qty {
+  font-weight: 700;
+}
+
+.position-badge-side {
+  font-weight: 700;
+  font-size: 0.6rem;
+  padding: 0 2px;
+  border-radius: 2px;
+}
+
+.position-badge.side-buy {
+  color: #0d6efd;
+}
+
+.position-badge.side-buy .position-badge-side {
+  background: #0d6efd;
+  color: #fff;
+}
+
+.position-badge.side-sell {
+  color: #dc3545;
+}
+
+.position-badge.side-sell .position-badge-side {
+  background: #dc3545;
+  color: #fff;
+}
+
+.option-chain-footer {
+  border-color: #dee2e6 !important;
 }
 
 .option-chain-table td.spike-highlight {

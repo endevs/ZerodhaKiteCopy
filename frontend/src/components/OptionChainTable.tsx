@@ -8,6 +8,7 @@ import React, {
   forwardRef,
   useImperativeHandle,
 } from 'react';
+import { ChainPositionBadge } from '../lib/optionChainPositions';
 import { isIvSpike, isLtpSpike } from '../lib/optionChainSpike';
 import './OptionChainBoard.css';
 
@@ -62,6 +63,7 @@ interface OptionChainTableProps {
   onAddLeg?: (params: AddLegFromChainParams) => void;
   priceSpikeThreshold: number;
   ivSpikeThreshold: number;
+  positionBySymbol?: Map<string, ChainPositionBadge>;
 }
 
 const fmt = (v: number | null | undefined, d = 2) =>
@@ -92,6 +94,19 @@ const ltpColClass = (pct: number | null | undefined) => {
 const hasContract = (side: QuoteSide | null) =>
   !!(side?.instrument_token && side?.tradingsymbol);
 
+function PositionBadge({ badge }: { badge: ChainPositionBadge }) {
+  const sideClass = badge.side === 'B' ? 'side-buy' : 'side-sell';
+  return (
+    <span
+      className={`position-badge ${sideClass}`}
+      title={`${badge.tradingsymbol} — net qty ${badge.quantity}`}
+    >
+      <span className="position-badge-qty">{badge.absLots}</span>
+      <span className="position-badge-side">{badge.side}</span>
+    </span>
+  );
+}
+
 interface OptionChainRowProps {
   row: ChainRow;
   spot: number;
@@ -103,6 +118,7 @@ interface OptionChainRowProps {
   defaultLots: number;
   priceSpikeThreshold: number;
   ivSpikeThreshold: number;
+  positionBySymbol?: Map<string, ChainPositionBadge>;
   onMouseEnter: () => void;
   onSelectContract: OptionChainTableProps['onSelectContract'];
   onAddLeg?: OptionChainTableProps['onAddLeg'];
@@ -119,6 +135,7 @@ const OptionChainRow = memo(function OptionChainRow({
   defaultLots,
   priceSpikeThreshold,
   ivSpikeThreshold,
+  positionBySymbol,
   onMouseEnter,
   onSelectContract,
   onAddLeg,
@@ -248,6 +265,12 @@ const OptionChainRow = memo(function OptionChainRow({
   const peLtpSpike = isLtpSpike(row.pe?.ltp_chg_pct, priceSpikeThreshold);
   const peIvSpike = isIvSpike(row.pe?.iv_chg_pct, row.pe?.iv_chg, ivSpikeThreshold);
   const spikeClass = (active: boolean) => (active ? 'spike-highlight' : '');
+  const cePos = row.ce?.tradingsymbol
+    ? positionBySymbol?.get(row.ce.tradingsymbol)
+    : undefined;
+  const pePos = row.pe?.tradingsymbol
+    ? positionBySymbol?.get(row.pe.tradingsymbol)
+    : undefined;
 
   return (
     <tr
@@ -289,7 +312,17 @@ const OptionChainRow = memo(function OptionChainRow({
           {isHovered && renderRowActions(row.ce, row.strike, 'CE')}
         </div>
       </td>
-      <td className="text-center border-end strike-col">{row.strike}</td>
+      <td className="text-center border-end strike-col">
+        <div className="strike-cell-inner">
+          <span className="strike-position-slot strike-position-left">
+            {cePos ? <PositionBadge badge={cePos} /> : null}
+          </span>
+          <span className="strike-value">{row.strike}</span>
+          <span className="strike-position-slot strike-position-right">
+            {pePos ? <PositionBadge badge={pePos} /> : null}
+          </span>
+        </div>
+      </td>
       <td className={`put-side ${spikeClass(peIvSpike)}`}>
         {row.pe?.iv != null ? (
           <>
@@ -354,6 +387,7 @@ const OptionChainTable = forwardRef<OptionChainTableHandle, OptionChainTableProp
     onAddLeg,
     priceSpikeThreshold,
     ivSpikeThreshold,
+    positionBySymbol,
   },
   ref,
 ) {
@@ -456,6 +490,7 @@ const OptionChainTable = forwardRef<OptionChainTableHandle, OptionChainTableProp
               defaultLots={defaultLots}
               priceSpikeThreshold={priceSpikeThreshold}
               ivSpikeThreshold={ivSpikeThreshold}
+              positionBySymbol={positionBySymbol}
               onMouseEnter={() => setHoveredStrike(row.strike)}
               onSelectContract={onSelectContract}
               onAddLeg={onAddLeg}
